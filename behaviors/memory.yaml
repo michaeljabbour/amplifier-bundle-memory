@@ -1,0 +1,48 @@
+bundle:
+  name: memory-behavior
+  version: 0.1.0
+  description: Persistent memory capability with automatic capture, context injection, and event broadcast
+
+tools:
+  - module: tool-memory
+    source: git+https://github.com/michaeljabbour/amplifier-module-tool-memory@main
+    config:
+      storage_path: ~/.amplifier/memories.db
+      max_memories: 1000
+      enable_fts: true
+      enable_sessions: true
+
+hooks:
+  - module: hooks-memory-capture
+    source: git+https://github.com/michaeljabbour/amplifier-module-hooks-memory-capture@main
+    config:
+      min_content_length: 50
+      auto_summarize_interval: 10
+      priority: 150
+
+  - module: hooks-event-broadcast
+    source: git+https://github.com/michaeljabbour/amplifier-module-hooks-event-broadcast@main
+    config:
+      events:
+        - content_block:*
+        - tool:*
+        - orchestrator:complete
+        - session:*
+        - memory:*
+
+session:
+  memory_context:
+    module: context-memory
+    source: git+https://github.com/michaeljabbour/amplifier-module-context-memory@main
+    config:
+      index_limit: 50
+      lookback_days: 90
+      token_budget: 2000
+
+agents:
+  include:
+    - memory:memory-curator
+
+context:
+  include:
+    - memory:context/memory-instructions.md
