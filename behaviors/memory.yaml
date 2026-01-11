@@ -31,7 +31,7 @@ hooks:
         - memory:*
 
 session:
-  memory_context:
+  context:
     module: context-memory
     source: git+https://github.com/michaeljabbour/amplifier-module-context-memory@main
     config:

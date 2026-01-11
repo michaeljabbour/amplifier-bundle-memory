@@ -78,8 +78,8 @@ includes:
 
 ```yaml
 includes:
-  - bundle: git+https://github.com/michaeljabbour/amplifier-bundle-memory@main
-    path: behaviors/memory.yaml
+  - bundle: git+https://github.com/microsoft/amplifier-foundation@main
+  - bundle: git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#path=behaviors/memory.yaml
 ```
 
 ## Modules

@@ -54,6 +54,41 @@ Add concept classification for knowledge organization:
 4. **Update importance** - Boost frequently-referenced memories
 5. **Track gotchas explicitly** - Non-obvious pitfalls deserve manual `add_memory`
 
+## Example Usage
+
+### Explicit Decision Capture
+When the user makes an architectural decision, capture it explicitly:
+```
+User: Let's use SQLite instead of PostgreSQL for simplicity
+AI: [Uses add_memory with type="decision", concepts=["trade-off"]]
+    "Stored decision: Chose SQLite over PostgreSQL for simplicity"
+```
+
+### Searching Before Re-discovering
+Before exploring code to answer a question, check existing memories:
+```
+User: How does the auth flow work?
+AI: [Uses search_memories with "auth flow" before exploring code]
+    "Found existing memory: Auth flow uses JWT tokens with 24h expiry..."
+```
+
+### Recording a Gotcha
+When you discover a non-obvious pitfall:
+```
+User: Why did that test fail?
+AI: [After debugging] The config parser silently ignores invalid keys.
+    [Uses add_memory with type="discovery", concepts=["gotcha"]]
+    "Recorded gotcha for future reference"
+```
+
+### File-Specific Context
+When working on a file, check what's known about it:
+```
+User: Let's refactor utils.py
+AI: [Uses get_file_context for utils.py]
+    "Found 3 previous observations about this file, including a known gotcha..."
+```
+
 ## Available Agent
 
 - **memory-curator**: For reviewing, organizing, and maintaining memories. Delegate to this agent when users ask about what has been learned, want to clean up memories, or need pattern analysis across observations.
