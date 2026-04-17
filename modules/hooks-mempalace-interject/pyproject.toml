@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amplifier-module-hooks-mempalace-interject"
+version = "1.0.0"
+description = "Amplifier hook that surfaces relevant memories mid-session at the right moment"
+requires-python = ">=3.11"
+dependencies = [
+    "amplifier-core",
+    "chromadb>=0.4.0",
+    "openai>=1.0.0",
+]
+
+[project.entry-points."amplifier.modules"]
+hooks-mempalace-interject = "amplifier_module_hooks_mempalace_interject"

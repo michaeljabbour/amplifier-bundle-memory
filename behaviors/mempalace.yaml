@@ -1,0 +1,110 @@
+bundle:
+  name: mempalace-behavior
+  version: 1.2.0
+  description: |
+    Wires the full memory stack: MemPalace semantic storage, project-context
+    coordination files, knowledge graph, session briefing, automatic
+    capture hooks, and mid-session memory interjection. Deduplication notes:
+      - context/instructions.md is injected here only (not again in bundle.md body)
+      - tool-skills is inherited from foundation; not re-declared here
+      - hooks-memory-capture is superseded by hooks-mempalace-capture (which
+        handles both heuristic flagging and verbatim palace filing in one pass)
+      - session briefing is handled by hooks-mempalace-briefing only;
+        the Archivist agent is invoked on-demand, not at session:start
+
+# ── Context ───────────────────────────────────────────────────────────────────
+context:
+  include:
+    - mempalace:context/instructions.md
+    - mempalace:context/project-context-guide.md
+
+# ── Hooks ─────────────────────────────────────────────────────────────────────
+hooks:
+  # Verbatim capture on tool:post — auto-detects wing (git remote) and room
+  # (tool/file context), deduplicates, and files directly into the palace.
+  # Replaces the separate hooks-memory-capture (heuristic-only) module.
+  - module: hooks-mempalace-capture
+    source: mempalace:modules/hooks-mempalace-capture
+    config:
+      auto_wing: true
+      auto_room: true
+      silent: true
+      categories:
+        - decision
+        - architecture
+        - blocker
+        - resolved_blocker
+        - dependency
+        - pattern
+        - lesson_learned
+
+  # Session start: injects ephemeral wake-up briefing (palace search + KG + diary).
+  # Session end: Curator agent handles HANDOFF.md update and palace curation.
+  - module: hooks-mempalace-briefing
+    source: mempalace:modules/hooks-mempalace-briefing
+    config:
+      token_budget: 1500
+      include_kg: true
+      include_diary: true
+      include_project_context: true   # also reads HANDOFF.md + PROJECT_CONTEXT.md
+      ephemeral: true
+
+  # Reads project-context coordination files at session:start and updates
+  # HANDOFF.md at session:end. Integrates the project-context system natively.
+  - module: hooks-project-context
+    source: mempalace:modules/hooks-project-context
+    config:
+      tier1_always: true              # always read PROJECT_CONTEXT.md + GLOSSARY.md
+      handoff_on_end: true            # update HANDOFF.md at session:end
+      setup_if_missing: true          # scaffold project-context/ if not present
+
+  # Mid-session OR-firing hook: surfaces relevant memories at the right moment.
+  # Fires on prompt:submit, tool:pre, and orchestrator:complete.
+  # Uses cosine similarity (primary) + LLM judge (uncertain band) for relevance.
+  # ephemeral=True keeps injections out of conversation history.
+  # Per-turn guard flag prevents infinite loops on orchestrator:complete.
+  # Designed from Amplifier expert consultation (priority 20, cooldown 3 turns).
+  - module: hooks-mempalace-interject
+    source: mempalace:modules/hooks-mempalace-interject
+    config:
+      cosine_threshold: 0.72
+      uncertain_band: 0.10
+      max_inject_chars: 800
+      cooldown_turns: 3
+      prompt_enabled: true
+      tool_pre_enabled: true
+      orc_enabled: true
+      palace_collection: mempalace_default
+
+  # Per-project session isolation — each project gets its own session history.
+  - module: hooks-project-isolation
+    source: git+https://github.com/michaeljabbour/amplifier-module-hooks-project-isolation@main
+    config:
+      enabled: true
+
+# ── Tools ─────────────────────────────────────────────────────────────────────
+tools:
+  # High-level palace tool: search, remember, kg, traverse, diary, mine.
+  # This is the primary memory interface; tool-memory handles explicit facts.
+  - module: tool-mempalace
+    source: mempalace:modules/tool-mempalace
+    config:
+      palace_path: "~/.mempalace"
+
+  # SQLite fact store for explicit key-value memories the palace doesn't need.
+  # Complementary to tool-mempalace — not duplicative (different retrieval model).
+  - module: tool-memory
+    source: git+https://github.com/michaeljabbour/amplifier-module-tool-memory@main
+    config:
+      backend: sqlite
+      db_path: "~/.amplifier/memory.db"
+      max_memories: 1000
+
+  # NOTE: tool-skills is inherited from foundation. Not re-declared here.
+  # The mempalace skill is registered via the skills/ directory in this bundle.
+
+# ── Agents ────────────────────────────────────────────────────────────────────
+agents:
+  include:
+    - mempalace:archivist    # on-demand read path: search, KG, graph traversal
+    - mempalace:curator      # on-demand write path: curation, dedup, KG updates

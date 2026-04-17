@@ -1,0 +1,23 @@
+[project]
+name = "amplifier-module-hooks-mempalace-capture"
+version = "1.0.0"
+description = "Amplifier hook module — automatically files verbatim tool outputs as MemPalace drawers with auto-detected wing and room"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Michael Jabbour" },
+]
+dependencies = [
+    "amplifier-core>=0.1.0",
+    "mempalace>=3.3.0",
+]
+
+[project.entry-points."amplifier.modules"]
+hooks-mempalace-capture = "amplifier_module_hooks_mempalace_capture:mount"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["amplifier_module_hooks_mempalace_capture"]
