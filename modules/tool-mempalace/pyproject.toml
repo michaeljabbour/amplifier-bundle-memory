@@ -1,6 +1,6 @@
 [project]
 name = "amplifier-module-tool-mempalace"
-version = "1.1.0"
+version = "1.2.0"
 description = "High-level Amplifier tool module for MemPalace — palace search, remember, knowledge graph, traverse, diary, mine, and events operations"
 readme = "README.md"
 requires-python = ">=3.11"

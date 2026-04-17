@@ -18,6 +18,7 @@ through the MCP integration in the bundle behavior.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -25,7 +26,11 @@ from typing import Any
 
 from amplifier_core import Tool, ToolResult  # type: ignore
 
-from .event_emitter import _read_events_with_skip_count
+from .event_emitter import _read_events_with_skip_count, emit_event
+from .garden import execute_garden
+
+# Hard wall-clock budget for garden operations. Patchable in tests.
+_GARDEN_TIMEOUT_S: float = 120.0
 
 
 PALACE_PATH = Path.home() / ".mempalace"
@@ -52,7 +57,7 @@ class PalaceTool(Tool):
     name = "palace"
     description = (
         "MemPalace memory operations. Operations: search, remember, status, "
-        "kg (knowledge graph), traverse, diary, mine, events."
+        "kg (knowledge graph), traverse, diary, mine, events, garden."
     )
     parameters = {
         "type": "object",
@@ -68,6 +73,7 @@ class PalaceTool(Tool):
                     "diary",
                     "mine",
                     "events",
+                    "garden",
                 ],
                 "description": "The palace operation to perform.",
             },
@@ -180,6 +186,31 @@ class PalaceTool(Tool):
                     "If false, return the oldest N events. For 'events' operation."
                 ),
                 "default": True,
+            },
+            # Garden parameters
+            "lookback_days": {
+                "type": "integer",
+                "description": (
+                    "Only analyze drawers added in the last N days (garden operation). "
+                    "Default: 90."
+                ),
+                "default": 90,
+            },
+            "max_drawers": {
+                "type": "integer",
+                "description": (
+                    "Budget cap: max drawers to analyze per garden run. "
+                    "Default 200, hard cap 500."
+                ),
+                "default": 200,
+            },
+            "cluster_threshold": {
+                "type": "number",
+                "description": (
+                    "Cosine similarity threshold for clustering (garden operation). "
+                    "Default: 0.80."
+                ),
+                "default": 0.80,
             },
         },
         "required": ["operation"],
@@ -325,6 +356,90 @@ class PalaceTool(Tool):
                     "events": page,
                 }
                 return ToolResult(output=json.dumps(result_obj, indent=2))
+
+            elif operation == "garden":
+                # On-demand deep analysis: cluster detection + KG enrichment.
+                # Clamp max_drawers to [1, 500]; default 200.
+                raw_max: int = int(kwargs.get("max_drawers", 200))
+                max_drawers_clamped = max(1, min(raw_max, 500))
+
+                # Total operation timeout: execute_garden is sync but makes many
+                # MCP subprocess calls. Wrap in asyncio.to_thread so we can
+                # enforce a hard wall-clock budget via asyncio.wait_for.
+                #
+                # NOTE: asyncio.wait_for cancels the Task, not the thread. The
+                # underlying execute_garden thread continues running after
+                # TimeoutError — worst-case ~37min of background _mcp_call
+                # activity if the palace is slow. This is acceptable because:
+                #   (a) each _mcp_call has a 15s per-call timeout bounding
+                #       the worst-case background activity
+                #   (b) garden is a non-interactive background operation —
+                #       the caller gets a timely response and the thread will
+                #       eventually complete on its own
+                # Do NOT treat the 120s wall-clock budget as a hard resource
+                # bound; treat it as a response-time guarantee to the caller.
+                try:
+                    garden_result = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            execute_garden,
+                            wing=kwargs.get("wing"),
+                            room=kwargs.get("room"),
+                            lookback_days=int(kwargs.get("lookback_days", 90)),
+                            max_drawers=max_drawers_clamped,
+                            cluster_threshold=float(
+                                kwargs.get("cluster_threshold", 0.80)
+                            ),
+                            emit_fn=emit_event,
+                            session_id=kwargs.get("session_id"),
+                        ),
+                        timeout=_GARDEN_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    # Emit garden_completed(ok=False) so observability tools see
+                    # timed-out runs alongside successful ones.
+                    try:
+                        emit_event(
+                            "tool-mempalace",
+                            "garden_completed",
+                            ok=False,
+                            data={
+                                "scope_wing": kwargs.get("wing"),
+                                "scope_room": kwargs.get("room"),
+                                "drawers_analyzed": 0,
+                                "clusters_found": 0,
+                                "kg_edges_created": 0,
+                                "timed_out": True,
+                            },
+                            session_id=kwargs.get("session_id"),
+                        )
+                    except Exception:
+                        pass  # never let event emission failure crash the error path
+                    return ToolResult(
+                        success=False,
+                        error={
+                            "message": (
+                                f"Garden operation timed out (>{_GARDEN_TIMEOUT_S}s). "
+                                "Consider reducing max_drawers or scoping to a specific room."
+                            )
+                        },
+                    )
+
+                # Emit garden_completed event (CP1 spec Section 2)
+                emit_event(
+                    "tool-mempalace",
+                    "garden_completed",
+                    ok=True,
+                    data={
+                        "scope_wing": kwargs.get("wing"),
+                        "scope_room": kwargs.get("room"),
+                        "drawers_analyzed": garden_result["drawers_analyzed"],
+                        "clusters_found": len(garden_result["clusters"]),
+                        "kg_edges_created": garden_result["kg_edges_created"],
+                    },
+                    session_id=kwargs.get("session_id"),
+                )
+
+                return ToolResult(output=json.dumps(garden_result, indent=2))
 
             else:
                 return ToolResult(
