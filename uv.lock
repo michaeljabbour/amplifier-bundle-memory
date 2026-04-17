@@ -5,7 +5,7 @@ requires-python = ">=3.11"
 [[package]]
 name = "amplifier-bundle-memory-tests"
 version = "0.0.0"
-source = { virtual = "." }
+source = { editable = "." }
 
 [package.dev-dependencies]
 dev = [

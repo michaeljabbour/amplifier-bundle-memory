@@ -1,9 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "amplifier-bundle-memory-tests"
 version = "0.0.0"
 description = "Bundle-level integration test runner"
 requires-python = ">=3.11"
 dependencies = []
+
+[tool.setuptools]
+# Root pyproject exists only for pytest/pyright config at the bundle level.
+# No Python package lives at the repo root — all code is in modules/*/ with
+# their own pyproject.toml files. Declare no top-level packages so setuptools
+# doesn't try to auto-discover and get confused by agents/, behaviors/,
+# context/, modules/, skills/ as "flat-layout packages".
+packages = []
 
 [dependency-groups]
 dev = [
