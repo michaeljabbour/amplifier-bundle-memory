@@ -4,14 +4,33 @@ build-backend = "hatchling.build"
 
 [project]
 name = "amplifier-module-hooks-mempalace-interject"
-version = "1.0.0"
+version = "1.1.0"
 description = "Amplifier hook that surfaces relevant memories mid-session at the right moment"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "amplifier-core",
     "chromadb>=0.4.0",
     "openai>=1.0.0",
+    "amplifier-module-tool-mempalace>=1.0.0",
 ]
 
 [project.entry-points."amplifier.modules"]
 hooks-mempalace-interject = "amplifier_module_hooks_mempalace_interject"
+
+[tool.uv.sources]
+amplifier-module-tool-mempalace = { path = "../tool-mempalace", editable = true }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.1",
+    "pyright>=1.1",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = false
+reportGeneralTypeIssues = false
+# Pre-existing: chromadb QueryResult fields can be None; guarded by try/except in code
+reportOptionalSubscript = false

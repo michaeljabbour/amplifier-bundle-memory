@@ -24,14 +24,12 @@ Configuration keys (all optional):
   prompt_enabled:   bool  = True   # enable prompt:submit handler
   orc_enabled:      bool  = True   # enable orchestrator:complete handler
   palace_collection: str  = "mempalace_default"  # ChromaDB collection name
+  emit_events:      bool  = True   # emit JSONL events
 """
+
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import os
-import time
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +52,15 @@ except ImportError:
         ORCHESTRATOR_COMPLETE = "orchestrator:complete"
         CONTEXT_PRE_COMPACT = "context:pre_compact"
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+
+try:
+    from amplifier_module_tool_mempalace.event_emitter import emit_event
+except ImportError:
+
+    def emit_event(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        pass
+
+# ── Constants ────────────────────────────────────────────────────────────────
 
 DEFAULT_COSINE_THRESHOLD = 0.72
 DEFAULT_UNCERTAIN_BAND = 0.10
@@ -62,7 +68,8 @@ DEFAULT_MAX_INJECT_CHARS = 800
 DEFAULT_COOLDOWN_TURNS = 3
 DEFAULT_COLLECTION = "mempalace_default"
 
-# ── Embedding helper ──────────────────────────────────────────────────────────
+# ── Embedding helper ─────────────────────────────────────────────────────────
+
 
 def _embed(text: str) -> list[float]:
     """Embed text using the OpenAI embeddings API (text-embedding-3-small).
@@ -71,6 +78,7 @@ def _embed(text: str) -> list[float]:
     """
     try:
         from openai import OpenAI  # type: ignore
+
         client = OpenAI()
         resp = client.embeddings.create(
             model="text-embedding-3-small",
@@ -93,7 +101,8 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-# ── LLM judge ─────────────────────────────────────────────────────────────────
+# ── LLM judge ────────────────────────────────────────────────────────────────
+
 
 async def _llm_judge(query: str, memory_text: str) -> float:
     """Ask a fast LLM to score the relevance of a memory to the current query.
@@ -102,6 +111,7 @@ async def _llm_judge(query: str, memory_text: str) -> float:
     """
     try:
         from openai import AsyncOpenAI  # type: ignore
+
         client = AsyncOpenAI()
         prompt = (
             "Rate how relevant this memory is to the current query. "
@@ -115,13 +125,14 @@ async def _llm_judge(query: str, memory_text: str) -> float:
             max_tokens=5,
             temperature=0,
         )
-        score_str = resp.choices[0].message.content.strip()
+        score_str = (resp.choices[0].message.content or "").strip()
         return min(1.0, max(0.0, float(score_str)))
     except Exception:
         return 0.0
 
 
 # ── ChromaDB retrieval ────────────────────────────────────────────────────────
+
 
 def _retrieve_memories(
     query_embedding: list[float],
@@ -136,6 +147,7 @@ def _retrieve_memories(
         return []
     try:
         import chromadb  # type: ignore
+
         palace_dir = Path.home() / ".mempalace" / "chroma"
         client = chromadb.PersistentClient(path=str(palace_dir))
         try:
@@ -157,12 +169,14 @@ def _retrieve_memories(
             # For normalized embeddings: cosine_sim ≈ 1 - (dist² / 2)
             dist = dists[i] if i < len(dists) else 1.0
             score = max(0.0, 1.0 - dist / 2.0)
-            memories.append({
-                "id": ids[i] if i < len(ids) else f"mem_{i}",
-                "text": doc,
-                "score": score,
-                "metadata": metas[i] if i < len(metas) else {},
-            })
+            memories.append(
+                {
+                    "id": ids[i] if i < len(ids) else f"mem_{i}",
+                    "text": doc,
+                    "score": score,
+                    "metadata": metas[i] if i < len(metas) else {},
+                }
+            )
         return memories
     except Exception:
         return []
@@ -170,7 +184,10 @@ def _retrieve_memories(
 
 # ── Injection formatter ───────────────────────────────────────────────────────
 
-def _format_injection(memories: list[dict[str, Any]], event: str, max_chars: int) -> str:
+
+def _format_injection(
+    memories: list[dict[str, Any]], event: str, max_chars: int
+) -> str:
     """Format retrieved memories into a concise injection block."""
     if not memories:
         return ""
@@ -196,7 +213,8 @@ def _format_injection(memories: list[dict[str, Any]], event: str, max_chars: int
     return "\n".join(parts)
 
 
-# ── Main hook class ───────────────────────────────────────────────────────────
+# ── Main hook class ────────────────────────────────────────────────────────────
+
 
 class MempalaceInterjectHook:
     """OR-firing hook that injects relevant memories at the right moment.
@@ -223,6 +241,7 @@ class MempalaceInterjectHook:
         self.prompt_enabled: bool = bool(config.get("prompt_enabled", True))
         self.tool_pre_enabled: bool = bool(config.get("tool_pre_enabled", True))
         self.orc_enabled: bool = bool(config.get("orc_enabled", True))
+        self.emit_events: bool = bool(config.get("emit_events", True))
 
         # Per-turn guard flag: prevents re-injection in the same orchestrator run
         self._injected_this_turn: bool = False
@@ -245,76 +264,128 @@ class MempalaceInterjectHook:
 
     async def _retrieve_and_gate(
         self, query: str, event: str
-    ) -> tuple[list[dict[str, Any]], bool]:
+    ) -> tuple[list[dict[str, Any]], bool, str, bool]:
         """Retrieve memories and decide whether to inject.
 
-        Returns (memories_to_inject, should_inject).
+        Returns (memories_to_inject, should_inject, skip_reason, judge_used).
+        skip_reason is only meaningful when should_inject is False.
         """
         # Embed the query
         query_embedding = await asyncio.get_event_loop().run_in_executor(
             None, _embed, query
         )
         if not query_embedding:
-            return [], False
+            return [], False, "no_embedding", False
 
         # Retrieve top candidates
         candidates = _retrieve_memories(query_embedding, self.collection, n_results=5)
         if not candidates:
-            return [], False
+            return [], False, "below_threshold", False
 
         # Filter out already-briefed and on-cooldown memories
         candidates = [
-            m for m in candidates
+            m
+            for m in candidates
             if m["id"] not in self._briefed_ids and not self._is_on_cooldown(m["id"])
         ]
         if not candidates:
-            return [], False
+            return [], False, "cooldown", False
 
         # Primary gate: cosine similarity threshold
         above_threshold = [m for m in candidates if m["score"] >= self.cosine_threshold]
         uncertain = [
-            m for m in candidates
-            if self.cosine_threshold - self.uncertain_band <= m["score"] < self.cosine_threshold
+            m
+            for m in candidates
+            if self.cosine_threshold - self.uncertain_band
+            <= m["score"]
+            < self.cosine_threshold
         ]
 
+        judge_used = False
         # Secondary gate: LLM judge for uncertain-band memories
         if uncertain:
             judge_tasks = [_llm_judge(query, m["text"]) for m in uncertain]
             judge_scores = await asyncio.gather(*judge_tasks)
+            judge_used = True
             for mem, js in zip(uncertain, judge_scores):
                 if js >= 0.7:  # LLM judge threshold
                     above_threshold.append(mem)
 
         if not above_threshold:
-            return [], False
+            return [], False, "below_threshold", judge_used
 
         # Take top 2 by score
         top = sorted(above_threshold, key=lambda m: m["score"], reverse=True)[:2]
-        return top, True
+        return top, True, "", judge_used
 
-    # ── Event handlers ─────────────────────────────────────────────────────────
+    # ── Event handlers ────────────────────────────────────────────────────────
 
-    async def on_prompt_submit(
-        self, event: str, data: dict[str, Any]
-    ) -> HookResult:
+    async def on_prompt_submit(self, event: str, data: dict[str, Any]) -> HookResult:
         """Fire on prompt:submit — inject before the LLM sees the user's prompt."""
+        sid = data.get("session_id")
+
         if not self.prompt_enabled:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={"trigger": "prompt_submit", "reason": "disabled"},
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
         prompt_text = data.get("prompt", "") or data.get("content", "")
         if not prompt_text or len(prompt_text) < 20:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={"trigger": "prompt_submit", "reason": "too_short"},
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
         # Reset per-turn guard (new user prompt = new turn)
         self._injected_this_turn = False
 
-        memories, should_inject = await self._retrieve_and_gate(prompt_text, event)
+        (
+            memories,
+            should_inject,
+            skip_reason,
+            judge_used,
+        ) = await self._retrieve_and_gate(prompt_text, event)
         if not should_inject:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={"trigger": "prompt_submit", "reason": skip_reason},
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
         injection = _format_injection(memories, event, self.max_inject_chars)
         self._mark_injected([m["id"] for m in memories])
         self._injected_this_turn = True
+
+        if self.emit_events:
+            top_score = max(m["score"] for m in memories) if memories else 0.0
+            emit_event(
+                "mempalace-interject",
+                "memory_surfaced",
+                ok=True,
+                preview=injection[:100] if injection else None,
+                data={
+                    "trigger": "prompt_submit",
+                    "memory_ids": [m["id"] for m in memories],
+                    "top_score": top_score,
+                    "judge_used": judge_used,
+                },
+                session_id=sid,
+            )
 
         return HookResult(
             action="inject_context",
@@ -323,11 +394,19 @@ class MempalaceInterjectHook:
             ephemeral=True,  # safe default: don't persist in conversation history
         )
 
-    async def on_tool_pre(
-        self, event: str, data: dict[str, Any]
-    ) -> HookResult:
+    async def on_tool_pre(self, event: str, data: dict[str, Any]) -> HookResult:
         """Fire on tool:pre — surface prior results for the same tool+input."""
+        sid = data.get("session_id")
+
         if not self.tool_pre_enabled:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={"trigger": "tool_pre", "reason": "disabled"},
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
         tool_name = data.get("tool_name", "")
@@ -341,14 +420,51 @@ class MempalaceInterjectHook:
         query = " ".join(query_parts)
 
         if len(query) < 15:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={"trigger": "tool_pre", "reason": "too_short"},
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
-        memories, should_inject = await self._retrieve_and_gate(query, event)
+        (
+            memories,
+            should_inject,
+            skip_reason,
+            judge_used,
+        ) = await self._retrieve_and_gate(query, event)
         if not should_inject:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={"trigger": "tool_pre", "reason": skip_reason},
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
         injection = _format_injection(memories, event, self.max_inject_chars)
         self._mark_injected([m["id"] for m in memories])
+
+        if self.emit_events:
+            top_score = max(m["score"] for m in memories) if memories else 0.0
+            emit_event(
+                "mempalace-interject",
+                "memory_surfaced",
+                ok=True,
+                preview=injection[:100] if injection else None,
+                data={
+                    "trigger": "tool_pre",
+                    "memory_ids": [m["id"] for m in memories],
+                    "top_score": top_score,
+                    "judge_used": judge_used,
+                },
+                session_id=sid,
+            )
 
         return HookResult(
             action="inject_context",
@@ -366,41 +482,116 @@ class MempalaceInterjectHook:
         skip. The turn counter is incremented here.
         """
         self._turn += 1
+        sid = data.get("session_id")
 
         if not self.orc_enabled:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={"trigger": "orchestrator_complete", "reason": "disabled"},
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
         # Infinite loop guard: skip if we already injected this turn
         if self._injected_this_turn:
             self._injected_this_turn = False  # reset for next turn
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={"trigger": "orchestrator_complete", "reason": "guard_flag"},
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
         # Extract the LLM's response text
         response = data.get("response", "") or data.get("content", "")
         if not response or len(response) < 50:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={"trigger": "orchestrator_complete", "reason": "too_short"},
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
         # Only check for contradictions — use a higher threshold
-        memories, should_inject = await self._retrieve_and_gate(response, event)
+        (
+            memories,
+            should_inject,
+            skip_reason,
+            judge_used,
+        ) = await self._retrieve_and_gate(response, event)
         if not should_inject:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={"trigger": "orchestrator_complete", "reason": skip_reason},
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
         # Extra filter: only inject if a memory explicitly contradicts the response
         # (heuristic: look for negation keywords in the memory vs. the response)
         contradiction_keywords = [
-            "failed", "error", "don't", "avoid", "never", "broken",
-            "deprecated", "removed", "changed", "wrong", "incorrect",
+            "failed",
+            "error",
+            "don't",
+            "avoid",
+            "never",
+            "broken",
+            "deprecated",
+            "removed",
+            "changed",
+            "wrong",
+            "incorrect",
         ]
         contradicting = [
-            m for m in memories
+            m
+            for m in memories
             if any(kw in m["text"].lower() for kw in contradiction_keywords)
         ]
         if not contradicting:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-interject",
+                    "interject_skipped",
+                    ok=False,
+                    data={
+                        "trigger": "orchestrator_complete",
+                        "reason": "below_threshold",
+                    },
+                    session_id=sid,
+                )
             return HookResult(action="continue")
 
         injection = _format_injection(contradicting, event, self.max_inject_chars)
         self._mark_injected([m["id"] for m in contradicting])
         self._injected_this_turn = True
+
+        if self.emit_events:
+            top_score = max(m["score"] for m in contradicting) if contradicting else 0.0
+            emit_event(
+                "mempalace-interject",
+                "memory_surfaced",
+                ok=True,
+                preview=injection[:100] if injection else None,
+                data={
+                    "trigger": "orchestrator_complete",
+                    "memory_ids": [m["id"] for m in contradicting],
+                    "top_score": top_score,
+                    "judge_used": judge_used,
+                },
+                session_id=sid,
+            )
 
         return HookResult(
             action="inject_context",
@@ -411,6 +602,7 @@ class MempalaceInterjectHook:
 
 
 # ── Module mount ──────────────────────────────────────────────────────────────
+
 
 async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
@@ -446,7 +638,7 @@ async def mount(
 
     return {
         "name": "hooks-mempalace-interject",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "description": (
             "OR-firing memory interjection hook: surfaces relevant memories "
             "on prompt:submit, tool:pre, and orchestrator:complete"

@@ -25,10 +25,38 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from amplifier_core import Hook, HookContext  # type: ignore
+try:
+    from amplifier_core import Hook, HookContext  # type: ignore
+except ImportError:
+    # Graceful degradation when running outside Amplifier (e.g., tests)
+    class Hook:  # type: ignore
+        name: str = ""
+        events: list[str] = []
+
+        def __init__(self, config: dict[str, Any] | None = None) -> None:
+            pass
+
+    class HookContext:  # type: ignore
+        def __init__(self, event: dict[str, Any] | None = None) -> None:
+            self.event: dict[str, Any] = event or {}
+            self.session_id: str | None = None
+
+        def inject_context(self, content: str, *, ephemeral: bool = True) -> None:
+            pass
+
+        def delegate_to_agent(self, agent: str, *, prompt: str) -> None:
+            pass
 
 
-# ── Template stubs ─────────────────────────────────────────────────────────────
+try:
+    from amplifier_module_tool_mempalace.event_emitter import emit_event
+except ImportError:
+
+    def emit_event(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        pass
+
+
+# ── Template stubs ────────────────────────────────────────────────────────────
 
 _AGENTS_MD = """\
 # Agent Instructions
@@ -126,14 +154,17 @@ _HANDOFF_STUB = f"""\
 """
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _find_git_root() -> Path | None:
     """Find the git root from cwd."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             return Path(result.stdout.strip())
@@ -154,8 +185,11 @@ def _find_project_context_dir() -> Path | None:
     return None
 
 
-def _scaffold_project_context(git_root: Path) -> Path:
-    """Scaffold a minimal project-context/ directory at the git root."""
+def _scaffold_project_context(git_root: Path) -> tuple[Path, list[str]]:
+    """Scaffold a minimal project-context/ directory at the git root.
+
+    Returns (pc_dir, list_of_created_files).
+    """
     pc_dir = git_root / "project-context"
     pc_dir.mkdir(exist_ok=True)
 
@@ -164,23 +198,27 @@ def _scaffold_project_context(git_root: Path) -> Path:
         "GLOSSARY.md": _GLOSSARY_STUB,
         "HANDOFF.md": _HANDOFF_STUB,
     }
+    files_created: list[str] = []
     for filename, content in stubs.items():
         path = pc_dir / filename
         if not path.exists():
             path.write_text(content, encoding="utf-8")
+            files_created.append(str(path))
 
     # Write AGENTS.md at the git root if not present
     agents_path = git_root / "AGENTS.md"
     if not agents_path.exists():
         agents_path.write_text(_AGENTS_MD, encoding="utf-8")
+        files_created.append(str(agents_path))
 
-    return pc_dir
+    return pc_dir, files_created
 
 
-def _read_tier1(pc_dir: Path, token_budget: int) -> str:
-    """Read Tier 1 coordination files and return a formatted context block."""
+def _read_tier1(pc_dir: Path, token_budget: int) -> tuple[str, list[str], int]:
+    """Read Tier 1 coordination files and return (content, files_read, token_estimate)."""
     sections: list[str] = []
     budget = token_budget
+    files_read: list[str] = []
 
     tier1 = [
         ("HANDOFF.md", "### Last Session Handoff"),
@@ -202,15 +240,19 @@ def _read_tier1(pc_dir: Path, token_budget: int) -> str:
             content = content[:max_chars] + "\n…(truncated)"
         section = f"{header}\n\n{content}"
         sections.append(section)
+        files_read.append(str(path))
         budget -= len(section) // 4
 
     if not sections:
-        return ""
+        return "", [], 0
 
-    return "## Project Coordination Files\n\n" + "\n\n---\n\n".join(sections)
+    result = "## Project Coordination Files\n\n" + "\n\n---\n\n".join(sections)
+    token_estimate = len(result) // 4
+    return result, files_read, token_estimate
 
 
-# ── Hook classes ───────────────────────────────────────────────────────────────
+# ── Hook classes ─────────────────────────────────────────────────────────────
+
 
 class ProjectContextStartHook(Hook):
     name = "hooks-project-context-start"
@@ -221,22 +263,47 @@ class ProjectContextStartHook(Hook):
         self.tier1_always: bool = self.config.get("tier1_always", True)
         self.setup_if_missing: bool = self.config.get("setup_if_missing", True)
         self.token_budget: int = self.config.get("token_budget", 800)
+        self.emit_events: bool = bool(self.config.get("emit_events", True))
 
     async def handle(self, ctx: HookContext) -> None:  # type: ignore[override]
+        sid = getattr(ctx, "session_id", None) or ctx.event.get("session_id")
+
         pc_dir = _find_project_context_dir()
 
         if pc_dir is None and self.setup_if_missing:
             git_root = _find_git_root()
             if git_root:
-                pc_dir = _scaffold_project_context(git_root)
+                pc_dir, files_created = _scaffold_project_context(git_root)
+                if self.emit_events and files_created:
+                    emit_event(
+                        "project-context",
+                        "coordination_scaffolded",
+                        ok=True,
+                        data={
+                            "pc_dir": str(pc_dir),
+                            "files_created": files_created,
+                        },
+                        session_id=sid,
+                    )
 
         if pc_dir is None:
             return
 
         if self.tier1_always:
-            block = _read_tier1(pc_dir, self.token_budget)
+            block, files_read, token_estimate = _read_tier1(pc_dir, self.token_budget)
             if block:
                 ctx.inject_context(block, ephemeral=True)
+                if self.emit_events:
+                    emit_event(
+                        "project-context",
+                        "coordination_read",
+                        ok=True,
+                        data={
+                            "files_read": files_read,
+                            "token_estimate": token_estimate,
+                        },
+                        session_id=sid,
+                    )
 
 
 class ProjectContextEndHook(Hook):
@@ -246,6 +313,7 @@ class ProjectContextEndHook(Hook):
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = config or {}
         self.handoff_on_end: bool = self.config.get("handoff_on_end", True)
+        self.emit_events: bool = bool(self.config.get("emit_events", True))
 
     async def handle(self, ctx: HookContext) -> None:  # type: ignore[override]
         if not self.handoff_on_end:
@@ -255,18 +323,30 @@ class ProjectContextEndHook(Hook):
         if pc_dir is None:
             return
 
+        sid = getattr(ctx, "session_id", None) or ctx.event.get("session_id")
+
         # Delegate to the Curator agent to update coordination files.
         # The Curator has the full session context and knows what to write.
+        prompt = (
+            "Update the project-context coordination files for this session. "
+            "Rewrite HANDOFF.md with what was accomplished, what is blocked, "
+            "and what the next session should start with. "
+            "Append to PROVENANCE.md, GLOSSARY.md, and WAYSOFWORKING.md "
+            "if any decisions, terms, or patterns emerged."
+        )
         ctx.delegate_to_agent(
             "mempalace:curator",
-            prompt=(
-                "Update the project-context coordination files for this session. "
-                "Rewrite HANDOFF.md with what was accomplished, what is blocked, "
-                "and what the next session should start with. "
-                "Append to PROVENANCE.md, GLOSSARY.md, and WAYSOFWORKING.md "
-                "if any decisions, terms, or patterns emerged."
-            ),
+            prompt=prompt,
         )
+
+        if self.emit_events:
+            emit_event(
+                "project-context",
+                "curator_delegated",
+                ok=True,
+                data={"prompt_preview": prompt[:200]},
+                session_id=sid,
+            )
 
 
 def mount() -> list[Hook]:

@@ -24,10 +24,39 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from amplifier_core import Hook, HookContext, mount_hook  # type: ignore
+try:
+    from amplifier_core import Hook, HookContext, mount_hook  # type: ignore
+except ImportError:
+    # Graceful degradation when running outside Amplifier (e.g., tests)
+    class Hook:  # type: ignore
+        name: str = ""
+        events: list[str] = []
+
+        def __init__(self, config: dict[str, Any] | None = None) -> None:
+            pass
+
+    class HookContext:  # type: ignore
+        def __init__(self, event: dict[str, Any] | None = None) -> None:
+            self.event: dict[str, Any] = event or {}
+            self.session_id: str | None = None
+
+        def inject_context(self, content: str, *, ephemeral: bool = True) -> None:
+            pass
+
+    def mount_hook(*args: Any, **kwargs: Any) -> None:  # type: ignore
+        pass
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+try:
+    from amplifier_module_tool_mempalace.event_emitter import emit_event
+except ImportError:
+
+    def emit_event(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        pass
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
 
 def _mcp_call(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     """Call a MemPalace MCP tool via the CLI."""
@@ -35,7 +64,9 @@ def _mcp_call(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     try:
         result = subprocess.run(
             ["mempalace", "mcp", "--call", payload],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
         if result.returncode == 0:
             return json.loads(result.stdout)
@@ -49,7 +80,9 @@ def _detect_project_name() -> str:
     try:
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             url = result.stdout.strip()
@@ -106,7 +139,8 @@ def _read_coordination_files(pc_dir: Path, token_budget_remaining: int) -> str:
     return "### Coordination Files\n\n" + "\n\n---\n\n".join(sections)
 
 
-# ── Briefing assembly ──────────────────────────────────────────────────────────
+# ── Briefing assembly ────────────────────────────────────────────────────────
+
 
 def _build_briefing(
     project: str,
@@ -115,19 +149,27 @@ def _build_briefing(
     include_kg: bool,
     include_diary: bool,
     include_project_context: bool,
-) -> str:
-    """Assemble a concise briefing from palace search, KG, diary, and coordination files."""
+) -> tuple[str, list[str], int, int]:
+    """Assemble a concise briefing from palace search, KG, diary, and coordination files.
+
+    Returns (briefing_text, sections, token_estimate, results_fetched).
+    """
     sections: list[str] = []
     approx_tokens = 0
+    results_fetched = 0
 
     # 1. Semantic search — recent work in the active wing
     wing = f"wing_{project}"
-    search_result = _mcp_call("mempalace_search", {
-        "query": opening_query or f"recent work on {project}",
-        "wing": wing,
-        "limit": 5,
-    })
+    search_result = _mcp_call(
+        "mempalace_search",
+        {
+            "query": opening_query or f"recent work on {project}",
+            "wing": wing,
+            "limit": 5,
+        },
+    )
     results = search_result.get("results", [])
+    results_fetched = len(results)
     if results:
         lines = [f"**Recent palace memories — `{project}`:**"]
         for r in results:
@@ -156,10 +198,13 @@ def _build_briefing(
 
     # 3. Agent diary
     if include_diary and approx_tokens < token_budget:
-        diary_result = _mcp_call("mempalace_diary_read", {
-            "agent_name": "amplifier",
-            "last_n": 3,
-        })
+        diary_result = _mcp_call(
+            "mempalace_diary_read",
+            {
+                "agent_name": "amplifier",
+                "last_n": 3,
+            },
+        )
         entries = diary_result.get("entries", [])
         if entries:
             lines = ["**Recent agent diary:**"]
@@ -182,14 +227,18 @@ def _build_briefing(
                 approx_tokens += len(coord_section) // 4
 
     if not sections:
-        return ""
+        return "", [], 0, results_fetched
 
     header = f"## Memory Briefing — `{project}`\n"
-    footer = "\n*This briefing is ephemeral and will not appear in conversation history.*"
-    return header + "\n\n".join(sections) + footer
+    footer = (
+        "\n*This briefing is ephemeral and will not appear in conversation history.*"
+    )
+    briefing = header + "\n\n".join(sections) + footer
+    return briefing, sections, approx_tokens, results_fetched
 
 
-# ── Hook class ─────────────────────────────────────────────────────────────────
+# ── Hook class ─────────────────────────────────────────────────────────────
+
 
 class MempalaceBriefingHook(Hook):
     name = "hooks-mempalace-briefing"
@@ -200,14 +249,27 @@ class MempalaceBriefingHook(Hook):
         self.token_budget: int = self.config.get("token_budget", 1500)
         self.include_kg: bool = self.config.get("include_kg", True)
         self.include_diary: bool = self.config.get("include_diary", True)
-        self.include_project_context: bool = self.config.get("include_project_context", True)
+        self.include_project_context: bool = self.config.get(
+            "include_project_context", True
+        )
         self.ephemeral: bool = self.config.get("ephemeral", True)
+        self.emit_events: bool = bool(self.config.get("emit_events", True))
 
     async def handle(self, ctx: HookContext) -> None:  # type: ignore[override]
+        sid = getattr(ctx, "session_id", None) or ctx.event.get("session_id")
+
         # Check if mempalace is available — skip silently if not installed
         try:
             subprocess.run(["mempalace", "--version"], capture_output=True, timeout=5)
         except (FileNotFoundError, subprocess.TimeoutExpired):
+            if self.emit_events:
+                emit_event(
+                    "mempalace-briefing",
+                    "briefing_skipped",
+                    ok=False,
+                    data={"reason": "mempalace_unavailable"},
+                    session_id=sid,
+                )
             # Still inject project-context coordination files even without MemPalace
             if self.include_project_context:
                 pc_dir = _find_project_context_dir()
@@ -215,14 +277,18 @@ class MempalaceBriefingHook(Hook):
                     section = _read_coordination_files(pc_dir, self.token_budget)
                     if section:
                         header = "## Session Briefing (coordination files only)\n"
-                        footer = "\n*MemPalace not available — semantic search skipped.*"
-                        ctx.inject_context(header + section + footer, ephemeral=self.ephemeral)
+                        footer = (
+                            "\n*MemPalace not available — semantic search skipped.*"
+                        )
+                        ctx.inject_context(
+                            header + section + footer, ephemeral=self.ephemeral
+                        )
             return
 
         project = _detect_project_name()
         opening_query = ctx.event.get("opening_prompt", "")
 
-        briefing = _build_briefing(
+        briefing, sections, token_estimate, results_fetched = _build_briefing(
             project=project,
             opening_query=opening_query,
             token_budget=self.token_budget,
@@ -233,6 +299,32 @@ class MempalaceBriefingHook(Hook):
 
         if briefing:
             ctx.inject_context(briefing, ephemeral=self.ephemeral)
+            if self.emit_events:
+                emit_event(
+                    "mempalace-briefing",
+                    "briefing_assembled",
+                    ok=True,
+                    preview=None,
+                    data={
+                        "project": project,
+                        "section_count": len(sections),
+                        "token_estimate": token_estimate,
+                        "results_fetched": results_fetched,
+                        # CP1 placeholders — CP4 will make these meaningful
+                        "results_after_rerank": results_fetched,
+                        "importance_weight": 1.0,
+                    },
+                    session_id=sid,
+                )
+        else:
+            if self.emit_events:
+                emit_event(
+                    "mempalace-briefing",
+                    "briefing_skipped",
+                    ok=False,
+                    data={"reason": "no_content"},
+                    session_id=sid,
+                )
 
 
 def mount() -> list[Hook]:

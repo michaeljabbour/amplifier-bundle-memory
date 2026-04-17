@@ -22,7 +22,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from amplifier_core import Tool, ToolResult, mount_tool  # type: ignore
+from amplifier_core import Tool, ToolResult  # type: ignore
 
 
 PALACE_PATH = Path.home() / ".mempalace"
@@ -56,7 +56,15 @@ class PalaceTool(Tool):
         "properties": {
             "operation": {
                 "type": "string",
-                "enum": ["search", "remember", "status", "kg", "traverse", "diary", "mine"],
+                "enum": [
+                    "search",
+                    "remember",
+                    "status",
+                    "kg",
+                    "traverse",
+                    "diary",
+                    "mine",
+                ],
                 "description": "The palace operation to perform.",
             },
             "query": {
@@ -146,7 +154,10 @@ class PalaceTool(Tool):
     async def execute(self, operation: str, **kwargs: Any) -> ToolResult:  # type: ignore[override]
         try:
             if operation == "search":
-                args: dict[str, Any] = {"query": kwargs.get("query", ""), "limit": kwargs.get("limit", 5)}
+                args: dict[str, Any] = {
+                    "query": kwargs.get("query", ""),
+                    "limit": kwargs.get("limit", 5),
+                }
                 if kwargs.get("wing"):
                     args["wing"] = kwargs["wing"]
                 if kwargs.get("room"):
@@ -232,7 +243,9 @@ class PalaceTool(Tool):
                 return ToolResult(content=output.strip())
 
             else:
-                return ToolResult(content=f"Unknown operation: {operation}", is_error=True)
+                return ToolResult(
+                    content=f"Unknown operation: {operation}", is_error=True
+                )
 
         except subprocess.TimeoutExpired:
             return ToolResult(content="MemPalace operation timed out.", is_error=True)

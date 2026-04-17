@@ -1,7 +1,7 @@
 [project]
 name = "amplifier-module-tool-mempalace"
-version = "1.0.0"
-description = "High-level Amplifier tool module for MemPalace — palace search, remember, knowledge graph, traverse, diary, and mine operations"
+version = "1.1.0"
+description = "High-level Amplifier tool module for MemPalace — palace search, remember, knowledge graph, traverse, diary, mine, and events operations"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
@@ -21,3 +21,23 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["amplifier_module_tool_mempalace"]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+    "pyright>=1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = false
+# Pre-existing issues in __init__.py with ToolResult keyword args and Tool class vars
+reportCallIssue = false
+reportArgumentType = false
+reportAssignmentType = false
