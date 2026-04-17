@@ -15,8 +15,8 @@ bundle:
 # ── Context ─────────────────────────────────────────────────────────────────
 context:
   include:
-    - mempalace:context/instructions.md
-    - mempalace:context/project-context-guide.md
+    - memory:context/instructions.md
+    - memory:context/project-context-guide.md
 
 # ── Hooks ────────────────────────────────────────────────────────────────────
 hooks:
@@ -24,7 +24,7 @@ hooks:
   # (tool/file context), deduplicates, and files directly into the palace.
   # Replaces the separate hooks-memory-capture (heuristic-only) module.
   - module: hooks-mempalace-capture
-    source: mempalace:modules/hooks-mempalace-capture
+    source: ../modules/hooks-mempalace-capture
     version: 1.1.0
     config:
       auto_wing: true
@@ -43,7 +43,7 @@ hooks:
   # Session start: injects ephemeral wake-up briefing (palace search + KG + diary).
   # Session end: Curator agent handles HANDOFF.md update and palace curation.
   - module: hooks-mempalace-briefing
-    source: mempalace:modules/hooks-mempalace-briefing
+    source: ../modules/hooks-mempalace-briefing
     version: 1.1.0
     config:
       token_budget: 1500
@@ -57,7 +57,7 @@ hooks:
   # Reads project-context coordination files at session:start and updates
   # HANDOFF.md at session:end. Integrates the project-context system natively.
   - module: hooks-project-context
-    source: mempalace:modules/hooks-project-context
+    source: ../modules/hooks-project-context
     version: 1.1.0
     config:
       tier1_always: true              # always read PROJECT_CONTEXT.md + GLOSSARY.md
@@ -72,7 +72,7 @@ hooks:
   # Per-turn guard flag prevents infinite loops on orchestrator:complete.
   # Designed from Amplifier expert consultation (priority 20, cooldown 3 turns).
   - module: hooks-mempalace-interject
-    source: mempalace:modules/hooks-mempalace-interject
+    source: ../modules/hooks-mempalace-interject
     version: 1.1.0
     config:
       cosine_threshold: 0.72
@@ -97,7 +97,7 @@ tools:
   # events (query JSONL event log), garden (on-demand cluster analysis).
   # This is the primary memory interface; tool-memory handles explicit facts.
   - module: tool-mempalace
-    source: mempalace:modules/tool-mempalace
+    source: ../modules/tool-mempalace
     version: 1.2.0
     config:
       palace_path: "~/.mempalace"
@@ -118,5 +118,5 @@ tools:
 # ── Agents ────────────────────────────────────────────────────────────────────
 agents:
   include:
-    - mempalace:archivist    # on-demand read path: search, KG, graph traversal
-    - mempalace:curator      # on-demand write path: curation, dedup, KG updates
+    - memory:archivist    # on-demand read path: search, KG, graph traversal
+    - memory:curator      # on-demand write path: curation, dedup, KG updates
