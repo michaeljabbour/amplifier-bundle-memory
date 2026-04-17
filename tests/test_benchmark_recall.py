@@ -58,10 +58,6 @@ skip_no_mempalace = pytest.mark.skipif(
 # Synthetic fixture: 200 drawers × 30 queries
 # ---------------------------------------------------------------------------
 
-# Deterministic RNG
-_RNG = random.Random(42)
-
-
 def _make_drawer(id_: str, category: str, wing: str, room: str, text: str) -> dict:
     return {
         "id": id_,

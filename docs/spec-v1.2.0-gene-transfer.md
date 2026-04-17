@@ -21,7 +21,7 @@ Date: 2026-04-17
 | File | What changes |
 |------|-------------|
 | `modules/tool-mempalace/amplifier_module_tool_mempalace/__init__.py` | Add `events` and `garden` operations to `PalaceTool`; add `events`/`garden` to `input_schema` enum; add event emission in `execute()` |
-| `modules/tool-mempalace/pyproject.toml` | Bump version to 1.1.0; add `chromadb>=0.4.0` to dependencies (needed by `garden` clustering) |
+| `modules/tool-mempalace/pyproject.toml` | Bump version to 1.2.0; no new runtime dependencies (garden uses `mempalace_check_duplicate` MCP calls, not direct ChromaDB access) |
 | `modules/hooks-mempalace-capture/amplifier_module_hooks_mempalace_capture/__init__.py` | Import `emit_event` from emitter; add emission calls in `handle()` for `drawer_filed` and `capture_skipped` |
 | `modules/hooks-mempalace-capture/pyproject.toml` | Bump version to 1.1.0; add `amplifier-module-tool-mempalace>=1.0.0` to dependencies |
 | `modules/hooks-mempalace-briefing/amplifier_module_hooks_mempalace_briefing/__init__.py` | Import `emit_event`; add emission call for `briefing_assembled`; add importance re-ranking in `_build_briefing()`; fetch 8 results instead of 5 pre-rerank |
@@ -70,7 +70,7 @@ Every line in a session JSONL file is a single JSON object conforming to this sc
     "room": "auth-migration-decision",
     "category": "decision",
     "content_bytes": 342,
-    "dedupe_status": "unique"
+    "content_bytes": 342
   }
 }
 ```
@@ -94,14 +94,14 @@ Every line in a session JSONL file is a single JSON object conforming to this sc
 
 | Event | ok | preview source | data fields |
 |-------|-----|---------------|-------------|
-| `drawer_filed` | `true` | drawer content | `wing: str`, `room: str`, `category: str\|null`, `content_bytes: int`, `source: str`, `dedupe_status: "unique"\|"near_duplicate"` |
+| `drawer_filed` | `true` | drawer content | `wing: str`, `room: str`, `category: str\|null`, `content_bytes: int`, `source: str` |
 | `capture_skipped` | `false` | tool output (if available) | `reason: str` (one of: `"too_short"`, `"too_long"`, `"skip_tool"`, `"category_filtered"`, `"mcp_error"`) |
 
 **`mempalace-briefing`**
 
 | Event | ok | preview source | data fields |
 |-------|-----|---------------|-------------|
-| `briefing_assembled` | `true` | `null` | `project: str`, `sections: list[str]`, `token_estimate: int`, `results_fetched: int`, `results_after_rerank: int`, `importance_weight: float` |
+| `briefing_assembled` | `true` | `null` | `project: str`, `section_count: int`, `token_estimate: int`, `results_fetched: int`, `results_after_rerank: int`, `importance_weight: float` |
 | `briefing_skipped` | `false` | `null` | `reason: str` (`"mempalace_unavailable"`, `"no_content"`) |
 
 **`mempalace-interject`**
@@ -366,7 +366,7 @@ Add after the existing Phase 2 section:
 11. For any drawer where `mempalace_check_duplicate` returned a match:
     - If match score ≥ 0.95: file both drawers, set the newer drawer's importance to 0.15, and add `mempalace_kg_add(subject="drawer:<new_id>", predicate="duplicates", object="drawer:<match_id>")`.
     - If match score 0.85–0.94: add `mempalace_kg_add(subject="drawer:<new_id>", predicate="related_to", object="drawer:<match_id>")`.
-12. Idempotency: before adding any KG edge, check via `mempalace_kg_query` that the triple does not already exist. Skip if present.
+12. Idempotency: `mempalace_kg_add` uses upsert semantics — adding a triple that already exists is a no-op. Skip the `mempalace_kg_query` pre-check on normal runs. Only pre-check if you need to avoid counting a write in observability logs.
 ```
 
 ---
@@ -921,7 +921,7 @@ hooks-mempalace-briefing ─→ tool-mempalace (event_emitter.py)
 hooks-mempalace-interject → tool-mempalace (event_emitter.py)
 hooks-project-context ────→ tool-mempalace (event_emitter.py)
 
-tool-mempalace ───→ mempalace (CLI), chromadb (garden only)
+tool-mempalace ───→ mempalace (CLI)
 ```
 
 All 4 hook modules gain a new dependency on `tool-mempalace`. This is the cost of the shared emitter. The dependency is bundle-local (all modules install together) and narrow (only `event_emitter.py` is imported).

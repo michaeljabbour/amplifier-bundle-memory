@@ -342,9 +342,13 @@ class PalaceTool(Tool):
                     sid
                     if sid is not None
                     else (
-                        page[0]["sid"]
+                        page[0].get("sid", "unknown")
                         if page
-                        else (all_events[0]["sid"] if all_events else "unknown")
+                        else (
+                            all_events[0].get("sid", "unknown")
+                            if all_events
+                            else "unknown"
+                        )
                     )
                 )
 

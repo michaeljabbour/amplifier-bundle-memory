@@ -49,7 +49,10 @@ except ImportError:
 
 
 try:
-    from amplifier_module_tool_mempalace.event_emitter import emit_event, truncate_preview
+    from amplifier_module_tool_mempalace.event_emitter import (
+        emit_event,
+        truncate_preview,
+    )
 except ImportError:
 
     def emit_event(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
@@ -275,7 +278,7 @@ class MempalaceCaptureHook(Hook):
                         "category": category,
                         "content_bytes": len(tool_output.encode("utf-8")),
                         "source": str(source),
-                        "dedupe_status": "unique",
+                        # Dedup status is determined by Curator Phase 3, not at capture time.
                     },
                     session_id=sid,
                 )

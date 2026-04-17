@@ -99,7 +99,7 @@ def _rerank_by_importance(
     if not results:
         return []
 
-    if weight == 0.0:
+    if weight == 0.0:  # exact: config-parsed float, not computed — safe for ==
         # Fast path: weight=0 means zero boost for every result.
         # Return a stable sort by semantic score (descending) — identical to v1.1.0.
         return sorted(results, key=lambda r: r.get("score", 0.0), reverse=True)

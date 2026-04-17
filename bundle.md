@@ -2,7 +2,7 @@
 bundle:
   schema_version: 1
   name: memory
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Local-first AI memory for Amplifier. Combines semantic vector storage,
     a knowledge graph, structured project coordination files, and a SQLite

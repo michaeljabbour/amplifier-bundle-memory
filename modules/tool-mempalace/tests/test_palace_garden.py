@@ -628,7 +628,9 @@ class TestGardenTotalTimeout:
         # Capture emitted events by patching the symbol in the __init__ module
         # (patching event_emitter.emit_event would miss the already-bound import)
         emitted: list[tuple[Any, ...]] = []
-        monkeypatch.setattr(tm_init, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
+        monkeypatch.setattr(
+            tm_init, "emit_event", lambda *a, **kw: emitted.append((a, kw))
+        )
 
         def slow_mcp(tool_name: str, args: dict) -> dict:
             if tool_name == "mempalace_get_taxonomy":

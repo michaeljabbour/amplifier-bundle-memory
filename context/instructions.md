@@ -63,3 +63,46 @@ mempalace mcp --help
 ```
 
 Once initialized, this bundle connects automatically via the MCP stdio transport and scaffolds `project-context/` coordination files if they don't exist.
+
+## Event Observability
+
+Every hook in this bundle emits structured JSONL events to `~/.mempalace/events/{session_id}.jsonl`. You can observe memory activity in real time:
+
+```bash
+tail -f ~/.mempalace/events/*.jsonl
+```
+
+Query events from within a session using the `palace events` operation:
+
+```
+# Last 10 events in the current session
+palace(operation="events", limit=10)
+
+# Tail events from the capture hook only
+palace(operation="events", hook_filter="mempalace-capture", limit=20)
+
+# All briefing events, oldest first
+palace(operation="events", hook_filter="mempalace-briefing", tail=false, limit=50)
+```
+
+Each event has: `v` (schema version), `ts` (ISO-8601 UTC), `sid` (session ID), `hook`, `event`, `ok` (bool), `preview` (first ~100 chars of content), and `data` (structured payload). To disable event emission for a hook, set `emit_events: false` in `behaviors/mempalace.yaml`.
+
+## Palace Gardening
+
+The `palace garden` operation performs on-demand deep analysis of a palace wing. It is a background maintenance operation — run it manually when you want to understand the shape of your palace or backfill importance tags on pre-v1.2.0 drawers.
+
+```
+# Analyze the last 90 days of drawers in wing_myapp
+palace(operation="garden", wing="wing_myapp")
+
+# Scoped to a specific room
+palace(operation="garden", wing="wing_myapp", room="auth-decisions", max_drawers=50)
+```
+
+Garden produces:
+- **Cluster detection** — finds groups of related drawers via BFS over pairwise similarity and writes `part_of_cluster` / `has_label` KG edges.
+- **Cross-room linking** — clusters spanning multiple rooms get a `spans_rooms` KG edge for later traversal.
+- **Importance backfill** — drawers missing `has_importance` KG facts get scored via the Phase 3 rubric.
+- **Diary entry** — the Curator diary records what was analyzed and how many clusters/edges were created.
+
+Garden is bounded by `garden_max_drawers` (default 200, hard cap 500) and a 120-second wall-clock budget. It never deletes anything.
