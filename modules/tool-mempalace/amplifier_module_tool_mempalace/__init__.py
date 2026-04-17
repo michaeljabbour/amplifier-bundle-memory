@@ -10,6 +10,7 @@ Provides a single `palace` tool with sub-operations:
   palace_traverse  — Graph traversal across wings
   palace_diary     — Agent diary read/write
   palace_mine      — Mine a directory or conversation file
+  palace_events    — Query the per-session JSONL event log (CP2)
 
 All 29 raw MCP tools are also available via the mempalace_* prefix
 through the MCP integration in the bundle behavior.
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from amplifier_core import Tool, ToolResult  # type: ignore
+
+from .event_emitter import _read_events_with_skip_count
 
 
 PALACE_PATH = Path.home() / ".mempalace"
@@ -49,7 +52,7 @@ class PalaceTool(Tool):
     name = "palace"
     description = (
         "MemPalace memory operations. Operations: search, remember, status, "
-        "kg (knowledge graph), traverse, diary, mine."
+        "kg (knowledge graph), traverse, diary, mine, events."
     )
     parameters = {
         "type": "object",
@@ -64,6 +67,7 @@ class PalaceTool(Tool):
                     "traverse",
                     "diary",
                     "mine",
+                    "events",
                 ],
                 "description": "The palace operation to perform.",
             },
@@ -85,7 +89,7 @@ class PalaceTool(Tool):
             },
             "limit": {
                 "type": "integer",
-                "description": "Max results to return (default: 5).",
+                "description": "Result limit. Defaults: search=5, events=50 (max 200).",
                 "default": 5,
             },
             # Knowledge graph parameters
@@ -146,6 +150,36 @@ class PalaceTool(Tool):
                 "enum": ["files", "convos"],
                 "description": "Mining mode: 'files' for project files, 'convos' for conversation exports.",
                 "default": "files",
+            },
+            # Events parameters
+            "session_id": {
+                "type": "string",
+                "description": (
+                    "Which session's events to read (events operation only). "
+                    "Defaults to the current session."
+                ),
+            },
+            "hook_filter": {
+                "type": "string",
+                "description": (
+                    "Filter events to a specific hook "
+                    "(e.g. 'mempalace-capture'). For 'events' operation."
+                ),
+            },
+            "event_filter": {
+                "type": "string",
+                "description": (
+                    "Filter events to a specific event type "
+                    "(e.g. 'drawer_filed'). For 'events' operation."
+                ),
+            },
+            "tail": {
+                "type": "boolean",
+                "description": (
+                    "If true (default), return the most recent N events. "
+                    "If false, return the oldest N events. For 'events' operation."
+                ),
+                "default": True,
             },
         },
         "required": ["operation"],
@@ -241,6 +275,56 @@ class PalaceTool(Tool):
                 )
                 output = proc.stdout + proc.stderr
                 return ToolResult(content=output.strip())
+
+            elif operation == "events":
+                # Read the per-session JSONL event log written by CP1's emitter.
+                # Clamp limit to [1, 200] silently; default 50.
+                raw_limit: int = int(kwargs.get("limit", 50))
+                limit = max(1, min(raw_limit, 200))
+                tail: bool = bool(kwargs.get("tail", True))
+                sid: str | None = kwargs.get("session_id")
+                hook_filter: str | None = kwargs.get("hook_filter")
+                event_filter: str | None = kwargs.get("event_filter")
+
+                # Read all matching events (up to a generous ceiling) so we
+                # can report event_count (total) separately from returned (capped).
+                # The helper also returns the number of corrupt lines skipped.
+                all_events, skipped_lines = _read_events_with_skip_count(
+                    session_id=sid,
+                    hook_filter=hook_filter,
+                    event_filter=event_filter,
+                    limit=10_000,
+                    tail=False,  # get everything in chronological order first
+                )
+                event_count = len(all_events)
+
+                # Apply tail / head and final limit
+                if tail:
+                    page = all_events[-limit:] if event_count > limit else all_events
+                else:
+                    page = all_events[:limit]
+
+                # Resolve the session_id that was actually used for the response.
+                # The helper uses the same fallback chain internally; the first
+                # event's sid field is the ground truth when sid was None.
+                resolved_sid: str = (
+                    sid
+                    if sid is not None
+                    else (
+                        page[0]["sid"]
+                        if page
+                        else (all_events[0]["sid"] if all_events else "unknown")
+                    )
+                )
+
+                result_obj = {
+                    "session_id": resolved_sid,
+                    "event_count": event_count,
+                    "returned": len(page),
+                    "skipped_lines": skipped_lines,
+                    "events": page,
+                }
+                return ToolResult(output=json.dumps(result_obj, indent=2))
 
             else:
                 return ToolResult(

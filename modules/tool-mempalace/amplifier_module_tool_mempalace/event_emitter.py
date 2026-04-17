@@ -169,6 +169,59 @@ def emit_event(
         pass
 
 
+def _read_events_with_skip_count(
+    session_id: str | None = None,
+    *,
+    hook_filter: str | None = None,
+    event_filter: str | None = None,
+    limit: int = 200,
+    tail: bool = False,
+) -> tuple[list[dict[str, Any]], int]:
+    """Internal: read events from a session's JSONL file, also counting corrupt lines.
+
+    Returns ``(records, skipped_lines)`` where ``skipped_lines`` is the number
+    of non-empty lines that could not be JSON-decoded.  The public
+    ``read_events()`` wrapper discards the skip count for callers that don't
+    need it.
+    """
+    base = _mempalace_base()
+    if base is None:
+        return [], 0
+
+    sid = _resolve_session_id(session_id)
+    events_file = base / "events" / f"{sid}.jsonl"
+
+    if not events_file.exists():
+        return [], 0
+
+    records: list[dict[str, Any]] = []
+    skipped = 0
+    try:
+        for raw_line in events_file.read_text(encoding="utf-8").splitlines():
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                record = json.loads(raw_line)
+            except json.JSONDecodeError:
+                skipped += 1
+                continue
+
+            # Apply filters
+            if hook_filter and record.get("hook") != hook_filter:
+                continue
+            if event_filter and record.get("event") != event_filter:
+                continue
+
+            records.append(record)
+    except Exception:
+        return [], skipped
+
+    if tail:
+        return (records[-limit:] if len(records) > limit else records), skipped
+    return records[:limit], skipped
+
+
 def read_events(
     session_id: str | None = None,
     *,
@@ -183,38 +236,14 @@ def read_events(
     ``limit`` events. Otherwise returns the first ``limit`` events.
 
     Returns an empty list if the file does not exist or cannot be read.
+    Corrupt lines are silently skipped; use ``_read_events_with_skip_count``
+    directly if you need the skip count.
     """
-    base = _mempalace_base()
-    if base is None:
-        return []
-
-    sid = _resolve_session_id(session_id)
-    events_file = base / "events" / f"{sid}.jsonl"
-
-    if not events_file.exists():
-        return []
-
-    records: list[dict[str, Any]] = []
-    try:
-        for raw_line in events_file.read_text(encoding="utf-8").splitlines():
-            raw_line = raw_line.strip()
-            if not raw_line:
-                continue
-            try:
-                record = json.loads(raw_line)
-            except json.JSONDecodeError:
-                continue  # skip corrupt lines
-
-            # Apply filters
-            if hook_filter and record.get("hook") != hook_filter:
-                continue
-            if event_filter and record.get("event") != event_filter:
-                continue
-
-            records.append(record)
-    except Exception:
-        return []
-
-    if tail:
-        return records[-limit:] if len(records) > limit else records
-    return records[:limit]
+    events, _ = _read_events_with_skip_count(
+        session_id,
+        hook_filter=hook_filter,
+        event_filter=event_filter,
+        limit=limit,
+        tail=tail,
+    )
+    return events
