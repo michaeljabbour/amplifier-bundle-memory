@@ -15,6 +15,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "benchmark: slow benchmark tests; excluded from default runs. Run with: pytest -m benchmark",
+]
+addopts = "-m 'not benchmark'"
 
 [tool.pyright]
 pythonVersion = "3.11"

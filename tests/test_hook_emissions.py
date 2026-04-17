@@ -135,7 +135,7 @@ class TestBriefingHookEmissions:
         monkeypatch.setattr(
             m,
             "_build_briefing",
-            lambda **kw: ("## Briefing\ntest content", ["semantic"], 100, 3),
+            lambda **kw: ("## Briefing\ntest content", ["semantic"], 100, 3, 3),
         )
         monkeypatch.setattr(m, "_detect_project_name", lambda: "testproject")
 
