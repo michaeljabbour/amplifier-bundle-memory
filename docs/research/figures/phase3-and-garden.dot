@@ -1,0 +1,85 @@
+digraph phase3_garden {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, style=filled];
+    edge [fontname="Helvetica", fontsize=9];
+    compound=true;
+
+    // Phase 3 (session:end, automatic)
+    subgraph cluster_phase3 {
+        label="Phase 3: Session-End Enrichment (automatic)";
+        style=rounded;
+        color="#27AE60";
+        fontcolor="#2C3E50";
+        bgcolor="#F0FFF0";
+
+        p3_input [label="Drawers filed\nthis session\n(from Phase 1)", shape=ellipse, fillcolor="#F9E79F"];
+        p3_dup [label="Step 1:\nDuplicate Linking\n\nscore >= 0.95 -> duplicates edge\nscore 0.85-0.94 -> related_to\nscore < 0.85 -> no edge", shape=box, fillcolor="#A9DFBF"];
+        p3_imp [label="Step 2:\nImportance Tagging\n\nCategory-based rubric\n8 categories\nBase + boosts + cap", shape=box, fillcolor="#A9DFBF"];
+        p3_cat [label="Step 3:\nCategory Tagging\n\nhas_category edge\n(if detected)", shape=box, fillcolor="#A9DFBF"];
+        p3_kg [label="Knowledge Graph\n\nUpsert semantics\n(idempotent)", shape=cylinder, fillcolor="#D5D8DC"];
+
+        p3_input -> p3_dup;
+        p3_dup -> p3_imp;
+        p3_imp -> p3_cat;
+        p3_dup -> p3_kg [label="duplicates\nrelated_to"];
+        p3_imp -> p3_kg [label="has_importance"];
+        p3_cat -> p3_kg [label="has_category"];
+    }
+
+    // Garden (on-demand)
+    subgraph cluster_garden {
+        label="Palace Garden: Deep Analysis (on-demand)";
+        style=rounded;
+        color="#1A5276";
+        fontcolor="#2C3E50";
+        bgcolor="#F0F8FF";
+
+        g_enum [label="Step 1:\nEnumerate Drawers\n\nget_taxonomy +\nsearch per room\nmax_drawers budget\nlookback_days filter", shape=box, fillcolor="#85C1E9"];
+        g_adj [label="Step 2:\nBuild Adjacency\n\ncheck_duplicate\nper drawer\nProgress every 50", shape=box, fillcolor="#85C1E9"];
+        g_bfs [label="Step 3:\nBFS Clustering\n\nConnected components\nMin size: 3\nO(V + E)", shape=box, fillcolor="#85C1E9"];
+        g_classify [label="Step 4:\nClassify Clusters\n\nDominant category\nCommon terms\nHuman-readable label", shape=box, fillcolor="#85C1E9"];
+        g_edges [label="Step 5-6:\nEmit KG Edges\n\npart_of_cluster\nis_a, has_label\nhas_size, spans_rooms", shape=box, fillcolor="#85C1E9"];
+        g_diary [label="Step 7:\nDiary Entry\n\nHuman-readable\nsummary", shape=box, fillcolor="#85C1E9"];
+        g_backfill [label="Step 8:\nImportance Backfill\n\nTag drawers missing\nhas_importance", shape=box, fillcolor="#85C1E9"];
+
+        g_enum -> g_adj;
+        g_adj -> g_bfs;
+        g_bfs -> g_classify;
+        g_classify -> g_edges;
+        g_edges -> g_diary;
+        g_diary -> g_backfill;
+    }
+
+    // Outputs
+    g_kg [label="Knowledge\nGraph", shape=cylinder, fillcolor="#D5D8DC"];
+    g_diary_out [label="Curator\nDiary", shape=cylinder, fillcolor="#D5D8DC"];
+
+    // Garden -> outputs
+    g_edges -> g_kg [label="cluster\nedges"];
+    g_backfill -> g_kg [label="importance\ntags"];
+    g_diary -> g_diary_out [label="summary"];
+
+    // Triggers
+    trigger_session [label="session:end\n(automatic)", shape=ellipse, fillcolor="#F9E79F"];
+    trigger_manual [label="palace garden\n(on-demand)", shape=ellipse, fillcolor="#F9E79F"];
+
+    trigger_session -> p3_input;
+    trigger_manual -> g_enum;
+
+    // Budget guards
+    subgraph cluster_guards {
+        label="Safety Guards";
+        style=rounded;
+        color="#E74C3C";
+        fontcolor="#2C3E50";
+
+        guard_budget [label="max_drawers: 200\n(hard cap: 500)", shape=box, fillcolor="#FADBD8"];
+        guard_timeout [label="Total timeout: 120s\nPer-call: 15s", shape=box, fillcolor="#FADBD8"];
+        guard_lookback [label="lookback_days: 90\n(time filter)", shape=box, fillcolor="#FADBD8"];
+    }
+
+    guard_budget -> g_enum [style=dotted, color="#E74C3C", label="bounds"];
+    guard_timeout -> g_adj [style=dotted, color="#E74C3C", label="bounds"];
+    guard_lookback -> g_enum [style=dotted, color="#E74C3C", label="filters"];
+}

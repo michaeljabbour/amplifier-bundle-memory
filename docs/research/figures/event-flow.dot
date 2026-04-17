@@ -1,0 +1,75 @@
+digraph event_flow {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, style=filled];
+    edge [fontname="Helvetica", fontsize=9];
+
+    // Session context
+    session [label="Amplifier\nSession", shape=ellipse, fillcolor="#F9E79F"];
+
+    subgraph cluster_hooks {
+        label="Hook Lifecycle Events";
+        style=rounded;
+        color="#4A90D9";
+        fontcolor="#2C3E50";
+
+        h_capture [label="capture\n\ndrawer_filed\ncapture_skipped", shape=box, fillcolor="#AED6F1"];
+        h_briefing [label="briefing\n\nbriefing_assembled\nbriefing_skipped", shape=box, fillcolor="#AED6F1"];
+        h_interject [label="interject\n\nmemory_surfaced\ninterject_skipped", shape=box, fillcolor="#AED6F1"];
+        h_projctx [label="project-context\n\ncoordination_read\ncoordination_scaffolded\ncurator_delegated", shape=box, fillcolor="#AED6F1"];
+        h_garden [label="tool-mempalace\n\ngarden_completed", shape=box, fillcolor="#A9DFBF"];
+    }
+
+    subgraph cluster_emitter {
+        label="Shared Emitter";
+        style=rounded;
+        color="#27AE60";
+        fontcolor="#2C3E50";
+
+        emit_fn [label="emit_event()\n\nthread-safe\nnever-raises\ncompact JSON", shape=box, fillcolor="#A9DFBF"];
+
+        schema [label="Schema v1\n{v, ts, sid, hook,\nevent, ok, preview, data}", shape=note, fillcolor="#A9DFBF"];
+    }
+
+    subgraph cluster_storage {
+        label="Per-Session Log";
+        style=rounded;
+        color="#27AE60";
+        fontcolor="#2C3E50";
+
+        jsonl [label="~/.mempalace/events/\n{session_id}.jsonl\n\n1 line per event\nappend-only", shape=note, fillcolor="#A9DFBF"];
+    }
+
+    subgraph cluster_consumers {
+        label="Consumers";
+        style=rounded;
+        color="#7F8C8D";
+        fontcolor="#2C3E50";
+
+        palace_events [label="palace events\ntool operation\n\nfilter by hook/event\nhead or tail mode\nlimit (max 200)", shape=box, fillcolor="#A9DFBF"];
+        tail_f [label="tail -f\n(external)", shape=box, fillcolor="#D5D8DC"];
+    }
+
+    // Session triggers hooks
+    session -> h_capture [label="tool:post"];
+    session -> h_briefing [label="session:start"];
+    session -> h_interject [label="prompt:submit\ntool:pre"];
+    session -> h_projctx [label="session:start\nsession:end"];
+
+    // Hooks call emitter
+    h_capture -> emit_fn;
+    h_briefing -> emit_fn;
+    h_interject -> emit_fn;
+    h_projctx -> emit_fn;
+    h_garden -> emit_fn;
+
+    // Emitter uses schema
+    emit_fn -> schema [style=dotted, label="conforms to"];
+
+    // Emitter writes JSONL
+    emit_fn -> jsonl [label="fh.write()\nfh.flush()"];
+
+    // Consumers read JSONL
+    jsonl -> palace_events [label="read_events()"];
+    jsonl -> tail_f [label="filesystem\nwatcher"];
+}

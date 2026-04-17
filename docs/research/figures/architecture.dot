@@ -1,0 +1,115 @@
+digraph architecture {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, style=filled];
+    edge [fontname="Helvetica", fontsize=9];
+
+    // Color palette
+    // Blues: pre-existing core
+    // Greens: new in v1.2.0
+    // Grays: external systems
+
+    subgraph cluster_hooks {
+        label="Amplifier Hook Modules";
+        style=rounded;
+        color="#4A90D9";
+        fontcolor="#2C3E50";
+
+        capture [label="mempalace-capture\n(tool:post)", shape=box, fillcolor="#AED6F1"];
+        briefing [label="mempalace-briefing\n(session:start)", shape=box, fillcolor="#AED6F1"];
+        interject [label="mempalace-interject\n(prompt:submit, tool:pre,\norchestrator:complete)", shape=box, fillcolor="#AED6F1"];
+        projctx [label="project-context\n(session:start, session:end)", shape=box, fillcolor="#AED6F1"];
+    }
+
+    subgraph cluster_tool {
+        label="PalaceTool (tool-mempalace)";
+        style=rounded;
+        color="#27AE60";
+        fontcolor="#2C3E50";
+
+        search_op [label="search", shape=box, fillcolor="#AED6F1"];
+        events_op [label="events\n(NEW v1.2.0)", shape=box, fillcolor="#A9DFBF"];
+        garden_op [label="garden\n(NEW v1.2.0)", shape=box, fillcolor="#A9DFBF"];
+        emitter [label="event_emitter.py\n(NEW v1.2.0)", shape=box, fillcolor="#A9DFBF"];
+        phase3_mod [label="phase3.py\n(NEW v1.2.0)", shape=box, fillcolor="#A9DFBF"];
+        garden_mod [label="garden.py\n(NEW v1.2.0)", shape=box, fillcolor="#A9DFBF"];
+    }
+
+    subgraph cluster_agents {
+        label="Agents";
+        style=rounded;
+        color="#8E44AD";
+        fontcolor="#2C3E50";
+
+        curator [label="Curator Agent\n(session:end)", shape=box, fillcolor="#D7BDE2"];
+        archivist [label="Archivist Agent\n(on-demand)", shape=box, fillcolor="#D7BDE2"];
+    }
+
+    subgraph cluster_storage {
+        label="MemPalace Storage (External)";
+        style=rounded;
+        color="#7F8C8D";
+        fontcolor="#2C3E50";
+
+        chromadb [label="ChromaDB\n(Vector Embeddings)", shape=cylinder, fillcolor="#D5D8DC"];
+        kg [label="Knowledge Graph", shape=cylinder, fillcolor="#D5D8DC"];
+        diary [label="Curator Diary", shape=cylinder, fillcolor="#D5D8DC"];
+    }
+
+    subgraph cluster_events {
+        label="Event Log (NEW v1.2.0)";
+        style=rounded;
+        color="#27AE60";
+        fontcolor="#2C3E50";
+
+        jsonl [label="~/.mempalace/events/\n{session_id}.jsonl", shape=note, fillcolor="#A9DFBF"];
+    }
+
+    subgraph cluster_fs {
+        label="Filesystem";
+        style=rounded;
+        color="#7F8C8D";
+        fontcolor="#2C3E50";
+
+        projctx_files [label="project-context/*.md", shape=note, fillcolor="#D5D8DC"];
+    }
+
+    // Hook -> emitter (green dashed = new event emission)
+    capture -> emitter [style=dashed, color="#27AE60", label="emit"];
+    briefing -> emitter [style=dashed, color="#27AE60", label="emit"];
+    interject -> emitter [style=dashed, color="#27AE60", label="emit"];
+    projctx -> emitter [style=dashed, color="#27AE60", label="emit"];
+
+    // Emitter -> JSONL
+    emitter -> jsonl [color="#27AE60", label="append"];
+
+    // Events op -> JSONL
+    events_op -> jsonl [label="read", style=dashed, color="#27AE60"];
+
+    // Hook -> storage (blue = existing)
+    capture -> chromadb [label="file drawer", color="#4A90D9"];
+    briefing -> search_op [label="search(limit=8)", color="#4A90D9"];
+    briefing -> kg [label="KG importance\nlookup (NEW)", color="#27AE60", style=dashed];
+    interject -> chromadb [label="cosine search", color="#4A90D9"];
+
+    // Project context
+    projctx -> projctx_files [label="read/scaffold", color="#4A90D9"];
+
+    // Search op -> storage
+    search_op -> chromadb [label="query", color="#4A90D9"];
+
+    // Garden -> storage
+    garden_op -> garden_mod [color="#27AE60"];
+    garden_mod -> chromadb [label="check_duplicate", color="#27AE60"];
+    garden_mod -> kg [label="cluster edges\nimportance backfill", color="#27AE60"];
+    garden_mod -> diary [label="diary entry", color="#27AE60"];
+
+    // Curator -> Phase 3
+    curator -> phase3_mod [label="Phase 3\n(NEW v1.2.0)", color="#27AE60", style=dashed];
+    phase3_mod -> kg [label="importance\ncategory\nduplicate edges", color="#27AE60"];
+    curator -> chromadb [label="Phase 1:\nfile drawers", color="#4A90D9"];
+    curator -> diary [label="Phase 2:\ndiary", color="#4A90D9"];
+
+    // Archivist
+    archivist -> search_op [label="query", color="#4A90D9"];
+}

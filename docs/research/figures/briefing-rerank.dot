@@ -1,0 +1,47 @@
+digraph briefing_rerank {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, style=filled];
+    edge [fontname="Helvetica", fontsize=9];
+
+    // Input
+    query [label="Session Query\n(project context)", shape=ellipse, fillcolor="#F9E79F"];
+
+    // Step 1: Search
+    search [label="mempalace_search\n(limit=8)\n\nSemantic similarity\nvia ChromaDB", shape=box, fillcolor="#AED6F1"];
+
+    // Step 2: KG lookup
+    kg_lookup [label="KG Importance\nLookup\n\nPer-result:\nhas_importance fact\nDefault: 0.5", shape=box, fillcolor="#A9DFBF"];
+
+    // Step 3: Formula
+    formula [label="Re-rank Formula\n\nfinal = semantic +\nw * (i - 0.5) * 0.08\n\nMax boost: +/-0.04\nw = briefing_importance_weight", shape=box, fillcolor="#A9DFBF"];
+
+    // Step 4: Top 5
+    top5 [label="Sort by final\nTake top 5", shape=box, fillcolor="#A9DFBF"];
+
+    // Step 5: Format
+    format [label="Format\nBriefing\nSections\n\nToken budget\napplied", shape=box, fillcolor="#AED6F1"];
+
+    // Step 6: Event
+    event [label="Emit\nbriefing_assembled\nevent", shape=box, fillcolor="#A9DFBF"];
+
+    // Output
+    output [label="Agent\nBriefing\n(~1500 tokens)", shape=ellipse, fillcolor="#F9E79F"];
+
+    // Kill switch
+    kill [label="weight = 0.0?\n\nSkip KG lookup\nSkip re-rank\n= v1.1.0 behavior", shape=diamond, fillcolor="#FADBD8"];
+
+    // Flow
+    query -> search;
+    search -> kill;
+    kill -> kg_lookup [label="weight > 0"];
+    kill -> top5 [label="weight = 0\n(fast path)", style=dashed, color="#E74C3C"];
+    kg_lookup -> formula;
+    formula -> top5;
+    top5 -> format;
+    format -> event [style=dashed, color="#27AE60"];
+    format -> output;
+
+    // Data labels
+    search -> search [label="8 candidates\nwith scores", style=invis];
+}
