@@ -1,6 +1,6 @@
 bundle:
   name: mempalace-behavior
-  version: 1.2.0
+  version: 1.3.0
   description: |
     Wires the full memory stack: MemPalace semantic storage, project-context
     coordination files, knowledge graph, session briefing, automatic
@@ -12,23 +12,25 @@ bundle:
       - session briefing is handled by hooks-mempalace-briefing only;
         the Archivist agent is invoked on-demand, not at session:start
 
-# ── Context ───────────────────────────────────────────────────────────────────
+# ── Context ─────────────────────────────────────────────────────────────────
 context:
   include:
     - mempalace:context/instructions.md
     - mempalace:context/project-context-guide.md
 
-# ── Hooks ─────────────────────────────────────────────────────────────────────
+# ── Hooks ────────────────────────────────────────────────────────────────────
 hooks:
   # Verbatim capture on tool:post — auto-detects wing (git remote) and room
   # (tool/file context), deduplicates, and files directly into the palace.
   # Replaces the separate hooks-memory-capture (heuristic-only) module.
   - module: hooks-mempalace-capture
     source: mempalace:modules/hooks-mempalace-capture
+    version: 1.1.0
     config:
       auto_wing: true
       auto_room: true
       silent: true
+      emit_events: true           # NEW: false to disable JSONL event emission
       categories:
         - decision
         - architecture
@@ -42,21 +44,26 @@ hooks:
   # Session end: Curator agent handles HANDOFF.md update and palace curation.
   - module: hooks-mempalace-briefing
     source: mempalace:modules/hooks-mempalace-briefing
+    version: 1.1.0
     config:
       token_budget: 1500
       include_kg: true
       include_diary: true
       include_project_context: true   # also reads HANDOFF.md + PROJECT_CONTEXT.md
       ephemeral: true
+      emit_events: true               # NEW: false to disable JSONL event emission
+      briefing_importance_weight: 1.0 # NEW: 0.0 = pure semantic (v1.1.0 behavior)
 
   # Reads project-context coordination files at session:start and updates
   # HANDOFF.md at session:end. Integrates the project-context system natively.
   - module: hooks-project-context
     source: mempalace:modules/hooks-project-context
+    version: 1.1.0
     config:
       tier1_always: true              # always read PROJECT_CONTEXT.md + GLOSSARY.md
       handoff_on_end: true            # update HANDOFF.md at session:end
       setup_if_missing: true          # scaffold project-context/ if not present
+      emit_events: true               # NEW: false to disable JSONL event emission
 
   # Mid-session OR-firing hook: surfaces relevant memories at the right moment.
   # Fires on prompt:submit, tool:pre, and orchestrator:complete.
@@ -66,6 +73,7 @@ hooks:
   # Designed from Amplifier expert consultation (priority 20, cooldown 3 turns).
   - module: hooks-mempalace-interject
     source: mempalace:modules/hooks-mempalace-interject
+    version: 1.1.0
     config:
       cosine_threshold: 0.72
       uncertain_band: 0.10
@@ -75,6 +83,7 @@ hooks:
       tool_pre_enabled: true
       orc_enabled: true
       palace_collection: mempalace_default
+      emit_events: true               # NEW: false to disable JSONL event emission
 
   # Per-project session isolation — each project gets its own session history.
   - module: hooks-project-isolation
@@ -82,14 +91,17 @@ hooks:
     config:
       enabled: true
 
-# ── Tools ─────────────────────────────────────────────────────────────────────
+# ── Tools ────────────────────────────────────────────────────────────────────
 tools:
-  # High-level palace tool: search, remember, kg, traverse, diary, mine.
+  # High-level palace tool: search, remember, kg, traverse, diary, mine,
+  # events (query JSONL event log), garden (on-demand cluster analysis).
   # This is the primary memory interface; tool-memory handles explicit facts.
   - module: tool-mempalace
     source: mempalace:modules/tool-mempalace
+    version: 1.2.0
     config:
       palace_path: "~/.mempalace"
+      garden_max_drawers: 200         # NEW: budget cap for garden analysis
 
   # SQLite fact store for explicit key-value memories the palace doesn't need.
   # Complementary to tool-mempalace — not duplicative (different retrieval model).

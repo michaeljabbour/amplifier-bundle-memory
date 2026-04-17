@@ -97,3 +97,51 @@ mempalace init ~/projects/myapp
 ```
 
 The MCP server starts automatically when this bundle is active.
+
+## palace events — Query the Event Log
+
+Every hook writes structured JSONL events to `~/.mempalace/events/{session_id}.jsonl`. The `events` operation lets you read them without leaving the session.
+
+```
+# Tail the last 10 events (default)
+palace(operation="events")
+
+# Last 50 events, showing oldest first
+palace(operation="events", limit=50, tail=false)
+
+# Capture-hook events only
+palace(operation="events", hook_filter="mempalace-capture")
+
+# Only drawer_filed events
+palace(operation="events", event_filter="drawer_filed", limit=100)
+
+# Briefing events for a specific session
+palace(operation="events", session_id="abc123", hook_filter="mempalace-briefing")
+```
+
+**Response shape**: `{session_id, event_count, returned, skipped_lines, events[]}`. Each event has `hook`, `event`, `ok`, `preview`, `data`, `ts`.
+
+**When to use**: Debugging why a memory was/wasn't captured. Verifying that briefings assembled correctly. Checking if the interject hook fired. Auditing session activity.
+
+## palace garden — On-Demand Palace Analysis
+
+The `garden` operation performs deep analysis of a wing: detects content clusters, backfills importance tags, and writes KG edges. Run it manually on a mature palace to enrich it.
+
+```
+# Analyze all drawers in wing_myapp (last 90 days, up to 200)
+palace(operation="garden", wing="wing_myapp")
+
+# Focused analysis of a specific room
+palace(operation="garden", wing="wing_myapp", room="auth-decisions", max_drawers=50)
+
+# Broader lookback window
+palace(operation="garden", wing="wing_myapp", lookback_days=180)
+```
+
+**What garden produces**:
+- `clusters` — groups of related drawers linked via `part_of_cluster` KG edges, each with a label, dominant category, and rooms spanned.
+- `kg_edges_created` — total KG triples written (`is_a`, `has_label`, `has_size`, `part_of_cluster`, optionally `spans_rooms`).
+- `importance_backfilled` — drawers that had no `has_importance` fact now have one (Phase 3 rubric applied).
+- `diary_entry` — "written" confirms a Curator diary entry was created.
+
+**When to run**: Occasionally — not every session. Useful after large import batches, after several weeks of active use, or when you want to discover content clusters before a refactor. Bounded by `max_drawers` (default 200) and a 120-second wall-clock budget.

@@ -1,0 +1,75 @@
+digraph kg_schema {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, style=filled];
+    edge [fontname="Helvetica", fontsize=9];
+
+    // Drawer nodes
+    subgraph cluster_drawers {
+        label="Drawer Entities";
+        style=rounded;
+        color="#4A90D9";
+        fontcolor="#2C3E50";
+
+        d1 [label="drawer:d_042\n(decision)", shape=box, fillcolor="#AED6F1"];
+        d2 [label="drawer:d_043\n(decision)", shape=box, fillcolor="#AED6F1"];
+        d3 [label="drawer:d_099\n(architecture)", shape=box, fillcolor="#AED6F1"];
+        d4 [label="drawer:d_055\n(lesson_learned)", shape=box, fillcolor="#AED6F1"];
+        d5 [label="drawer:d_056\n(duplicate of d_055)", shape=box, fillcolor="#FADBD8"];
+    }
+
+    // Cluster node
+    subgraph cluster_clusters {
+        label="Cluster Entities (garden-created)";
+        style=rounded;
+        color="#27AE60";
+        fontcolor="#2C3E50";
+
+        c1 [label="cluster:a3f2b1c9d0e4\n(drawer_cluster)", shape=hexagon, fillcolor="#A9DFBF"];
+    }
+
+    // Importance values (abstract)
+    subgraph cluster_values {
+        label="Value Objects";
+        style=rounded;
+        color="#7F8C8D";
+        fontcolor="#2C3E50";
+
+        imp_high [label="0.75", shape=ellipse, fillcolor="#F9E79F"];
+        imp_arch [label="0.80", shape=ellipse, fillcolor="#F9E79F"];
+        imp_low [label="0.15", shape=ellipse, fillcolor="#FADBD8"];
+        cat_dec [label="decision", shape=ellipse, fillcolor="#D5D8DC"];
+        cat_arch [label="architecture", shape=ellipse, fillcolor="#D5D8DC"];
+        cat_ll [label="lesson_learned", shape=ellipse, fillcolor="#D5D8DC"];
+        cluster_type [label="drawer_cluster", shape=ellipse, fillcolor="#D5D8DC"];
+        cluster_label [label="\"decision cluster:\nauth migration\n--- 3 drawers\"", shape=ellipse, fillcolor="#D5D8DC"];
+        size_val [label="3", shape=ellipse, fillcolor="#D5D8DC"];
+        rooms_val [label="\"auth-decisions,\ndecisions\"", shape=ellipse, fillcolor="#D5D8DC"];
+    }
+
+    // Importance edges (green = new in v1.2.0)
+    d1 -> imp_high [label="has_importance", color="#27AE60", fontcolor="#27AE60"];
+    d3 -> imp_arch [label="has_importance", color="#27AE60", fontcolor="#27AE60"];
+    d5 -> imp_low [label="has_importance", color="#27AE60", fontcolor="#27AE60"];
+
+    // Category edges
+    d1 -> cat_dec [label="has_category", color="#27AE60", fontcolor="#27AE60"];
+    d2 -> cat_dec [label="has_category", color="#27AE60", fontcolor="#27AE60"];
+    d3 -> cat_arch [label="has_category", color="#27AE60", fontcolor="#27AE60"];
+    d4 -> cat_ll [label="has_category", color="#27AE60", fontcolor="#27AE60"];
+
+    // Duplicate / related edges
+    d5 -> d4 [label="duplicates", color="#E74C3C", fontcolor="#E74C3C", style=bold];
+    d1 -> d2 [label="related_to", color="#F39C12", fontcolor="#F39C12", style=dashed];
+
+    // Cluster edges
+    d1 -> c1 [label="part_of_cluster", color="#27AE60", fontcolor="#27AE60"];
+    d2 -> c1 [label="part_of_cluster", color="#27AE60", fontcolor="#27AE60"];
+    d3 -> c1 [label="part_of_cluster", color="#27AE60", fontcolor="#27AE60"];
+
+    // Cluster metadata
+    c1 -> cluster_type [label="is_a", color="#27AE60", fontcolor="#27AE60"];
+    c1 -> cluster_label [label="has_label", color="#27AE60", fontcolor="#27AE60"];
+    c1 -> size_val [label="has_size", color="#27AE60", fontcolor="#27AE60"];
+    c1 -> rooms_val [label="spans_rooms", color="#27AE60", fontcolor="#27AE60"];
+}

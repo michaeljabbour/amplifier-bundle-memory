@@ -4,10 +4,29 @@ build-backend = "hatchling.build"
 
 [project]
 name = "amplifier-module-hooks-project-context"
-version = "1.0.0"
+version = "1.1.0"
 description = "Amplifier hook that integrates the project-context coordination file system"
+readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["amplifier-core"]
+dependencies = [
+    "amplifier-core",
+    "amplifier-module-tool-mempalace>=1.0.0",
+]
 
 [project.entry-points."amplifier.modules"]
 hooks-project-context = "amplifier_module_hooks_project_context:mount"
+
+[tool.uv.sources]
+amplifier-module-tool-mempalace = { path = "../tool-mempalace", editable = true }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.1",
+    "pyright>=1.1",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = false
+reportGeneralTypeIssues = false

@@ -1,0 +1,26 @@
+[project]
+name = "amplifier-bundle-memory-tests"
+version = "0.0.0"
+description = "Bundle-level integration test runner"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "amplifier-core>=0.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "benchmark: slow benchmark tests; excluded from default runs. Run with: pytest -m benchmark",
+]
+addopts = "-m 'not benchmark'"
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = false
