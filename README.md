@@ -8,19 +8,45 @@ A local-first, two-layer memory system for [Amplifier](https://github.com/micros
 
 ---
 
+## What's New in v1.2.0
+
+Released 2026-04-17.
+
+- **Event observability**: every hook emits structured events to `~/.mempalace/events/{session_id}.jsonl`. New `palace events` tool operation for querying. Kill switch per hook: `emit_events: false`.
+- **Phase 3 curator**: at session:end, the curator now enriches the KG with `has_importance` (rubric-scored 0.0-1.0), `has_category`, `duplicates`, and `related_to` facts. Zero deletion — duplicates are preserved with low importance, not dropped.
+- **Briefing re-ranking**: `final = semantic + weight * (importance - 0.5) * 0.08`. Max boost +/-0.04 at weight=1.0. Kill switch: `briefing_importance_weight: 0.0` -> identical to v1.1.0.
+- **`palace garden` operation**: on-demand structural analysis (BFS clustering, KG edges, diary entry, importance backfill).
+- **`mempalace:docent` agent**: conversational memory Q&A in natural language.
+- **Research paper**: full design + evaluation writeup at [`docs/research/gene-transfer-v1.2.0.pdf`](docs/research/gene-transfer-v1.2.0.pdf).
+
+---
+
 ## Session Lifecycle
 
 ```
 session:start
-  └── hooks-mempalace-briefing  →  ephemeral briefing (palace + KG + diary + HANDOFF.md)
-  └── hooks-project-context     →  inject Tier 1 coordination files; scaffold if missing
+  ├── hooks-mempalace-briefing  →  ephemeral briefing (palace + KG + diary + HANDOFF.md)
+  │                                 with importance re-ranking (kill switch: briefing_importance_weight=0.0)
+  └── hooks-project-context      →  inject Tier 1 coordination files; scaffold if missing
 
 during work
-  └── hooks-mempalace-capture   →  verbatim palace drawers (auto-wing, auto-room, category-tagged)
+  ├── hooks-mempalace-capture    →  verbatim palace drawers + emit `drawer_filed` event
+  ├── hooks-mempalace-interject  →  surface relevant memory on prompt_submit/tool_pre/orchestrator_complete
+  │                                 (only when cosine ≥ 0.72, LLM-judged when uncertain)
+  └── (every hook)               →  emit events to ~/.mempalace/events/{session_id}.jsonl
 
 session:end
-  └── hooks-project-context     →  delegates to Curator
-  └── Curator agent             →  palace curation + HANDOFF.md + PROVENANCE.md + GLOSSARY.md
+  ├── hooks-project-context      →  delegates to Curator
+  └── Curator agent
+      ├── Phase 1: palace curation (verbatim drawers)
+      ├── Phase 2: coordination file updates (HANDOFF.md, PROVENANCE.md, ...)
+      └── Phase 3: KG enrichment (has_importance, has_category, duplicates, related_to)
+
+on-demand
+  ├── mempalace:archivist        →  precise read-path (palace search, KG queries)
+  ├── mempalace:docent           →  conversational memory Q&A ("what did I work on last week?")
+  ├── mempalace:curator          →  explicit remember / handoff update
+  └── palace(operation="garden") →  deep clustering + importance backfill + diary entry
 ```
 
 ---
@@ -29,8 +55,9 @@ session:end
 
 | Agent | Trigger | Role |
 |---|---|---|
-| `mempalace:archivist` | on-demand | Read path: palace search, KG queries, graph traversal, coordination file reads |
-| `mempalace:curator` | session:end / on-demand | Write path: palace curation, KG updates, HANDOFF.md, PROVENANCE.md, GLOSSARY.md |
+| `mempalace:archivist` | on-demand | Precise read path: palace search, KG queries, graph traversal, coordination file reads |
+| `mempalace:docent` | on-demand | **(New in v1.2.0)** Conversational memory Q&A — natural-language questions about history, decisions, patterns, session recap |
+| `mempalace:curator` | session:end / on-demand | Write path: palace curation, Phase 3 KG enrichment, HANDOFF.md, PROVENANCE.md, GLOSSARY.md |
 
 ---
 
@@ -38,11 +65,12 @@ session:end
 
 | Module | Type | Description |
 |---|---|---|
-| `hooks-mempalace-briefing` | hook | Session-start briefing from palace + KG + diary + coordination files |
-| `hooks-mempalace-capture` | hook | Verbatim palace capture on tool:post (absorbs heuristic category detection) |
-| `hooks-project-context` | hook | Reads coordination files at start; delegates HANDOFF update at end |
-| `tool-mempalace` | tool | High-level palace tool: search, remember, kg, traverse, diary, mine |
-| `tool-memory` | tool | SQLite key-value fact store for explicit memories |
+| `hooks-mempalace-briefing` | hook | Session-start briefing from palace + KG + diary + coordination files. Importance re-ranking (weight=1.0 default, 0.0 disables). Emits `briefing_assembled` / `briefing_skipped`. |
+| `hooks-mempalace-capture` | hook | Verbatim palace capture on tool:post with category detection. Emits `drawer_filed` / `capture_skipped`. |
+| `hooks-mempalace-interject` | hook | Mid-session memory surfacing (cosine >= 0.72, LLM-judged in uncertain band). Emits `memory_surfaced` / `interject_skipped`. |
+| `hooks-project-context` | hook | Reads Tier 1 coordination files at session:start; delegates HANDOFF update at session:end. Emits `coordination_read` / `coordination_scaffolded` / `curator_delegated`. |
+| `tool-mempalace` | tool | Palace operations: `search`, `remember`, `kg`, `traverse`, `diary`, `mine`, `events` *(new v1.2.0)*, `garden` *(new v1.2.0)*. Also hosts the shared event emitter. |
+| `tool-memory` | tool | SQLite key-value fact store for explicit memories (composed from external repo). |
 
 ---
 
@@ -63,18 +91,25 @@ This bundle consolidates five previously separate modules:
 ## Setup
 
 ```bash
-# 1. Install MemPalace
+# 1. Install MemPalace (the semantic memory engine)
 pip install mempalace
 
 # 2. Initialize a palace for your project
 mempalace init ~/projects/myapp
 
-# 3. Add this bundle to your Amplifier app bundle
-amplifier bundle add git+https://github.com/michaeljabbour/amplifier-bundle-memory@main
+# 3. Add this bundle to Amplifier and make it active
+# (Pin to the latest installable release — v1.2.1 is v1.2.0 + a packaging fix)
+amplifier bundle add git+https://github.com/michaeljabbour/amplifier-bundle-memory@v1.2.1
+amplifier bundle use memory
 
-# 4. Run — coordination files are scaffolded automatically on first session
+# Optional: add to your always-on `app` bundles so memory composes into every session
+# (Edit ~/.amplifier/settings.yaml → bundle.app → append the git URL)
+
+# 4. Run — coordination files scaffold automatically on first session
 amplifier run "start a session"
 ```
+
+> **Note**: The bundle degrades gracefully without MemPalace installed (coordination-files-only mode), but palace search, KG, and garden features silently skip. Install MemPalace for the full experience.
 
 ---
 
@@ -107,6 +142,37 @@ palace(operation="diary", diary_action="write", agent_name="amplifier",
        entry="Resolved the N+1 query issue by adding DataLoader.")
 ```
 
+### Query the session event log *(new in v1.2.0)*
+
+```
+palace(operation="events", hook_filter="mempalace-capture", limit=20, tail=True)
+```
+
+Returns structured events from `~/.mempalace/events/{session_id}.jsonl`. Filter by hook (`mempalace-capture`, `mempalace-briefing`, `mempalace-interject`, `project-context`, `tool-mempalace`) or event type (`drawer_filed`, `briefing_assembled`, `garden_completed`, etc.). Useful for debugging or live observability: `tail -f ~/.mempalace/events/*.jsonl`.
+
+### Run palace garden (deep structural analysis) *(new in v1.2.0)*
+
+```
+palace(operation="garden", wing="wing_myapp", lookback_days=90, max_drawers=200)
+```
+
+On-demand BFS clustering of drawers in a wing. Produces:
+- Cluster KG edges (`part_of_cluster`, `is_a`, `has_label`, `has_size`, `spans_rooms`)
+- Curator diary entry summarizing the run
+- Importance backfill for drawers missing `has_importance` KG facts (using the Phase 3 rubric)
+
+Zero deletion — all outputs are additive KG facts. Bounded by `max_drawers` (hard cap 500) and a 120s total timeout.
+
+### Ask natural-language questions *(new in v1.2.0)*
+
+Delegate to the **docent agent** for conversational memory Q&A:
+
+> "What decisions have I made about authentication?"
+> "Summarize what I worked on last week."
+> "Which patterns keep recurring across my projects?"
+
+The docent synthesizes from palace search + KG + diaries + session events + coordination files.
+
 ---
 
 ## project-context Coordination Files
@@ -132,10 +198,23 @@ On first run, the bundle scaffolds a `project-context/` directory and an `AGENTS
 |---|---|---|
 | LongMemEval (raw, no LLM) | R@5 | **96.6%** |
 | LongMemEval (hybrid v4, held-out) | R@5 | **98.4%** |
-| LongMemEval (hybrid + LLM rerank) | R@5 | ≥99% |
+| LongMemEval (hybrid + LLM rerank) | R@5 | >=99% |
 | LoCoMo (hybrid v5, top-10) | R@10 | 88.9% |
+| **Briefing re-ranking** (v1.2.0, 200x30 synthetic) | **R@5 delta** | **+0.022** (baseline 0.567 -> reranked 0.589) |
+
+The first four rows are properties of MemPalace's retrieval engine. The last row measures v1.2.0's briefing hook re-ranking on a local synthetic proxy — the harness supports running against real LongMemEval when the dataset is available. Full methodology in `docs/research/gene-transfer-v1.2.0.pdf`.
 
 See `evals/` for benchmark runner configuration and the `mempalace:evaluator` agent for running evals via Amplifier.
+
+---
+
+## Research Paper
+
+Full architectural + evaluation writeup: [`docs/research/gene-transfer-v1.2.0.pdf`](docs/research/gene-transfer-v1.2.0.pdf) (14 pages, 5 Graphviz figures).
+
+Covers: gene-transfer concept, system architecture, event observability design, KG intelligence (Phase 3 + briefing re-rank with formula proofs + palace garden), evaluation with benchmark methodology, philosophy preservation analysis, deferred work.
+
+Rebuild from source: `cd docs/research && make all` (requires LaTeX + graphviz).
 
 ---
 
