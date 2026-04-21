@@ -296,6 +296,15 @@ class MempalaceCaptureHook(Hook):
                 raise
 
 
-def mount() -> list[Hook]:
-    """Amplifier module entry point."""
-    return [MempalaceCaptureHook()]
+async def mount(
+    coordinator: Any, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Mount the mempalace-capture hook into the Amplifier coordinator."""
+    hook = MempalaceCaptureHook(config)
+    for event in hook.events:
+        coordinator.hooks.register(event, hook.handle, name=hook.name)
+    return {
+        "name": "hooks-mempalace-capture",
+        "version": "1.1.0",
+        "provides": ["mempalace-capture"],
+    }
