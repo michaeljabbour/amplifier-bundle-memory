@@ -349,6 +349,17 @@ class ProjectContextEndHook(Hook):
             )
 
 
-def mount() -> list[Hook]:
-    """Amplifier module entry point."""
-    return [ProjectContextStartHook(), ProjectContextEndHook()]
+async def mount(
+    coordinator: Any, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Mount the project-context hooks into the Amplifier coordinator."""
+    start_hook = ProjectContextStartHook(config)
+    end_hook = ProjectContextEndHook(config)
+    for hook in (start_hook, end_hook):
+        for event in hook.events:
+            coordinator.hooks.register(event, hook.handle, name=hook.name)
+    return {
+        "name": "hooks-project-context",
+        "version": "1.1.0",
+        "provides": ["project-context-start", "project-context-end"],
+    }
