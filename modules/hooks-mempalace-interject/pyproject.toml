@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.entry-points."amplifier.modules"]
-hooks-mempalace-interject = "amplifier_module_hooks_mempalace_interject"
+hooks-mempalace-interject = "amplifier_module_hooks_mempalace_interject:mount"
 
 [tool.uv.sources]
 amplifier-module-tool-mempalace = { path = "../tool-mempalace", editable = true }
