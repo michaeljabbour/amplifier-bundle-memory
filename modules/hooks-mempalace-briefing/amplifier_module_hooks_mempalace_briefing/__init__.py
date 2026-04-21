@@ -445,6 +445,15 @@ class MempalaceBriefingHook(Hook):
                 )
 
 
-def mount() -> list[Hook]:
-    """Amplifier module entry point."""
-    return [MempalaceBriefingHook()]
+async def mount(
+    coordinator: Any, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Mount the mempalace-briefing hook into the Amplifier coordinator."""
+    hook = MempalaceBriefingHook(config)
+    for event in hook.events:
+        coordinator.hooks.register(event, hook.handle, name=hook.name)
+    return {
+        "name": "hooks-mempalace-briefing",
+        "version": "1.1.0",
+        "provides": ["mempalace-briefing"],
+    }
