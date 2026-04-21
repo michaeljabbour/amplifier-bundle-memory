@@ -1,0 +1,57 @@
+name: Contract check
+
+# Runs hook/tool contract tests against the installed amplifier-core so we
+# catch breaking changes in core or foundation before they reach users.
+#
+# Matrix:
+#   - pinned     → the amplifier-core version declared in pyproject.toml
+#   - main       → the latest microsoft/amplifier-core@main (canary job,
+#                  allowed to fail; surfaces upcoming drift in the PR log)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly at 08:00 UTC on Mondays — catches upstream changes
+    # even when this repo is quiet.
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+jobs:
+  contract:
+    name: contract (${{ matrix.core }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - core: pinned
+            extra_install: ""
+            continue_on_error: false
+          - core: main
+            extra_install: "git+https://github.com/microsoft/amplifier-core@main"
+            continue_on_error: true
+    continue-on-error: ${{ matrix.continue_on_error }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dev dependencies
+        run: uv sync
+
+      - name: Override amplifier-core (matrix)
+        if: matrix.extra_install != ''
+        run: uv pip install --reinstall ${{ matrix.extra_install }}
+
+      - name: Show resolved amplifier-core version
+        run: uv run python -c "import amplifier_core, importlib.metadata as m; print('amplifier-core:', m.version('amplifier-core'))"
+
+      - name: Run contract + emission tests
+        run: uv run pytest tests/test_contract.py tests/test_hook_emissions.py -v

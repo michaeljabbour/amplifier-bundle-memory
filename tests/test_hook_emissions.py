@@ -4,6 +4,9 @@ Bundle-level integration tests for hook emission wiring (Section 8.6).
 These tests verify that each hook correctly calls emit_event with the right
 hook name and event name. emit_event itself is patched so tests don't touch
 the filesystem, keeping them fast and isolated.
+
+Each hook's invocation matches amplifier-core's current handler contract:
+    async def __call__(event: str, data: dict) -> HookResult
 """
 
 from __future__ import annotations
@@ -14,29 +17,6 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-
-
-# ---------------------------------------------------------------------------
-# Test helpers
-# ---------------------------------------------------------------------------
-
-
-class FakeHookContext:
-    """Minimal stub for HookContext used by capture, briefing, project-context hooks."""
-
-    def __init__(
-        self, event: dict[str, Any] | None = None, session_id: str | None = None
-    ) -> None:
-        self.event: dict[str, Any] = event or {}
-        self.session_id = session_id
-        self.injected: list[str] = []
-        self.delegations: list[dict[str, Any]] = []
-
-    def inject_context(self, content: str, *, ephemeral: bool = True) -> None:
-        self.injected.append(content)
-
-    def delegate_to_agent(self, agent: str, *, prompt: str) -> None:
-        self.delegations.append({"agent": agent, "prompt": prompt})
 
 
 # ---------------------------------------------------------------------------
@@ -55,14 +35,16 @@ class TestCaptureHookEmissions:
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
 
         hook = m.MempalaceCaptureHook()
-        ctx = FakeHookContext(
-            event={
-                "tool_name": "bash",
-                "tool_input": {"command": "ls -la"},
-                "tool_output": "x" * 200,  # worthy: >50 chars, <8192 chars
-            }
+        asyncio.run(
+            hook(
+                "tool:post",
+                {
+                    "tool_name": "bash",
+                    "tool_input": {"command": "ls -la"},
+                    "tool_output": "x" * 200,
+                },
+            )
         )
-        asyncio.run(hook.handle(ctx))
 
         filed = [e for e in emitted if e[0][1] == "drawer_filed"]
         assert len(filed) == 1, f"Expected drawer_filed in {emitted}"
@@ -79,14 +61,12 @@ class TestCaptureHookEmissions:
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
         hook = m.MempalaceCaptureHook()
-        ctx = FakeHookContext(
-            event={
-                "tool_name": "bash",
-                "tool_input": {},
-                "tool_output": "short",  # < 50 chars → too_short
-            }
+        asyncio.run(
+            hook(
+                "tool:post",
+                {"tool_name": "bash", "tool_input": {}, "tool_output": "short"},
+            )
         )
-        asyncio.run(hook.handle(ctx))
 
         skipped = [e for e in emitted if e[0][1] == "capture_skipped"]
         assert len(skipped) == 1, f"Expected capture_skipped in {emitted}"
@@ -103,10 +83,12 @@ class TestCaptureHookEmissions:
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
         hook = m.MempalaceCaptureHook(config={"emit_events": False})
-        ctx = FakeHookContext(
-            event={"tool_name": "bash", "tool_input": {}, "tool_output": "short"}
+        asyncio.run(
+            hook(
+                "tool:post",
+                {"tool_name": "bash", "tool_input": {}, "tool_output": "short"},
+            )
         )
-        asyncio.run(hook.handle(ctx))
         assert emitted == []
 
 
@@ -123,15 +105,12 @@ class TestBriefingHookEmissions:
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
-        # Mock subprocess.run so mempalace appears available
         def fake_run(
             cmd: Any, *a: Any, **kw: Any
         ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         monkeypatch.setattr(m.subprocess, "run", fake_run)
-
-        # Mock _build_briefing to return a non-empty briefing
         monkeypatch.setattr(
             m,
             "_build_briefing",
@@ -140,9 +119,11 @@ class TestBriefingHookEmissions:
         monkeypatch.setattr(m, "_detect_project_name", lambda: "testproject")
 
         hook = m.MempalaceBriefingHook()
-        ctx = FakeHookContext(event={"opening_prompt": "start working"})
-        asyncio.run(hook.handle(ctx))
+        result = asyncio.run(
+            hook("session:start", {"opening_prompt": "start working"})
+        )
 
+        assert result.action == "inject_context"
         assembled = [e for e in emitted if e[0][1] == "briefing_assembled"]
         assert len(assembled) == 1, f"Expected briefing_assembled in {emitted}"
         _args, kwargs = assembled[0]
@@ -170,8 +151,7 @@ class TestBriefingHookEmissions:
         monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
 
         hook = m.MempalaceBriefingHook()
-        ctx = FakeHookContext()
-        asyncio.run(hook.handle(ctx))
+        asyncio.run(hook("session:start", {}))
 
         skipped = [e for e in emitted if e[0][1] == "briefing_skipped"]
         assert len(skipped) == 1
@@ -193,8 +173,7 @@ class TestBriefingHookEmissions:
         monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
 
         hook = m.MempalaceBriefingHook(config={"emit_events": False})
-        ctx = FakeHookContext()
-        asyncio.run(hook.handle(ctx))
+        asyncio.run(hook("session:start", {}))
         assert emitted == []
 
 
@@ -308,7 +287,6 @@ class TestProjectContextHookEmissions:
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
-        # Create a project-context/ dir with a HANDOFF.md
         pc_dir = tmp_path / "project-context"
         pc_dir.mkdir()
         (pc_dir / "HANDOFF.md").write_text(
@@ -318,9 +296,9 @@ class TestProjectContextHookEmissions:
         monkeypatch.setattr(m, "_find_project_context_dir", lambda: pc_dir)
 
         hook = m.ProjectContextStartHook()
-        ctx = FakeHookContext()
-        asyncio.run(hook.handle(ctx))
+        result = asyncio.run(hook("session:start", {}))
 
+        assert result.action == "inject_context"
         read_events = [e for e in emitted if e[0][1] == "coordination_read"]
         assert len(read_events) == 1, f"Expected coordination_read in {emitted}"
         _args, kwargs = read_events[0]
@@ -344,8 +322,7 @@ class TestProjectContextHookEmissions:
         monkeypatch.setattr(m, "_find_git_root", lambda: tmp_path)
 
         hook = m.ProjectContextStartHook(config={"tier1_always": False})
-        ctx = FakeHookContext()
-        asyncio.run(hook.handle(ctx))
+        asyncio.run(hook("session:start", {}))
 
         scaffolded = [e for e in emitted if e[0][1] == "coordination_scaffolded"]
         assert len(scaffolded) == 1, f"Expected coordination_scaffolded in {emitted}"
@@ -353,10 +330,10 @@ class TestProjectContextHookEmissions:
         assert "files_created" in data
         assert len(data["files_created"]) > 0
 
-    def test_project_context_emits_curator_delegated(
+    def test_project_context_emits_curator_handoff_requested(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """session:end → curator_delegated event."""
+        """session:end → curator_handoff_requested event."""
         import amplifier_module_hooks_project_context as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
@@ -367,12 +344,11 @@ class TestProjectContextHookEmissions:
         monkeypatch.setattr(m, "_find_project_context_dir", lambda: pc_dir)
 
         hook = m.ProjectContextEndHook()
-        ctx = FakeHookContext()
-        asyncio.run(hook.handle(ctx))
+        asyncio.run(hook("session:end", {}))
 
-        delegated = [e for e in emitted if e[0][1] == "curator_delegated"]
-        assert len(delegated) == 1, f"Expected curator_delegated in {emitted}"
-        data = delegated[0][1]["data"]
+        requested = [e for e in emitted if e[0][1] == "curator_handoff_requested"]
+        assert len(requested) == 1, f"Expected curator_handoff_requested in {emitted}"
+        data = requested[0][1]["data"]
         assert "prompt_preview" in data
         assert len(data["prompt_preview"]) > 0
 
@@ -391,6 +367,5 @@ class TestProjectContextHookEmissions:
         monkeypatch.setattr(m, "_find_project_context_dir", lambda: pc_dir)
 
         hook = m.ProjectContextStartHook(config={"emit_events": False})
-        ctx = FakeHookContext()
-        asyncio.run(hook.handle(ctx))
+        asyncio.run(hook("session:start", {}))
         assert emitted == []
