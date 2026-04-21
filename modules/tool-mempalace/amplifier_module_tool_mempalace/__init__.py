@@ -464,6 +464,14 @@ class PalaceTool(Tool):
             return ToolResult(content=f"Error: {exc}", is_error=True)
 
 
-def mount() -> list[Tool]:
-    """Amplifier module entry point."""
-    return [PalaceTool()]
+async def mount(
+    coordinator: Any, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Mount the palace tool into the Amplifier coordinator."""
+    tool = PalaceTool()
+    await coordinator.mount("tools", tool, name=tool.name)
+    return {
+        "name": "tool-mempalace",
+        "version": "1.2.0",
+        "provides": ["palace"],
+    }
