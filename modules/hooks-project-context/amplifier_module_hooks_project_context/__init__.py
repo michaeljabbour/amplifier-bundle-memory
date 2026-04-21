@@ -26,26 +26,14 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from amplifier_core import Hook, HookContext  # type: ignore
+    from amplifier_core import HookResult  # type: ignore
 except ImportError:
     # Graceful degradation when running outside Amplifier (e.g., tests)
-    class Hook:  # type: ignore
-        name: str = ""
-        events: list[str] = []
-
-        def __init__(self, config: dict[str, Any] | None = None) -> None:
-            pass
-
-    class HookContext:  # type: ignore
-        def __init__(self, event: dict[str, Any] | None = None) -> None:
-            self.event: dict[str, Any] = event or {}
-            self.session_id: str | None = None
-
-        def inject_context(self, content: str, *, ephemeral: bool = True) -> None:
-            pass
-
-        def delegate_to_agent(self, agent: str, *, prompt: str) -> None:
-            pass
+    class HookResult:  # type: ignore
+        def __init__(self, *, action: str = "continue", **kwargs: Any) -> None:
+            self.action = action
+            for k, v in kwargs.items():
+                setattr(self, k, v)
 
 
 try:
@@ -254,7 +242,7 @@ def _read_tier1(pc_dir: Path, token_budget: int) -> tuple[str, list[str], int]:
 # ── Hook classes ─────────────────────────────────────────────────────────────
 
 
-class ProjectContextStartHook(Hook):
+class ProjectContextStartHook:
     name = "hooks-project-context-start"
     events = ["session:start"]
 
@@ -265,8 +253,8 @@ class ProjectContextStartHook(Hook):
         self.token_budget: int = self.config.get("token_budget", 800)
         self.emit_events: bool = bool(self.config.get("emit_events", True))
 
-    async def handle(self, ctx: HookContext) -> None:  # type: ignore[override]
-        sid = getattr(ctx, "session_id", None) or ctx.event.get("session_id")
+    async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
+        sid = data.get("session_id")
 
         pc_dir = _find_project_context_dir()
 
@@ -287,12 +275,11 @@ class ProjectContextStartHook(Hook):
                     )
 
         if pc_dir is None:
-            return
+            return HookResult(action="continue")
 
         if self.tier1_always:
             block, files_read, token_estimate = _read_tier1(pc_dir, self.token_budget)
             if block:
-                ctx.inject_context(block, ephemeral=True)
                 if self.emit_events:
                     emit_event(
                         "project-context",
@@ -304,9 +291,18 @@ class ProjectContextStartHook(Hook):
                         },
                         session_id=sid,
                     )
+                return HookResult(
+                    action="inject_context",
+                    context_injection=block,
+                    context_injection_role="user",
+                    ephemeral=True,
+                    suppress_output=True,
+                )
+
+        return HookResult(action="continue")
 
 
-class ProjectContextEndHook(Hook):
+class ProjectContextEndHook:
     name = "hooks-project-context-end"
     events = ["session:end"]
 
@@ -315,18 +311,19 @@ class ProjectContextEndHook(Hook):
         self.handoff_on_end: bool = self.config.get("handoff_on_end", True)
         self.emit_events: bool = bool(self.config.get("emit_events", True))
 
-    async def handle(self, ctx: HookContext) -> None:  # type: ignore[override]
+    async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         if not self.handoff_on_end:
-            return
+            return HookResult(action="continue")
 
         pc_dir = _find_project_context_dir()
         if pc_dir is None:
-            return
+            return HookResult(action="continue")
 
-        sid = getattr(ctx, "session_id", None) or ctx.event.get("session_id")
+        sid = data.get("session_id")
 
-        # Delegate to the Curator agent to update coordination files.
-        # The Curator has the full session context and knows what to write.
+        # Agent delegation is not yet available in the HookResult API.
+        # For now, just emit the event so external watchers know the session
+        # ended with a pending handoff. The Curator can be invoked manually.
         prompt = (
             "Update the project-context coordination files for this session. "
             "Rewrite HANDOFF.md with what was accomplished, what is blocked, "
@@ -334,19 +331,15 @@ class ProjectContextEndHook(Hook):
             "Append to PROVENANCE.md, GLOSSARY.md, and WAYSOFWORKING.md "
             "if any decisions, terms, or patterns emerged."
         )
-        ctx.delegate_to_agent(
-            "mempalace:curator",
-            prompt=prompt,
-        )
-
         if self.emit_events:
             emit_event(
                 "project-context",
-                "curator_delegated",
+                "curator_handoff_requested",
                 ok=True,
                 data={"prompt_preview": prompt[:200]},
                 session_id=sid,
             )
+        return HookResult(action="continue")
 
 
 async def mount(
@@ -356,8 +349,8 @@ async def mount(
     start_hook = ProjectContextStartHook(config)
     end_hook = ProjectContextEndHook(config)
     for hook in (start_hook, end_hook):
-        for event in hook.events:
-            coordinator.hooks.register(event, hook.handle, name=hook.name)
+        for evt in hook.events:
+            coordinator.hooks.register(evt, hook, name=hook.name)
     return {
         "name": "hooks-project-context",
         "version": "1.1.0",

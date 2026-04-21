@@ -26,26 +26,14 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from amplifier_core import Hook, HookContext, mount_hook  # type: ignore
+    from amplifier_core import HookResult  # type: ignore
 except ImportError:
     # Graceful degradation when running outside Amplifier (e.g., tests)
-    class Hook:  # type: ignore
-        name: str = ""
-        events: list[str] = []
-
-        def __init__(self, config: dict[str, Any] | None = None) -> None:
-            pass
-
-    class HookContext:  # type: ignore
-        def __init__(self, event: dict[str, Any] | None = None) -> None:
-            self.event: dict[str, Any] = event or {}
-            self.session_id: str | None = None
-
-        def inject_context(self, content: str, *, ephemeral: bool = True) -> None:
-            pass
-
-    def mount_hook(*args: Any, **kwargs: Any) -> None:  # type: ignore
-        pass
+    class HookResult:  # type: ignore
+        def __init__(self, *, action: str = "continue", **kwargs: Any) -> None:
+            self.action = action
+            for k, v in kwargs.items():
+                setattr(self, k, v)
 
 
 try:
@@ -203,7 +191,7 @@ def _detect_category(text: str) -> str | None:
     return None
 
 
-class MempalaceCaptureHook(Hook):
+class MempalaceCaptureHook:
     name = "hooks-mempalace-capture"
     events = ["tool:post"]
 
@@ -216,12 +204,11 @@ class MempalaceCaptureHook(Hook):
         # Categories to capture (empty list = capture all palace-worthy content)
         self.categories: list[str] = self.config.get("categories", [])
 
-    async def handle(self, ctx: HookContext) -> None:  # type: ignore[override]
-        tool_name: str = ctx.event.get("tool_name", "unknown")
-        tool_input: dict[str, Any] = ctx.event.get("tool_input", {})
-        tool_output: str = str(ctx.event.get("tool_output", ""))
-
-        sid = getattr(ctx, "session_id", None) or ctx.event.get("session_id")
+    async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
+        tool_name: str = data.get("tool_name", "unknown")
+        tool_input: dict[str, Any] = data.get("tool_input", {}) or {}
+        tool_output: str = str(data.get("tool_output", ""))
+        sid = data.get("session_id")
 
         if not _is_palace_worthy(tool_name, tool_output):
             if self.emit_events:
@@ -233,12 +220,11 @@ class MempalaceCaptureHook(Hook):
                     data={"reason": _skip_reason(tool_name, tool_output)},
                     session_id=sid,
                 )
-            return
+            return HookResult(action="continue")
 
         # Category detection (merged from hooks-memory-capture)
         category = _detect_category(tool_output)
         if self.categories and category not in self.categories:
-            # Category filter active but this output doesn't match — skip
             if self.emit_events:
                 emit_event(
                     "mempalace-capture",
@@ -248,7 +234,7 @@ class MempalaceCaptureHook(Hook):
                     data={"reason": "category_filtered"},
                     session_id=sid,
                 )
-            return
+            return HookResult(action="continue")
 
         wing = (
             _detect_wing()
@@ -260,7 +246,6 @@ class MempalaceCaptureHook(Hook):
             if self.auto_room
             else self.config.get("room", "general")
         )
-        # Enrich room name with category if detected
         room = f"{base_room}-{category}" if category else base_room
         source = tool_input.get("path", tool_input.get("file_path", tool_name))
 
@@ -278,7 +263,6 @@ class MempalaceCaptureHook(Hook):
                         "category": category,
                         "content_bytes": len(tool_output.encode("utf-8")),
                         "source": str(source),
-                        # Dedup status is determined by Curator Phase 3, not at capture time.
                     },
                     session_id=sid,
                 )
@@ -295,6 +279,8 @@ class MempalaceCaptureHook(Hook):
             if not self.silent:
                 raise
 
+        return HookResult(action="continue")
+
 
 async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
@@ -302,7 +288,7 @@ async def mount(
     """Mount the mempalace-capture hook into the Amplifier coordinator."""
     hook = MempalaceCaptureHook(config)
     for event in hook.events:
-        coordinator.hooks.register(event, hook.handle, name=hook.name)
+        coordinator.hooks.register(event, hook, name=hook.name)
     return {
         "name": "hooks-mempalace-capture",
         "version": "1.1.0",

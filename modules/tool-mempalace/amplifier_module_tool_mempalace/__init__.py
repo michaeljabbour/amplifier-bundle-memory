@@ -59,7 +59,7 @@ class PalaceTool(Tool):
         "MemPalace memory operations. Operations: search, remember, status, "
         "kg (knowledge graph), traverse, diary, mine, events, garden."
     )
-    parameters = {
+    input_schema = {
         "type": "object",
         "properties": {
             "operation": {

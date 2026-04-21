@@ -29,26 +29,14 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from amplifier_core import Hook, HookContext, mount_hook  # type: ignore
+    from amplifier_core import HookResult  # type: ignore
 except ImportError:
     # Graceful degradation when running outside Amplifier (e.g., tests)
-    class Hook:  # type: ignore
-        name: str = ""
-        events: list[str] = []
-
-        def __init__(self, config: dict[str, Any] | None = None) -> None:
-            pass
-
-    class HookContext:  # type: ignore
-        def __init__(self, event: dict[str, Any] | None = None) -> None:
-            self.event: dict[str, Any] = event or {}
-            self.session_id: str | None = None
-
-        def inject_context(self, content: str, *, ephemeral: bool = True) -> None:
-            pass
-
-    def mount_hook(*args: Any, **kwargs: Any) -> None:  # type: ignore
-        pass
+    class HookResult:  # type: ignore
+        def __init__(self, *, action: str = "continue", **kwargs: Any) -> None:
+            self.action = action
+            for k, v in kwargs.items():
+                setattr(self, k, v)
 
 
 try:
@@ -352,7 +340,7 @@ def _build_briefing(
 # ── Hook class ───────────────────────────────────────────────────────────────
 
 
-class MempalaceBriefingHook(Hook):
+class MempalaceBriefingHook:
     name = "hooks-mempalace-briefing"
     events = ["session:start"]
 
@@ -371,8 +359,8 @@ class MempalaceBriefingHook(Hook):
             self.config.get("briefing_importance_weight", 1.0)
         )
 
-    async def handle(self, ctx: HookContext) -> None:  # type: ignore[override]
-        sid = getattr(ctx, "session_id", None) or ctx.event.get("session_id")
+    async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
+        sid = data.get("session_id")
 
         # Check if mempalace is available — skip silently if not installed
         try:
@@ -396,13 +384,17 @@ class MempalaceBriefingHook(Hook):
                         footer = (
                             "\n*MemPalace not available — semantic search skipped.*"
                         )
-                        ctx.inject_context(
-                            header + section + footer, ephemeral=self.ephemeral
+                        return HookResult(
+                            action="inject_context",
+                            context_injection=header + section + footer,
+                            context_injection_role="user",
+                            ephemeral=self.ephemeral,
+                            suppress_output=True,
                         )
-            return
+            return HookResult(action="continue")
 
         project = _detect_project_name()
-        opening_query = ctx.event.get("opening_prompt", "")
+        opening_query = data.get("opening_prompt", "") or data.get("prompt", "")
 
         briefing, sections, token_estimate, results_fetched, results_after_rerank = (
             _build_briefing(
@@ -417,7 +409,6 @@ class MempalaceBriefingHook(Hook):
         )
 
         if briefing:
-            ctx.inject_context(briefing, ephemeral=self.ephemeral)
             if self.emit_events:
                 emit_event(
                     "mempalace-briefing",
@@ -434,15 +425,23 @@ class MempalaceBriefingHook(Hook):
                     },
                     session_id=sid,
                 )
-        else:
-            if self.emit_events:
-                emit_event(
-                    "mempalace-briefing",
-                    "briefing_skipped",
-                    ok=False,
-                    data={"reason": "no_content"},
-                    session_id=sid,
-                )
+            return HookResult(
+                action="inject_context",
+                context_injection=briefing,
+                context_injection_role="user",
+                ephemeral=self.ephemeral,
+                suppress_output=True,
+            )
+
+        if self.emit_events:
+            emit_event(
+                "mempalace-briefing",
+                "briefing_skipped",
+                ok=False,
+                data={"reason": "no_content"},
+                session_id=sid,
+            )
+        return HookResult(action="continue")
 
 
 async def mount(
@@ -451,7 +450,7 @@ async def mount(
     """Mount the mempalace-briefing hook into the Amplifier coordinator."""
     hook = MempalaceBriefingHook(config)
     for event in hook.events:
-        coordinator.hooks.register(event, hook.handle, name=hook.name)
+        coordinator.hooks.register(event, hook, name=hook.name)
     return {
         "name": "hooks-mempalace-briefing",
         "version": "1.1.0",

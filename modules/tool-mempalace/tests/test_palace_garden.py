@@ -44,7 +44,7 @@ class TestGardenOperationRegistered:
     def test_garden_operation_registered(self) -> None:
         """'garden' must appear in the operation enum."""
         tool = PalaceTool()
-        enum_values: list[str] = tool.parameters["properties"]["operation"]["enum"]
+        enum_values: list[str] = tool.input_schema["properties"]["operation"]["enum"]
         assert "garden" in enum_values, f"'garden' not in {enum_values}"
 
 

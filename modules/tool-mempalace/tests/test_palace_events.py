@@ -59,9 +59,9 @@ def _result_json(tool_result) -> dict:
 
 class TestEventsOperationRegistered:
     def test_events_operation_registered(self) -> None:
-        """'events' must appear in the operation enum in PalaceTool.parameters."""
+        """'events' must appear in the operation enum in PalaceTool.input_schema."""
         tool = PalaceTool()
-        enum_values: list[str] = tool.parameters["properties"]["operation"]["enum"]
+        enum_values: list[str] = tool.input_schema["properties"]["operation"]["enum"]
         assert "events" in enum_values, f"'events' not in operation enum: {enum_values}"
 
 
