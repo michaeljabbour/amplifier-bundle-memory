@@ -113,6 +113,9 @@ class FakeCoordinator:
         """Record a contributor registration on *channel*."""
         self._contributors.setdefault(channel, {})[name] = callback
 
+    async def mount(self, channel: str, tool: Any, *, name: str = "") -> None:
+        """No-op fake mount — records nothing, satisfies tool mount() contract."""
+
 
 # ---------------------------------------------------------------------------
 # Capture hook — coordinator bridge tests (RED phase)
@@ -625,9 +628,7 @@ class TestInterjectCoordinatorBridge:
             f"got: {coordinator.hooks._emit_log}"
         )
         _, payload = surfaced[0]
-        assert payload.get("ok") is True, (
-            f"Expected ok=True in payload, got: {payload}"
-        )
+        assert payload.get("ok") is True, f"Expected ok=True in payload, got: {payload}"
         assert payload.get("trigger") == "prompt_submit", (
             f"Expected trigger='prompt_submit' in payload, got: {payload}"
         )
@@ -717,4 +718,51 @@ class TestProjectContextCoordinatorBridge:
         assert len(handoff_calls) == 1, (
             f"Expected exactly one 'memory-mempalace:curator_handoff_requested' bridge call, "
             f"got: {bridge_calls}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool-mempalace — coordinator bridge tests
+# ---------------------------------------------------------------------------
+
+
+class TestToolMempalaceCoordinatorBridge:
+    """Tests for coordinator bridge wiring in the palace tool.
+
+    These tests verify that mount() registers a contributor and that garden
+    operations forward events to the coordinator via the combined_emit /
+    sync_bridge_emit bridge.
+    """
+
+    def test_register_contributor_called_at_mount(self) -> None:
+        """mount() must call register_contributor on the coordinator with
+        channel='observability.events' and name='memory-mempalace-tool'.
+
+        The contributor callback must return a list of events that includes:
+        - 'memory-mempalace:garden_completed'
+        - 'memory-mempalace:garden_progress'
+        """
+        import asyncio
+
+        import amplifier_module_tool_mempalace as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+
+        asyncio.run(m.mount(coordinator))
+
+        assert "observability.events" in coordinator._contributors, (
+            "mount() must call register_contributor with channel 'observability.events'"
+        )
+        contribs = coordinator._contributors["observability.events"]
+        assert "memory-mempalace-tool" in contribs, (
+            "mount() must register contributor with name 'memory-mempalace-tool'"
+        )
+
+        callback = contribs["memory-mempalace-tool"]
+        events = callback()
+        assert "memory-mempalace:garden_completed" in events, (
+            "contributor callback must include 'memory-mempalace:garden_completed'"
+        )
+        assert "memory-mempalace:garden_progress" in events, (
+            "contributor callback must include 'memory-mempalace:garden_progress'"
         )
