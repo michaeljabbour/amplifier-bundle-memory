@@ -634,3 +634,87 @@ class TestInterjectCoordinatorBridge:
         assert payload.get("memory_ids") == ["m1"], (
             f"Expected memory_ids=['m1'] in payload, got: {payload}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Project-context hook — coordinator bridge tests
+# ---------------------------------------------------------------------------
+
+
+class TestProjectContextCoordinatorBridge:
+    """Tests for coordinator bridge wiring in the project-context hooks.
+
+    These tests verify that mount() registers a contributor and that the hooks
+    emit coordinator events (coordination_read, coordination_scaffolded,
+    curator_handoff_requested) via bridge_emit.
+    """
+
+    def test_register_contributor_called_at_mount(self) -> None:
+        """mount() must call register_contributor on the coordinator with
+        channel='observability.events' and name='memory-mempalace-project-context'.
+
+        The contributor callback must return a list of events that is a superset of:
+        - 'memory-mempalace:coordination_read'
+        - 'memory-mempalace:coordination_scaffolded'
+        - 'memory-mempalace:curator_handoff_requested'
+        """
+        import asyncio
+
+        import amplifier_module_hooks_project_context as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+        asyncio.run(m.mount(coordinator))
+
+        assert "observability.events" in coordinator._contributors, (
+            "mount() must call register_contributor with channel 'observability.events'"
+        )
+        contribs = coordinator._contributors["observability.events"]
+        assert "memory-mempalace-project-context" in contribs, (
+            "mount() must register contributor with name 'memory-mempalace-project-context'"
+        )
+
+        callback = contribs["memory-mempalace-project-context"]
+        events = set(callback())
+        required_events = {
+            "memory-mempalace:coordination_read",
+            "memory-mempalace:coordination_scaffolded",
+            "memory-mempalace:curator_handoff_requested",
+        }
+        assert required_events <= events, (
+            f"contributor callback must include all of {required_events}, got: {events}"
+        )
+
+    def test_curator_handoff_requested_bridges_at_session_end(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """After a session:end event, the hook must emit exactly one
+        'memory-mempalace:curator_handoff_requested' bridge call when
+        project-context dir exists.
+        """
+        import asyncio
+
+        import amplifier_module_hooks_project_context as m  # type: ignore[import]
+
+        # Create a fake project-context directory so the hook proceeds
+        pc_dir = tmp_path / "project-context"
+        pc_dir.mkdir()
+
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda: pc_dir)
+
+        bridge_calls: list[tuple[str, Any]] = []
+
+        async def fake_bridge(event_name: str, payload: Any) -> None:
+            bridge_calls.append((event_name, payload))
+
+        hook = m.ProjectContextEndHook(bridge_emit=fake_bridge)
+        asyncio.run(hook("session:end", {"session_id": "sid"}))
+
+        handoff_calls = [
+            (name, payload)
+            for name, payload in bridge_calls
+            if name == "memory-mempalace:curator_handoff_requested"
+        ]
+        assert len(handoff_calls) == 1, (
+            f"Expected exactly one 'memory-mempalace:curator_handoff_requested' bridge call, "
+            f"got: {bridge_calls}"
+        )

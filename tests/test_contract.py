@@ -84,6 +84,11 @@ class _FakeCoordinator:
 
         self.hooks = HookRegistry()
         self.session_id: str | None = "test-session"
+        self._contributors: dict[str, dict[str, Any]] = {}
+
+    def register_contributor(self, channel: str, name: str, callback: Any) -> None:
+        """Record a contributor registration (stub — no-op beyond recording)."""
+        self._contributors.setdefault(channel, {})[name] = callback
 
 
 async def _dispatch(registry: Any, event: str, data: dict[str, Any]) -> list[Any]:
