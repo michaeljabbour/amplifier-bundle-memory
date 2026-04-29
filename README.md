@@ -226,6 +226,19 @@ Rebuild from source: `cd docs/research && make all` (requires LaTeX + graphviz).
 
 ---
 
+## Development
+
+For end-to-end testing and bundle development, a [Digital Twin Universe (DTU) profile](docs/development/dtu.md) is provided.
+
+See [docs/development/dtu.md](docs/development/dtu.md) for:
+- Prerequisites and setup
+- Launching the test environment
+- Running integration tests
+- Interactive session testing
+- The update loop for iterating on changes
+
+---
+
 ## License
 
 MIT

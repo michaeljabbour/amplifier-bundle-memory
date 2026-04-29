@@ -1,0 +1,137 @@
+# memory-bundle-e2e DTU Profile
+#
+# End-to-end test environment for amplifier-bundle-memory.
+# Provisions an Ubuntu 24.04 Incus container with mempalace, the memory
+# bundle, and Amplifier installed from a local Gitea mirror.
+#
+# Variables (provided at launch via --var):
+#   GITEA_URL    -- Gitea base URL reachable from inside the environment
+#                   (e.g. http://10.0.0.1:10110)
+#   GITEA_TOKEN  -- API token for Gitea (admin user)
+#
+# Required host environment variables (forwarded via passthrough):
+#   ANTHROPIC_API_KEY  -- Anthropic API key for LLM calls
+#   OPENAI_API_KEY     -- OpenAI API key for LLM calls
+#
+# Launch example:
+#   amplifier-digital-twin launch memory-bundle-e2e \
+#     --var GITEA_URL=http://10.0.0.1:10110 \
+#     --var GITEA_TOKEN=$(amplifier-gitea token <gitea-id> | jq -r .token)
+
+name: memory-bundle-e2e
+description: |
+  End-to-end test environment for amplifier-bundle-memory. Provisions an
+  Ubuntu 24.04 container with mempalace and Amplifier installed from a local
+  Gitea mirror. A seed palace is pre-populated from fixture content and frozen
+  as a reset snapshot so each test run starts from a known-good state.
+  The reset-palace script restores the palace between test runs without
+  re-provisioning the entire environment.
+
+base:
+  image: ubuntu:24.04
+
+# URL rewriting rules.
+#
+# A mitmproxy-based HTTPS proxy intercepts git fetch calls and redirects
+# requests for the amplifier-bundle-memory GitHub repo to the local Gitea
+# mirror, so uv installs the locally mirrored version.
+url_rewrites:
+  auth:
+    username: admin
+    token_var: GITEA_TOKEN
+  # Keep uv's GitHub fast path disabled so `uv tool install` routes through
+  # git fetch and these rules actually apply. See profiles.md for the
+  # reasoning. When true, uv's native GitHub shortcut bypasses the proxy and
+  # url_rewrites do not apply — the upstream GitHub commit is installed instead
+  # of the local Gitea mirror.
+  allow_uv_github_fast_path: false
+  rules:
+    - match: github.com/michaeljabbour/amplifier-bundle-memory
+      target: ${GITEA_URL}/admin/amplifier-bundle-memory
+
+passthrough:
+  allow_external: true
+  services:
+    - name: anthropic
+      key_env: ANTHROPIC_API_KEY
+    - name: openai
+      key_env: OPENAI_API_KEY
+
+provision:
+  setup_cmds:
+    # 1. Core system packages
+    - apt-get update && apt-get install -y git curl python3 python3-pip jq
+
+    # 2. Install uv (Python package and project manager)
+    - curl -LsSf https://astral.sh/uv/install.sh | sh
+
+    # 3. Add /root/.local/bin to PATH in .bashrc and export for this session
+    - |
+      echo 'export PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
+      export PATH="/root/.local/bin:$PATH"
+
+    # 4. Install mempalace + pytest (system-wide via pip with break-system-packages)
+    # --ignore-installed skips reinstalling packages already present (e.g. rich
+    # installed by Debian's python3-rich package which has no RECORD file).
+    # pytest is required to run tests/integration/ inside the DTU.
+    - pip install --break-system-packages --ignore-installed mempalace pytest
+
+    # 5. Create the palace directory — mempalace mine will populate it.
+    # mempalace init is a project-level entity-detection setup command;
+    # for a fresh DTU palace we only need the directory to exist.
+    - mkdir -p /root/.mempalace
+
+    # 6. Clone amplifier-bundle-memory from Gitea mirror into /workspace
+    - git clone ${GITEA_URL}/admin/amplifier-bundle-memory /workspace/amplifier-bundle-memory
+
+    # 7. Mine seed fixture content into the palace
+    # mempalace mine --mode projects is for code/docs (the default); 'files' is
+    # not a valid mode. Use --mode projects for the markdown fixture content.
+    - cd /workspace/amplifier-bundle-memory && mempalace mine tests/fixtures/seed-palace/content/ --mode projects
+
+    # 8. Copy project-context fixture to workspace for test use
+    - cp -r /workspace/amplifier-bundle-memory/tests/fixtures/seed-palace/project-context /workspace/project-context
+
+    # 9. Freeze the seeded palace as an immutable snapshot
+    - cp -r /root/.mempalace /root/.mempalace-seed
+
+    # 10. Ensure the spool directory exists inside the live palace
+    - mkdir -p /root/.mempalace/spool
+
+    # 11. Install the reset-palace utility script
+    - |
+      printf '#!/bin/bash\nrm -rf /root/.mempalace\ncp -r /root/.mempalace-seed /root/.mempalace\nmkdir -p /root/.mempalace/spool\n' > /usr/local/bin/reset-palace
+      chmod +x /usr/local/bin/reset-palace
+
+    # 12. Install Amplifier via uv — git+https URL is rewritten to Gitea mirror
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      uv tool install -vv git+https://github.com/microsoft/amplifier
+
+    # 13. Write API keys to keys.env (passthrough env vars; chmod 600 for security)
+    - |
+      mkdir -p /root/.amplifier
+      printf 'ANTHROPIC_API_KEY=%s\nOPENAI_API_KEY=%s\n' "${ANTHROPIC_API_KEY}" "${OPENAI_API_KEY}" > /root/.amplifier/keys.env
+      chmod 600 /root/.amplifier/keys.env
+
+    # 14. Add the memory bundle to Amplifier (URL rewritten to Gitea mirror)
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml"
+
+    # 15. Validate that both tools are installed and reachable
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      amplifier --version
+      mempalace --version || true
+
+update:
+  refresh_pypi: true
+  cmds:
+    # Clear Amplifier module cache so re-add fetches the latest bundle from Gitea.
+    # The palace is intentionally NOT reset here — accumulated memories are preserved
+    # across updates. Use reset-palace manually to restore the seed state.
+    - rm -rf /root/.amplifier/cache/
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml"
