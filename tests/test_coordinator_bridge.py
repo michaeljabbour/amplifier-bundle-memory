@@ -308,9 +308,7 @@ class TestCaptureCoordinatorBridge:
         )
 
         emitted: list[tuple[Any, ...]] = []
-        monkeypatch.setattr(
-            m, "emit_event", lambda *a, **kw: emitted.append((a, kw))
-        )
+        monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
         hook = m.MempalaceCaptureHook(config={"emit_events": False})
         asyncio.run(
@@ -340,6 +338,150 @@ class TestCaptureCoordinatorBridge:
             ev[0]
             for ev in coordinator.hooks._emit_log
             if ev[0].startswith("memory-mempalace:")
+        ]
+        assert coordinator_events == [], (
+            f"emit_events=False must suppress coordinator bridge emits, "
+            f"got: {coordinator_events}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Briefing hook — coordinator bridge tests
+# ---------------------------------------------------------------------------
+
+
+class TestBriefingCoordinatorBridge:
+    """Tests for coordinator bridge wiring in the briefing hook.
+
+    These tests verify that mount() registers a contributor and that the hook
+    emits coordinator events (briefing_assembled, briefing_skipped) via
+    bridge_emit, carrying drawer_ids derived from results_after_rerank.
+    """
+
+    def test_register_contributor_called_at_mount(self) -> None:
+        """mount() must call register_contributor on the coordinator with
+        channel='observability.events' and name='memory-mempalace-briefing'.
+
+        The contributor callback must return a list of events that includes:
+        - 'memory-mempalace:briefing_assembled'
+        - 'memory-mempalace:briefing_skipped'
+        """
+        import asyncio
+
+        import amplifier_module_hooks_mempalace_briefing as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+        asyncio.run(m.mount(coordinator))
+
+        assert "observability.events" in coordinator._contributors, (
+            "mount() must call register_contributor with channel 'observability.events'"
+        )
+        contribs = coordinator._contributors["observability.events"]
+        assert "memory-mempalace-briefing" in contribs, (
+            "mount() must register contributor with name 'memory-mempalace-briefing'"
+        )
+
+        callback = contribs["memory-mempalace-briefing"]
+        events = callback()
+        assert "memory-mempalace:briefing_assembled" in events, (
+            "contributor callback must include 'memory-mempalace:briefing_assembled'"
+        )
+        assert "memory-mempalace:briefing_skipped" in events, (
+            "contributor callback must include 'memory-mempalace:briefing_skipped'"
+        )
+
+    def test_briefing_assembled_emits_with_drawer_ids(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After briefing_assembled, bridge emits with drawer_ids from results_after_rerank."""
+        import asyncio
+        import subprocess
+
+        import amplifier_module_hooks_mempalace_briefing as m  # type: ignore[import]
+
+        def fake_run(cmd: Any, *a: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+
+        results_with_ids = [
+            {"id": "drawer-1", "room": "r", "text": "t1", "score": 0.9},
+            {"id": "drawer-2", "room": "r", "text": "t2", "score": 0.8},
+        ]
+
+        monkeypatch.setattr(
+            m,
+            "_build_briefing",
+            lambda **kw: (
+                "## briefing",
+                ["section"],
+                100,
+                results_with_ids,
+                results_with_ids,
+            ),
+        )
+        monkeypatch.setattr(m, "_detect_project_name", lambda: "testproject")
+
+        bridge_calls: list[tuple[str, Any]] = []
+
+        async def fake_bridge(event_name: str, payload: Any) -> None:
+            bridge_calls.append((event_name, payload))
+
+        hook = m.MempalaceBriefingHook(bridge_emit=fake_bridge)
+        asyncio.run(hook("session:start", {"opening_prompt": "test"}))
+
+        assembled_calls = [
+            (name, payload)
+            for name, payload in bridge_calls
+            if name == "memory-mempalace:briefing_assembled"
+        ]
+        assert len(assembled_calls) == 1, (
+            f"Expected exactly one 'memory-mempalace:briefing_assembled' bridge call, "
+            f"got: {bridge_calls}"
+        )
+        _, payload = assembled_calls[0]
+        assert payload.get("ok") is True, f"Expected ok=True in payload, got: {payload}"
+        assert payload.get("drawer_ids") == ["drawer-1", "drawer-2"], (
+            f"Expected drawer_ids=['drawer-1', 'drawer-2'], got: {payload.get('drawer_ids')}"
+        )
+
+    def test_emit_events_false_suppresses_both_channels(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """emit_events=False must suppress BOTH the private-JSONL channel
+        AND any coordinator bridge emits.
+        """
+        import asyncio
+
+        import amplifier_module_hooks_mempalace_briefing as m  # type: ignore[import]
+
+        def raise_not_found(*a: Any, **kw: Any) -> None:
+            raise FileNotFoundError("mempalace not found")
+
+        monkeypatch.setattr(m.subprocess, "run", raise_not_found)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
+
+        emitted: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
+
+        bridge_calls: list[tuple[str, Any]] = []
+
+        async def fake_bridge(event_name: str, payload: Any) -> None:
+            bridge_calls.append((event_name, payload))
+
+        hook = m.MempalaceBriefingHook(
+            config={"emit_events": False}, bridge_emit=fake_bridge
+        )
+        asyncio.run(hook("session:start", {}))
+
+        # Private-JSONL channel: no emits
+        assert emitted == [], (
+            f"emit_events=False must suppress all private-JSONL emits, got: {emitted}"
+        )
+
+        # Coordinator channel: no events starting with 'memory-mempalace:'
+        coordinator_events = [
+            name for name, _ in bridge_calls if name.startswith("memory-mempalace:")
         ]
         assert coordinator_events == [], (
             f"emit_events=False must suppress coordinator bridge emits, "
