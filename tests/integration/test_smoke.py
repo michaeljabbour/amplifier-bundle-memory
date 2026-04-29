@@ -23,7 +23,7 @@ error at the autouse reset_palace fixture.
 
 from __future__ import annotations
 
-import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -60,53 +60,59 @@ def test_mempalace_installed():
 
 
 def test_palace_has_seeded_drawers():
-    """After seeding, mempalace_status must report at least one drawer."""
-    payload = json.dumps({"tool": "mempalace_status", "arguments": {}})
+    """After seeding, mempalace status must report at least one drawer.
+
+    Uses `mempalace status` which outputs human-readable text.
+    Expected format: 'N drawers' where N > 0.
+    """
     result = subprocess.run(
-        ["mempalace", "mcp", "--call", payload],
+        ["mempalace", "status"],
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0, (
-        f"mempalace mcp --call mempalace_status failed (rc={result.returncode}).\n"
+        f"mempalace status failed (rc={result.returncode}).\n"
         f"stdout: {result.stdout}\n"
         f"stderr: {result.stderr}"
     )
-    data = json.loads(result.stdout)
-    assert data.get("drawer_count", 0) > 0, (
-        f"mempalace_status reports zero drawers — seed content was not loaded.\n"
-        f"response: {data}"
+    # The output contains "N drawers" — parse the count from the summary line.
+    # Example: "MemPalace Status — 19 drawers"
+    match = re.search(r"(\d+)\s+drawer", result.stdout)
+    assert match is not None, (
+        "mempalace status output does not contain a drawer count — "
+        "seed content may not have been loaded.\n"
+        f"output: {result.stdout}"
+    )
+    drawer_count = int(match.group(1))
+    assert drawer_count > 0, (
+        f"mempalace status reports zero drawers — seed content was not loaded.\n"
+        f"output: {result.stdout}"
     )
 
 
 def test_seed_content_searchable():
-    """Seed content must be searchable via mempalace_search."""
-    payload = json.dumps(
-        {
-            "tool": "mempalace_search",
-            "arguments": {
-                "query": "architecture decisions mempalace",
-                "limit": 3,
-            },
-        }
-    )
+    """Seed content must be searchable via mempalace search.
+
+    Uses `mempalace search <query> --results 3` which outputs human-readable
+    text. A non-empty result block indicates the seed content is searchable.
+    """
     result = subprocess.run(
-        ["mempalace", "mcp", "--call", payload],
+        ["mempalace", "search", "architecture decisions mempalace", "--results", "3"],
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0, (
-        f"mempalace mcp --call mempalace_search failed (rc={result.returncode}).\n"
+        f"mempalace search failed (rc={result.returncode}).\n"
         f"stdout: {result.stdout}\n"
         f"stderr: {result.stderr}"
     )
-    data = json.loads(result.stdout)
-    assert len(data.get("results", [])) > 0, (
-        "mempalace_search returned no results for 'architecture decisions mempalace' "
+    # The output contains "[1]" result markers when results are found.
+    assert "[1]" in result.stdout, (
+        "mempalace search returned no results for 'architecture decisions mempalace' "
         "— seed content is missing or search is broken.\n"
-        f"response: {data}"
+        f"output: {result.stdout}"
     )
 
 
@@ -154,22 +160,21 @@ def test_reset_palace_restores_seed():
         "Sentinel survived reset — palace was not actually replaced."
     )
 
-    payload = json.dumps({"tool": "mempalace_status", "arguments": {}})
     status_result = subprocess.run(
-        ["mempalace", "mcp", "--call", payload],
+        ["mempalace", "status"],
         capture_output=True,
         text=True,
         check=False,
     )
     assert status_result.returncode == 0, (
-        f"mempalace_status after reset failed (rc={status_result.returncode}).\n"
+        f"mempalace status after reset failed (rc={status_result.returncode}).\n"
         f"stdout: {status_result.stdout}\n"
         f"stderr: {status_result.stderr}"
     )
-    data = json.loads(status_result.stdout)
-    assert data.get("drawer_count", 0) > 0, (
+    match = re.search(r"(\d+)\s+drawer", status_result.stdout)
+    assert match is not None and int(match.group(1)) > 0, (
         "After reset, palace has zero drawers — seed restore is broken.\n"
-        f"response: {data}"
+        f"output: {status_result.stdout}"
     )
 
 
