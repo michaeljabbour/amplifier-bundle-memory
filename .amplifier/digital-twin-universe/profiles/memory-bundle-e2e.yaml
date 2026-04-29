@@ -70,11 +70,12 @@ provision:
       echo 'export PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
       export PATH="/root/.local/bin:$PATH"
 
-    # 4. Install mempalace + pytest (system-wide via pip with break-system-packages)
+    # 4. Install mempalace + pytest + pytest-asyncio (system-wide via pip with break-system-packages)
     # --ignore-installed skips reinstalling packages already present (e.g. rich
     # installed by Debian's python3-rich package which has no RECORD file).
     # pytest is required to run tests/integration/ inside the DTU.
-    - pip install --break-system-packages --ignore-installed mempalace pytest
+    # pytest-asyncio is required for async test support in test_event_wiring.py.
+    - pip install --break-system-packages --ignore-installed mempalace pytest pytest-asyncio
 
     # 5. Create the palace directory — mempalace mine will populate it.
     # mempalace init is a project-level entity-detection setup command;
