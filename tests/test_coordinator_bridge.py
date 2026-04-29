@@ -487,3 +487,150 @@ class TestBriefingCoordinatorBridge:
             f"emit_events=False must suppress coordinator bridge emits, "
             f"got: {coordinator_events}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Interject hook — coordinator bridge tests
+# ---------------------------------------------------------------------------
+
+
+class TestInterjectCoordinatorBridge:
+    """Tests for coordinator bridge wiring in the interject hook.
+
+    These tests verify that mount() registers a contributor, registers a
+    cross-hook listener for briefing_assembled, and emits coordinator events
+    (memory_surfaced, interject_skipped) via bridge_emit.
+    """
+
+    def test_register_contributor_called_at_mount(self) -> None:
+        """mount() must call register_contributor with contributor name
+        'memory-mempalace-interject'. The callback must return a list that
+        includes 'memory-mempalace:memory_surfaced' and
+        'memory-mempalace:interject_skipped'.
+        """
+        import asyncio
+
+        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+        asyncio.run(m.mount(coordinator))
+
+        assert "observability.events" in coordinator._contributors, (
+            "mount() must call register_contributor with channel 'observability.events'"
+        )
+        contribs = coordinator._contributors["observability.events"]
+        assert "memory-mempalace-interject" in contribs, (
+            "mount() must register contributor with name 'memory-mempalace-interject'"
+        )
+
+        callback = contribs["memory-mempalace-interject"]
+        events = callback()
+        assert "memory-mempalace:memory_surfaced" in events, (
+            "contributor callback must include 'memory-mempalace:memory_surfaced'"
+        )
+        assert "memory-mempalace:interject_skipped" in events, (
+            "contributor callback must include 'memory-mempalace:interject_skipped'"
+        )
+
+    def test_briefing_assembled_listener_registered_in_mount(self) -> None:
+        """mount() must register a handler for 'memory-mempalace:briefing_assembled'
+        in coordinator.hooks._registered so that when the briefing hook emits
+        briefing_assembled, the interject hook's _briefed_ids is updated.
+        """
+        import asyncio
+
+        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+        asyncio.run(m.mount(coordinator))
+
+        assert "memory-mempalace:briefing_assembled" in coordinator.hooks._registered, (
+            "mount() must register a handler for 'memory-mempalace:briefing_assembled' "
+            "so that briefing events update _briefed_ids"
+        )
+
+    async def test_briefed_ids_populated_from_briefing_event(self) -> None:
+        """After mount(), emitting 'memory-mempalace:briefing_assembled' with
+        drawer_ids must populate the interject hook's _briefed_ids set.
+
+        1. Find hook via prompt:submit registered handler (bound method).
+        2. Assert _briefed_ids starts empty.
+        3. Emit briefing_assembled with drawer_ids=['d-1', 'd-2'].
+        4. Assert _briefed_ids == {'d-1', 'd-2'}.
+        """
+        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+        await m.mount(coordinator)
+
+        # Find hook via the prompt:submit registered handler (bound method)
+        handlers = coordinator.hooks._registered.get("prompt:submit", [])
+        assert handlers, "Expected prompt:submit handler registered after mount()"
+        handler = handlers[0][0]  # (handler, name, priority)
+        hook = handler.__self__
+
+        # Initially _briefed_ids must be empty
+        assert hook._briefed_ids == set(), (
+            f"Expected _briefed_ids == set() before briefing event, "
+            f"got: {hook._briefed_ids}"
+        )
+
+        # Emit briefing_assembled — the registered listener must update _briefed_ids
+        await coordinator.hooks.emit(
+            "memory-mempalace:briefing_assembled",
+            {"drawer_ids": ["d-1", "d-2"]},
+        )
+
+        assert hook._briefed_ids == {"d-1", "d-2"}, (
+            f"Expected _briefed_ids == {{'d-1', 'd-2'}} after briefing event, "
+            f"got: {hook._briefed_ids}"
+        )
+
+    async def test_memory_surfaced_emits_to_coordinator(self) -> None:
+        """After mount(), calling on_prompt_submit with a matching memory must
+        emit exactly one 'memory-mempalace:memory_surfaced' event to the
+        coordinator with ok=True, trigger='prompt_submit', memory_ids=['m1'].
+        """
+        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+        await m.mount(coordinator)
+
+        # Find hook via prompt:submit registered handler
+        handlers = coordinator.hooks._registered.get("prompt:submit", [])
+        assert handlers, "Expected prompt:submit handler registered after mount()"
+        handler = handlers[0][0]  # (handler, name, priority)
+        hook = handler.__self__
+
+        # Stub _retrieve_and_gate to return one matching memory
+        async def _fake_retrieve(query: str, event: str):  # type: ignore[no-untyped-def]
+            return ([{"id": "m1", "text": "hello", "score": 0.9}], True, "", False)
+
+        hook._retrieve_and_gate = _fake_retrieve  # type: ignore[method-assign]
+
+        # Call on_prompt_submit with a long-enough prompt
+        await hook.on_prompt_submit(
+            "prompt:submit",
+            {"prompt": "this is a long enough prompt to pass the length check"},
+        )
+
+        # Assert exactly one 'memory-mempalace:memory_surfaced' bridge call
+        surfaced = [
+            (name, data)
+            for name, data in coordinator.hooks._emit_log
+            if name == "memory-mempalace:memory_surfaced"
+        ]
+        assert len(surfaced) == 1, (
+            f"Expected exactly one 'memory-mempalace:memory_surfaced' bridge call, "
+            f"got: {coordinator.hooks._emit_log}"
+        )
+        _, payload = surfaced[0]
+        assert payload.get("ok") is True, (
+            f"Expected ok=True in payload, got: {payload}"
+        )
+        assert payload.get("trigger") == "prompt_submit", (
+            f"Expected trigger='prompt_submit' in payload, got: {payload}"
+        )
+        assert payload.get("memory_ids") == ["m1"], (
+            f"Expected memory_ids=['m1'] in payload, got: {payload}"
+        )

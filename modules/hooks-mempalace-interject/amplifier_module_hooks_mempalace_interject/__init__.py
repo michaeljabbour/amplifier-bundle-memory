@@ -60,6 +60,11 @@ except ImportError:
     def emit_event(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
         pass
 
+
+async def _noop(*args: Any, **kwargs: Any) -> None:
+    """No-op async function used as default bridge_emit when none is provided."""
+    pass
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 DEFAULT_COSINE_THRESHOLD = 0.72
@@ -224,7 +229,13 @@ class MempalaceInterjectHook:
     LLM judge for scores in the uncertain band.
     """
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        bridge_emit: Any = None,
+    ) -> None:
+        config = config or {}
         self.cosine_threshold: float = float(
             config.get("cosine_threshold", DEFAULT_COSINE_THRESHOLD)
         )
@@ -249,8 +260,10 @@ class MempalaceInterjectHook:
         self._last_injected: dict[str, int] = {}
         # Turn counter (incremented on orchestrator:complete)
         self._turn: int = 0
-        # Briefing memory IDs (populated at session:start if briefing hook shares state)
+        # Briefing memory IDs (populated via cross-hook briefing_assembled listener)
         self._briefed_ids: set[str] = set()
+        # Coordinator bridge emit function (async callable or _noop)
+        self._bridge_emit = bridge_emit or _noop
 
     def _is_on_cooldown(self, memory_id: str) -> bool:
         """Check if a memory was recently injected (within cooldown_turns)."""
@@ -333,6 +346,13 @@ class MempalaceInterjectHook:
                     data={"trigger": "prompt_submit", "reason": "disabled"},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {"ok": False, "trigger": "prompt_submit", "reason": "disabled"},
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         prompt_text = data.get("prompt", "") or data.get("content", "")
@@ -345,6 +365,13 @@ class MempalaceInterjectHook:
                     data={"trigger": "prompt_submit", "reason": "too_short"},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {"ok": False, "trigger": "prompt_submit", "reason": "too_short"},
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         # Reset per-turn guard (new user prompt = new turn)
@@ -365,6 +392,13 @@ class MempalaceInterjectHook:
                     data={"trigger": "prompt_submit", "reason": skip_reason},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {"ok": False, "trigger": "prompt_submit", "reason": skip_reason},
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         injection = _format_injection(memories, event, self.max_inject_chars)
@@ -386,6 +420,20 @@ class MempalaceInterjectHook:
                 },
                 session_id=sid,
             )
+            try:
+                await self._bridge_emit(
+                    "memory-mempalace:memory_surfaced",
+                    {
+                        "ok": True,
+                        "preview": injection[:100] if injection else None,
+                        "trigger": "prompt_submit",
+                        "memory_ids": [m["id"] for m in memories],
+                        "top_score": top_score,
+                        "judge_used": judge_used,
+                    },
+                )
+            except Exception:
+                pass
 
         return HookResult(
             action="inject_context",
@@ -407,6 +455,13 @@ class MempalaceInterjectHook:
                     data={"trigger": "tool_pre", "reason": "disabled"},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {"ok": False, "trigger": "tool_pre", "reason": "disabled"},
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         tool_name = data.get("tool_name", "")
@@ -428,6 +483,13 @@ class MempalaceInterjectHook:
                     data={"trigger": "tool_pre", "reason": "too_short"},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {"ok": False, "trigger": "tool_pre", "reason": "too_short"},
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         (
@@ -445,6 +507,13 @@ class MempalaceInterjectHook:
                     data={"trigger": "tool_pre", "reason": skip_reason},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {"ok": False, "trigger": "tool_pre", "reason": skip_reason},
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         injection = _format_injection(memories, event, self.max_inject_chars)
@@ -465,6 +534,20 @@ class MempalaceInterjectHook:
                 },
                 session_id=sid,
             )
+            try:
+                await self._bridge_emit(
+                    "memory-mempalace:memory_surfaced",
+                    {
+                        "ok": True,
+                        "preview": injection[:100] if injection else None,
+                        "trigger": "tool_pre",
+                        "memory_ids": [m["id"] for m in memories],
+                        "top_score": top_score,
+                        "judge_used": judge_used,
+                    },
+                )
+            except Exception:
+                pass
 
         return HookResult(
             action="inject_context",
@@ -493,6 +576,17 @@ class MempalaceInterjectHook:
                     data={"trigger": "orchestrator_complete", "reason": "disabled"},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {
+                            "ok": False,
+                            "trigger": "orchestrator_complete",
+                            "reason": "disabled",
+                        },
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         # Infinite loop guard: skip if we already injected this turn
@@ -506,6 +600,17 @@ class MempalaceInterjectHook:
                     data={"trigger": "orchestrator_complete", "reason": "guard_flag"},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {
+                            "ok": False,
+                            "trigger": "orchestrator_complete",
+                            "reason": "guard_flag",
+                        },
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         # Extract the LLM's response text
@@ -519,6 +624,17 @@ class MempalaceInterjectHook:
                     data={"trigger": "orchestrator_complete", "reason": "too_short"},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {
+                            "ok": False,
+                            "trigger": "orchestrator_complete",
+                            "reason": "too_short",
+                        },
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         # Only check for contradictions — use a higher threshold
@@ -537,6 +653,17 @@ class MempalaceInterjectHook:
                     data={"trigger": "orchestrator_complete", "reason": skip_reason},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {
+                            "ok": False,
+                            "trigger": "orchestrator_complete",
+                            "reason": skip_reason,
+                        },
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         # Extra filter: only inject if a memory explicitly contradicts the response
@@ -571,6 +698,17 @@ class MempalaceInterjectHook:
                     },
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:interject_skipped",
+                        {
+                            "ok": False,
+                            "trigger": "orchestrator_complete",
+                            "reason": "below_threshold",
+                        },
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         injection = _format_injection(contradicting, event, self.max_inject_chars)
@@ -592,6 +730,20 @@ class MempalaceInterjectHook:
                 },
                 session_id=sid,
             )
+            try:
+                await self._bridge_emit(
+                    "memory-mempalace:memory_surfaced",
+                    {
+                        "ok": True,
+                        "preview": injection[:100] if injection else None,
+                        "trigger": "orchestrator_complete",
+                        "memory_ids": [m["id"] for m in contradicting],
+                        "top_score": top_score,
+                        "judge_used": judge_used,
+                    },
+                )
+            except Exception:
+                pass
 
         return HookResult(
             action="inject_context",
@@ -611,9 +763,40 @@ async def mount(
 
     Registers three separate handlers on prompt:submit, tool:pre, and
     orchestrator:complete, all at priority 20 (early, non-critical).
+
+    Also registers a contributor for observability events and a cross-hook
+    listener for memory-mempalace:briefing_assembled to populate _briefed_ids.
     """
     cfg = config or {}
-    hook = MempalaceInterjectHook(cfg)
+
+    # Register contributor so the coordinator knows which events this module emits
+    coordinator.register_contributor(
+        "observability.events",
+        "memory-mempalace-interject",
+        lambda: ["memory-mempalace:memory_surfaced", "memory-mempalace:interject_skipped"],
+    )
+
+    # Async bridge_emit closure: routes events through coordinator.hooks
+    async def bridge_emit(event_name: str, payload: Any) -> None:
+        await coordinator.hooks.emit(event_name, payload)
+
+    # Instantiate the hook with the bridge_emit closure
+    hook = MempalaceInterjectHook(cfg, bridge_emit=bridge_emit)
+
+    # Cross-hook listener: update _briefed_ids when briefing_assembled fires
+    async def _on_briefing_assembled(event: str, data: Any) -> HookResult:
+        try:
+            ids = data.get("drawer_ids", []) if data else []
+            hook._briefed_ids.update(str(i) for i in ids if i)
+        except Exception:
+            pass
+        return HookResult(action="continue")
+
+    coordinator.hooks.register(
+        "memory-mempalace:briefing_assembled",
+        _on_briefing_assembled,
+        name="interject-briefing-listener",
+    )
 
     # Register each event with its own dedicated handler method
     # Priority 20: runs early (after critical instrumentation at 50+)
@@ -652,5 +835,6 @@ async def mount(
             "prompt_enabled": hook.prompt_enabled,
             "tool_pre_enabled": hook.tool_pre_enabled,
             "orc_enabled": hook.orc_enabled,
+            "emit_events": hook.emit_events,
         },
     }
