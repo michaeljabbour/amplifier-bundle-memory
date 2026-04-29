@@ -26,17 +26,17 @@ import pytest
 WORKSPACE = Path("/workspace/amplifier-bundle-memory")
 
 
-def _latest_events_jsonl() -> Path:
+def _latest_events_jsonl() -> Path | None:
     """Return the most recent session's events.jsonl from /root/.amplifier.
 
     Searches recursively under /root/.amplifier, sorts by modification time,
-    and returns the path with the highest mtime.
+    and returns the path with the highest mtime. Returns None if no file found.
     """
     files = sorted(
         Path("/root/.amplifier").rglob("events.jsonl"),
         key=lambda p: p.stat().st_mtime,
     )
-    return files[-1]
+    return files[-1] if files else None
 
 
 def _events_in(path: Path) -> list[dict]:
@@ -78,6 +78,7 @@ def test_drawer_filed_appears_in_events_jsonl():
     )
     time.sleep(2.0)
     events_path = _latest_events_jsonl()
+    assert events_path is not None, "no events.jsonl found — is hooks-logging mounted?"
     coordinator_events = _coordinator_events(events_path)
     event_names = [e.get("event") for e in coordinator_events]
     assert "memory-mempalace:drawer_filed" in event_names
@@ -97,6 +98,7 @@ def test_briefing_assembled_payload_has_drawer_ids():
     )
     time.sleep(1.0)
     events_path = _latest_events_jsonl()
+    assert events_path is not None, "no events.jsonl found — is hooks-logging mounted?"
     coordinator_events = _coordinator_events(events_path)
     briefing_events = [
         e

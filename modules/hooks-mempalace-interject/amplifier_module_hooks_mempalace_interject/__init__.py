@@ -65,6 +65,7 @@ async def _noop(*args: Any, **kwargs: Any) -> None:
     """No-op async function used as default bridge_emit when none is provided."""
     pass
 
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 DEFAULT_COSINE_THRESHOLD = 0.72
@@ -368,7 +369,11 @@ class MempalaceInterjectHook:
                 try:
                     await self._bridge_emit(
                         "memory-mempalace:interject_skipped",
-                        {"ok": False, "trigger": "prompt_submit", "reason": "too_short"},
+                        {
+                            "ok": False,
+                            "trigger": "prompt_submit",
+                            "reason": "too_short",
+                        },
                     )
                 except Exception:
                     pass
@@ -395,7 +400,11 @@ class MempalaceInterjectHook:
                 try:
                     await self._bridge_emit(
                         "memory-mempalace:interject_skipped",
-                        {"ok": False, "trigger": "prompt_submit", "reason": skip_reason},
+                        {
+                            "ok": False,
+                            "trigger": "prompt_submit",
+                            "reason": skip_reason,
+                        },
                     )
                 except Exception:
                     pass
@@ -773,7 +782,10 @@ async def mount(
     coordinator.register_contributor(
         "observability.events",
         "memory-mempalace-interject",
-        lambda: ["memory-mempalace:memory_surfaced", "memory-mempalace:interject_skipped"],
+        lambda: [
+            "memory-mempalace:memory_surfaced",
+            "memory-mempalace:interject_skipped",
+        ],
     )
 
     # Async bridge_emit closure: routes events through coordinator.hooks

@@ -653,9 +653,10 @@ async def mount(
 
     def sync_bridge_emit(event: str, payload: Any) -> None:
         try:
-            asyncio.run_coroutine_threadsafe(
-                coordinator.hooks.emit(event, payload), loop
-            )
+            if not loop.is_closed():
+                asyncio.run_coroutine_threadsafe(
+                    coordinator.hooks.emit(event, payload), loop
+                )
         except Exception:
             pass
 

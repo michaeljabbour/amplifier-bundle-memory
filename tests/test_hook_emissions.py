@@ -319,7 +319,9 @@ class TestBriefingHookEmissions:
         data = kwargs.get("data", {})
         assert "project" in data
         assert "section_count" in data
-        assert len(data["results_fetched"]) == len(data["results_after_rerank"])
+        assert isinstance(data["results_fetched"], int)
+        assert isinstance(data["results_after_rerank"], int)
+        assert data["results_fetched"] == data["results_after_rerank"]
         assert data["importance_weight"] == 1.0
 
     def test_briefing_emits_skip_unavailable(
