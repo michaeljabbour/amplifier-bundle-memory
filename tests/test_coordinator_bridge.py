@@ -112,3 +112,236 @@ class FakeCoordinator:
     def register_contributor(self, channel: str, name: str, callback: Any) -> None:
         """Record a contributor registration on *channel*."""
         self._contributors.setdefault(channel, {})[name] = callback
+
+
+# ---------------------------------------------------------------------------
+# Capture hook — coordinator bridge tests (RED phase)
+# ---------------------------------------------------------------------------
+
+
+class TestCaptureCoordinatorBridge:
+    """Tests for coordinator bridge wiring in the capture hook.
+
+    These are RED-phase TDD tests.  They document the desired behavior
+    of the coordinator bridge before the implementation exists.
+
+    Expected failing reasons (RED phase):
+    - mount() does not call register_contributor() → test 1 fails
+    - MempalaceCaptureHook has no _sync_bridge_emit attribute → test 2 fails
+    """
+
+    def test_register_contributor_called_at_mount(self) -> None:
+        """mount() must call register_contributor on the coordinator with
+        channel='observability.events' and name='memory-mempalace-capture'.
+
+        The contributor callback must return a list of events that includes:
+        - 'memory-mempalace:drawer_filed'
+        - 'memory-mempalace:capture_failed'
+
+        And must NOT include:
+        - 'memory-mempalace:capture_queued'  (private-JSONL-only; intentionally hidden)
+        """
+        import asyncio
+
+        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+        asyncio.run(m.mount(coordinator))
+
+        assert "observability.events" in coordinator._contributors, (
+            "mount() must call register_contributor with channel 'observability.events'"
+        )
+        contribs = coordinator._contributors["observability.events"]
+        assert "memory-mempalace-capture" in contribs, (
+            "mount() must register contributor with name 'memory-mempalace-capture'"
+        )
+
+        callback = contribs["memory-mempalace-capture"]
+        events = callback()
+        assert "memory-mempalace:drawer_filed" in events, (
+            "contributor callback must include 'memory-mempalace:drawer_filed'"
+        )
+        assert "memory-mempalace:capture_failed" in events, (
+            "contributor callback must include 'memory-mempalace:capture_failed'"
+        )
+        assert "memory-mempalace:capture_queued" not in events, (
+            "capture_queued is private-JSONL-only and must NOT be in coordinator events"
+        )
+
+    def test_drawer_filed_emits_to_coordinator_from_drain_thread(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """After a worthy tool:post event, the drain thread must emit
+        'memory-mempalace:drawer_filed' to the coordinator via _sync_bridge_emit.
+
+        The hook must expose a _sync_bridge_emit attribute confirming bridge wiring.
+        drawer_filed must also appear in the private-JSONL emit log.
+        """
+        import asyncio
+        import time
+
+        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+        asyncio.run(m.mount(coordinator))
+
+        monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+        monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
+        monkeypatch.setattr(
+            m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
+        )
+
+        emit_lock = threading.Lock()
+        emitted: list[tuple[Any, ...]] = []
+
+        def _capture(*a: Any, **kw: Any) -> None:
+            with emit_lock:
+                emitted.append((a, kw))
+
+        monkeypatch.setattr(m, "emit_event", _capture)
+
+        hook = m.MempalaceCaptureHook()
+        asyncio.run(
+            hook(
+                "tool:post",
+                {
+                    "tool_name": "bash",
+                    "tool_input": {"command": "ls -la"},
+                    "tool_output": "x" * 200,
+                },
+            )
+        )
+
+        # Wait for drain thread to finish (500 iterations × 0.01s = 5s deadline)
+        for _ in range(500):
+            if m._QUEUE is None or m._QUEUE.unfinished_tasks == 0:
+                break
+            time.sleep(0.01)
+
+        # The hook must have a _sync_bridge_emit attribute (coordinator bridge wiring)
+        assert hasattr(hook, "_sync_bridge_emit"), (
+            "MempalaceCaptureHook must have a _sync_bridge_emit attribute "
+            "to wire the drain thread into the coordinator bridge"
+        )
+
+        # drawer_filed must appear in the private-JSONL emit list
+        emitted_names = [a[0][1] for a in emitted if a[0] and len(a[0]) > 1]
+        assert "drawer_filed" in emitted_names, (
+            f"Expected 'drawer_filed' in private-JSONL emits after drain, "
+            f"got: {emitted_names}"
+        )
+
+    def test_capture_queued_does_not_emit_to_coordinator(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """capture_queued must NOT appear in coordinator.hooks._emit_log.
+
+        capture_queued is intentionally private-JSONL-only.  Even after the
+        bridge is wired, capture_queued events must never reach the coordinator.
+        """
+        import asyncio
+        import time
+
+        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+        asyncio.run(m.mount(coordinator))
+
+        monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+        monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
+        monkeypatch.setattr(
+            m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
+        )
+
+        emit_lock = threading.Lock()
+        emitted: list[tuple[Any, ...]] = []
+
+        def _capture(*a: Any, **kw: Any) -> None:
+            with emit_lock:
+                emitted.append((a, kw))
+
+        monkeypatch.setattr(m, "emit_event", _capture)
+
+        hook = m.MempalaceCaptureHook()
+        asyncio.run(
+            hook(
+                "tool:post",
+                {
+                    "tool_name": "bash",
+                    "tool_input": {"command": "ls -la"},
+                    "tool_output": "x" * 200,
+                },
+            )
+        )
+
+        # Wait for drain thread
+        for _ in range(500):
+            if m._QUEUE is None or m._QUEUE.unfinished_tasks == 0:
+                break
+            time.sleep(0.01)
+
+        # capture_queued must never appear in coordinator.hooks._emit_log
+        coordinator_event_names = [ev[0] for ev in coordinator.hooks._emit_log]
+        assert "memory-mempalace:capture_queued" not in coordinator_event_names, (
+            "capture_queued is private-JSONL-only and must never appear in "
+            "coordinator.hooks._emit_log"
+        )
+
+    def test_emit_events_false_suppresses_both_channels(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """emit_events=False must suppress BOTH the private-JSONL channel
+        AND any coordinator bridge emits.
+        """
+        import asyncio
+        import time
+
+        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+
+        coordinator = FakeCoordinator()
+        asyncio.run(m.mount(coordinator, config={"emit_events": False}))
+
+        monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+        monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
+        monkeypatch.setattr(
+            m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
+        )
+
+        emitted: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(
+            m, "emit_event", lambda *a, **kw: emitted.append((a, kw))
+        )
+
+        hook = m.MempalaceCaptureHook(config={"emit_events": False})
+        asyncio.run(
+            hook(
+                "tool:post",
+                {
+                    "tool_name": "bash",
+                    "tool_input": {},
+                    "tool_output": "x" * 200,
+                },
+            )
+        )
+
+        # Drain queue
+        for _ in range(500):
+            if m._QUEUE is None or m._QUEUE.unfinished_tasks == 0:
+                break
+            time.sleep(0.01)
+
+        # Private-JSONL channel: no emits
+        assert emitted == [], (
+            f"emit_events=False must suppress all private-JSONL emits, got: {emitted}"
+        )
+
+        # Coordinator channel: no events starting with 'memory-mempalace:'
+        coordinator_events = [
+            ev[0]
+            for ev in coordinator.hooks._emit_log
+            if ev[0].startswith("memory-mempalace:")
+        ]
+        assert coordinator_events == [], (
+            f"emit_events=False must suppress coordinator bridge emits, "
+            f"got: {coordinator_events}"
+        )
