@@ -1,4 +1,11 @@
 ---
+name: archivist
+description: |
+  The Archivist is the read path for the memory system. It answers memory
+  queries, navigates the palace graph, surfaces context from the knowledge
+  graph and agent diaries, and reads project-context coordination files.
+  Note: session:start briefings are handled by hooks-mempalace-briefing;
+  the Archivist is invoked on-demand for deeper retrieval.
 agent:
   name: archivist
   namespace: mempalace

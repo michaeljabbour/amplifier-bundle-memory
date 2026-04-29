@@ -1,4 +1,11 @@
 ---
+name: curator
+description: |
+  The Curator is the write path for the memory system. It processes raw
+  hook captures, curates them into well-categorized palace drawers, updates
+  the knowledge graph, maintains palace hygiene, and updates the
+  project-context coordination files (HANDOFF.md, PROVENANCE.md, GLOSSARY.md,
+  WAYSOFWORKING.md) at session end.
 agent:
   name: curator
   namespace: mempalace

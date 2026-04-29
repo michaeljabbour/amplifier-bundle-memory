@@ -1,0 +1,97 @@
+// This repository packages a "memory palace" assistant that captures, curates, and recalls knowledge across sessions.
+digraph memory {
+    rankdir=LR
+    fontname="Helvetica"
+    fontsize=12
+    label="Memory Palace Bundle\nA shared workspace for capturing, curating, and recalling knowledge\nv1.2.0"
+    labelloc=t
+    labeljust=c
+    nodesep=0.6
+    ranksep=0.7
+    bgcolor="white"
+    source_hash="a0b2b4ee554828d5e237da750bcb9e3020519a046becba3a1cf0378fd59ce450"
+
+    node [fontname="Helvetica", fontsize=11, style="filled,rounded"]
+    edge [fontname="Helvetica", fontsize=9]
+
+    root_memory [label="Memory Palace (this bundle)\nv1.2.0\n0 tools · 0 agents\n~1530 tok aggregate", shape=box, fillcolor="#80cbc4", style="filled,rounded,bold", penwidth=2]
+
+    subgraph cluster_behaviors {
+        label="Behaviors — bundled capabilities the assistant can use"
+        style="filled"
+        fillcolor="#f9f9f9"
+        color="#999999"
+
+        beh_mempalace_behavior [label="Memory Palace Behavior\nThe core remember/recall capability\n7 tools · 2 ctx\n~3418 tok", shape=box, fillcolor="#e0f2f1", style="filled,rounded"]
+    }
+
+    subgraph cluster_agents {
+        label="Agents — specialist helpers, each with a role"
+        style="filled"
+        fillcolor="#f9f9f9"
+        color="#999999"
+
+        agt_archivist [label="Archivist\nSaves new memories\n~0 tok desc", shape=box, fillcolor="#c8e6c9", style="filled,rounded"]
+        agt_curator [label="Curator\nOrganizes and prunes memories\n~0 tok desc", shape=box, fillcolor="#c8e6c9", style="filled,rounded"]
+        agt_docent [label="Docent\nGuides recall and retrieval\n~0 tok desc", shape=box, fillcolor="#c8e6c9", style="filled,rounded"]
+    }
+
+    subgraph cluster_modules {
+        label="Modules — building blocks the behavior plugs together"
+        style="filled"
+        fillcolor="#f9f9f9"
+        color="#999999"
+
+        mod_hooks_mempalace_briefing [label="Briefing Hook\nShares relevant memories\nat the start of a session\n(hooks-mempalace-briefing)", shape=box, fillcolor="#bbdefb", style="filled,rounded"]
+        mod_hooks_mempalace_capture [label="Capture Hook\nNotices things worth\nremembering as you work\n(hooks-mempalace-capture)", shape=box, fillcolor="#bbdefb", style="filled,rounded"]
+        mod_hooks_mempalace_interject [label="Interject Hook\nSpeaks up when a memory\nis useful right now\n(hooks-mempalace-interject)", shape=box, fillcolor="#bbdefb", style="filled,rounded"]
+        mod_hooks_project_context [label="Project Context Hook\nKeeps project-specific\nbackground in view\n(hooks-project-context)", shape=box, fillcolor="#bbdefb", style="filled,rounded"]
+        mod_tool_mempalace [label="Memory Palace Tool\nThe action that reads &\nwrites memories\n(tool-mempalace)", shape=box, fillcolor="#bbdefb", style="filled,rounded"]
+    }
+
+    subgraph cluster_context {
+        label="Context Files — written guidance loaded into the assistant"
+        style="filled"
+        fillcolor="#f9f9f9"
+        color="#999999"
+
+        ctx_instructions_md [label="How-to-Use Instructions\n(instructions.md)\n~1335 tok", shape=box, fillcolor="#e1bee7", style="filled,rounded"]
+        ctx_project_context_guide_md [label="Project Context Guide\n(project-context-guide.md)\n~759 tok", shape=box, fillcolor="#e1bee7", style="filled,rounded"]
+    }
+
+    subgraph cluster_legend {
+        label="Legend — what each color means"
+        style="filled"
+        fillcolor="white"
+        color="#cccccc"
+        fontsize=9
+
+        leg_root [label="this bundle (root)", shape=box, fillcolor="#80cbc4", style="filled,rounded,bold", fontsize=9]
+        leg_behavior [label="behavior (capability)", shape=box, fillcolor="#e0f2f1", style="filled,rounded", fontsize=9]
+        leg_agent [label="agent (specialist helper)", shape=box, fillcolor="#c8e6c9", style="filled,rounded", fontsize=9]
+        leg_module [label="module (building block)", shape=box, fillcolor="#bbdefb", style="filled,rounded", fontsize=9]
+        leg_provider [label="provider (AI service)", shape=box, fillcolor="#e0e0e0", style="filled,rounded", fontsize=9]
+        leg_context [label="context (written guidance)", shape=box, fillcolor="#e1bee7", style="filled,rounded", fontsize=9]
+        leg_standalone [label="standalone piece", shape=box, fillcolor="#80cbc4", style="filled,rounded", fontsize=9]
+        leg_experiment [label="experiment", shape=box, fillcolor="#e1bee7", style="filled,rounded", fontsize=9]
+        leg_ext_cost [label="external dependency\n(adds hidden cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2, fontsize=9]
+        leg_ext_muted [label="external dependency\n(no extra cost)", shape=box, fillcolor="#f5f5f5", style="dashed", fontsize=9]
+    }
+
+    disclaimer [label="Token estimates: ~4 chars/token\nSolid border = local (counted)\nDashed + red = external, hidden cost (not counted)\nDashed + muted = external, no cost\nExcludes: sub-session costs, runtime-dynamic", shape=note, fillcolor="#eceff1", style="filled", fontsize=9]
+
+    ext_githttps___github_com_microsoft_amplifier_foundation_main [label="Amplifier Foundation\nShared base brought in from GitHub\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+
+    root_memory -> ext_githttps___github_com_microsoft_amplifier_foundation_main [style=dashed]
+    root_memory -> beh_mempalace_behavior [label="composes"]
+    beh_mempalace_behavior -> agt_archivist [label="owns"]
+    beh_mempalace_behavior -> agt_curator [label="owns"]
+    beh_mempalace_behavior -> mod_tool_mempalace [label="uses", penwidth=0.8]
+    beh_mempalace_behavior -> mod_hooks_mempalace_capture [label="uses", penwidth=0.8]
+    beh_mempalace_behavior -> mod_hooks_mempalace_briefing [label="uses", penwidth=0.8]
+    beh_mempalace_behavior -> mod_hooks_project_context [label="uses", penwidth=0.8]
+    beh_mempalace_behavior -> mod_hooks_mempalace_interject [label="uses", penwidth=0.8]
+    beh_mempalace_behavior -> ctx_instructions_md [style=dotted, color=purple]
+    beh_mempalace_behavior -> ctx_project_context_guide_md [style=dotted, color=purple]
+    root_memory -> ctx_instructions_md [style=dotted, color=purple]
+}

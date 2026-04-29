@@ -1,4 +1,11 @@
 ---
+name: docent
+description: |
+  Conversational memory assistant. Answers natural-language questions
+  about what's stored in the palace, what happened in prior sessions,
+  which decisions were made, and how the project's understanding has
+  evolved. Synthesizes responses from palace search, knowledge graph,
+  agent diaries, session event log, and coordination files.
 agent:
   name: docent
   namespace: mempalace
