@@ -40,6 +40,7 @@ Credits: MemPalace (github.com/MemPalace/mempalace).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import queue
@@ -243,6 +244,9 @@ _QUEUE_MAXSIZE = 1024  # bounded — drop with a recorded event on overflow
 _QUEUE: queue.Queue["_CaptureJob"] | None = None
 _DRAIN_THREAD: threading.Thread | None = None
 _DRAIN_LOCK = threading.Lock()
+_SYNC_BRIDGE_EMIT: Any = (
+    None  # set by mount(); used by drain thread to forward to coordinator
+)
 
 
 @dataclass(frozen=True)
@@ -345,6 +349,16 @@ def _drain_loop() -> None:
                         },
                         session_id=job.session_id,
                     )
+                    try:
+                        _SYNC_BRIDGE_EMIT(
+                            "memory-mempalace:capture_failed",
+                            {
+                                "capture_id": job.capture_id,
+                                "reason": "worker_exception",
+                            },
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 pass
             _spool_delete(job.spool_path)
@@ -383,6 +397,22 @@ def _process_job(job: _CaptureJob) -> None:
                 },
                 session_id=job.session_id,
             )
+            try:
+                _SYNC_BRIDGE_EMIT(
+                    "memory-mempalace:drawer_filed",
+                    {
+                        "capture_id": job.capture_id,
+                        "wing": wing,
+                        "room": room,
+                        "category": job.category,
+                        "content_bytes": len(job.tool_output.encode("utf-8")),
+                        "source": job.source,
+                        "ok": True,
+                        "preview": truncate_preview(job.tool_output),
+                    },
+                )
+            except Exception:
+                pass
         _spool_delete(job.spool_path)
     except Exception:
         if job.emit_events:
@@ -394,6 +424,16 @@ def _process_job(job: _CaptureJob) -> None:
                 data={"capture_id": job.capture_id, "reason": "mcp_error"},
                 session_id=job.session_id,
             )
+            try:
+                _SYNC_BRIDGE_EMIT(
+                    "memory-mempalace:capture_failed",
+                    {
+                        "capture_id": job.capture_id,
+                        "reason": "mcp_error",
+                    },
+                )
+            except Exception:
+                pass
         # Leave the spool entry in place so a future resume can retry.
 
 
@@ -458,7 +498,12 @@ class MempalaceCaptureHook:
     name = "hooks-mempalace-capture"
     events = ["tool:post"]
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        sync_bridge_emit: Any = None,
+    ) -> None:
         self.config = config or {}
         self.auto_wing: bool = self.config.get("auto_wing", True)
         self.auto_room: bool = self.config.get("auto_room", True)
@@ -466,6 +511,8 @@ class MempalaceCaptureHook:
         self.emit_events: bool = bool(self.config.get("emit_events", True))
         # Categories to capture (empty list = capture all palace-worthy content)
         self.categories: list[str] = self.config.get("categories", [])
+        # Coordinator bridge — no-op default keeps the drain thread safe in tests
+        self._sync_bridge_emit = sync_bridge_emit or (lambda e, p: None)
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         """Hot-path handler.
@@ -581,12 +628,40 @@ async def mount(
 ) -> dict[str, Any]:
     """Mount the mempalace-capture hook into the Amplifier coordinator.
 
-    Side effect: starts the drain thread (idempotent) and replays any
-    spool entries left over from a prior crashed run of the same session.
+    Side effect: registers the contributor, wires the coordinator bridge,
+    starts the drain thread (idempotent), and replays any spool entries
+    left over from a prior crashed run of the same session.
     Amplifier's native session re-hydration restores the spool dir; we
     just sweep it.
     """
-    hook = MempalaceCaptureHook(config)
+    global _SYNC_BRIDGE_EMIT
+
+    cfg = config or {}
+    loop = asyncio.get_running_loop()
+
+    try:
+        coordinator.register_contributor(
+            "observability.events",
+            "memory-mempalace-capture",
+            lambda: [
+                "memory-mempalace:drawer_filed",
+                "memory-mempalace:capture_failed",
+            ],
+        )
+    except Exception:
+        pass
+
+    def sync_bridge_emit(event: str, payload: Any) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                coordinator.hooks.emit(event, payload), loop
+            )
+        except Exception:
+            pass
+
+    _SYNC_BRIDGE_EMIT = sync_bridge_emit
+
+    hook = MempalaceCaptureHook(cfg, sync_bridge_emit=sync_bridge_emit)
     for event in hook.events:
         coordinator.hooks.register(event, hook, name=hook.name)
 
