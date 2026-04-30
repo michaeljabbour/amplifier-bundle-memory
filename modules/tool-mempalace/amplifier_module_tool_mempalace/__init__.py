@@ -26,6 +26,12 @@ from typing import Any
 
 from amplifier_core import Tool, ToolResult  # type: ignore
 
+from .coordinator_bridge import (
+    NOOP_SYNC_BRIDGE,
+    SyncBridge,
+    make_sync_bridge,
+    register_events,
+)
 from .event_emitter import _read_events_with_skip_count, emit_event
 from .garden import execute_garden
 
@@ -59,6 +65,11 @@ class PalaceTool(Tool):
         "MemPalace memory operations. Operations: search, remember, status, "
         "kg (knowledge graph), traverse, diary, mine, events, garden."
     )
+
+    def __init__(self, *, bridge_emit: SyncBridge | None = None) -> None:
+        super().__init__()
+        self._bridge_emit: SyncBridge = bridge_emit or NOOP_SYNC_BRIDGE
+
     input_schema = {
         "type": "object",
         "properties": {
@@ -382,6 +393,31 @@ class PalaceTool(Tool):
                 #       eventually complete on its own
                 # Do NOT treat the 120s wall-clock budget as a hard resource
                 # bound; treat it as a response-time guarantee to the caller.
+
+                def combined_emit(
+                    hook: str,
+                    event: str,
+                    *,
+                    ok: bool = True,
+                    preview: str | None = None,
+                    data: dict[str, Any] | None = None,
+                    session_id: str | None = None,
+                ) -> None:
+                    """Emit to private JSONL and forward to coordinator bridge."""
+                    emit_event(
+                        hook,
+                        event,
+                        ok=ok,
+                        preview=preview,
+                        data=data,
+                        session_id=session_id,
+                    )
+                    try:
+                        payload = {"ok": ok, "preview": preview, **(data or {})}
+                        self._bridge_emit(f"memory-mempalace:{event}", payload)
+                    except Exception:
+                        pass
+
                 try:
                     garden_result = await asyncio.wait_for(
                         asyncio.to_thread(
@@ -393,7 +429,7 @@ class PalaceTool(Tool):
                             cluster_threshold=float(
                                 kwargs.get("cluster_threshold", 0.80)
                             ),
-                            emit_fn=emit_event,
+                            emit_fn=combined_emit,
                             session_id=kwargs.get("session_id"),
                         ),
                         timeout=_GARDEN_TIMEOUT_S,
@@ -418,6 +454,21 @@ class PalaceTool(Tool):
                         )
                     except Exception:
                         pass  # never let event emission failure crash the error path
+                    try:
+                        self._bridge_emit(
+                            "memory-mempalace:garden_completed",
+                            {
+                                "ok": False,
+                                "scope_wing": kwargs.get("wing"),
+                                "scope_room": kwargs.get("room"),
+                                "drawers_analyzed": 0,
+                                "clusters_found": 0,
+                                "kg_edges_created": 0,
+                                "timed_out": True,
+                            },
+                        )
+                    except Exception:
+                        pass
                     return ToolResult(
                         success=False,
                         error={
@@ -442,6 +493,20 @@ class PalaceTool(Tool):
                     },
                     session_id=kwargs.get("session_id"),
                 )
+                try:
+                    self._bridge_emit(
+                        "memory-mempalace:garden_completed",
+                        {
+                            "ok": True,
+                            "scope_wing": kwargs.get("wing"),
+                            "scope_room": kwargs.get("room"),
+                            "drawers_analyzed": garden_result["drawers_analyzed"],
+                            "clusters_found": len(garden_result["clusters"]),
+                            "kg_edges_created": garden_result["kg_edges_created"],
+                        },
+                    )
+                except Exception:
+                    pass
 
                 return ToolResult(output=json.dumps(garden_result, indent=2))
 
@@ -468,7 +533,14 @@ async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Mount the palace tool into the Amplifier coordinator."""
-    tool = PalaceTool()
+    register_events(
+        coordinator,
+        "memory-mempalace-tool",
+        ["memory-mempalace:garden_completed", "memory-mempalace:garden_progress"],
+    )
+
+    bridge_emit = make_sync_bridge(coordinator)
+    tool = PalaceTool(bridge_emit=bridge_emit)
     await coordinator.mount("tools", tool, name=tool.name)
     return {
         "name": "tool-mempalace",

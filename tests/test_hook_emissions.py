@@ -128,9 +128,10 @@ class TestCaptureHookEmissions:
         _drain()
         filed = [e for e in emitted if e[0][1] == "drawer_filed"]
         assert len(filed) == 1, f"Expected drawer_filed after drain in {emitted}"
-        assert filed[0][1].get("data", {}).get("capture_id") == kwargs["data"][
-            "capture_id"
-        ]
+        assert (
+            filed[0][1].get("data", {}).get("capture_id")
+            == kwargs["data"]["capture_id"]
+        )
         assert "wing" in filed[0][1].get("data", {})
 
     def test_capture_returns_fast_under_slow_drawer_write(
@@ -295,23 +296,19 @@ class TestBriefingHookEmissions:
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
-        def fake_run(
-            cmd: Any, *a: Any, **kw: Any
-        ) -> subprocess.CompletedProcess[str]:
+        def fake_run(cmd: Any, *a: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         monkeypatch.setattr(m.subprocess, "run", fake_run)
         monkeypatch.setattr(
             m,
             "_build_briefing",
-            lambda **kw: ("## Briefing\ntest content", ["semantic"], 100, 3, 3),
+            lambda **kw: ("## Briefing\ntest content", ["semantic"], 100, [], []),
         )
         monkeypatch.setattr(m, "_detect_project_name", lambda: "testproject")
 
         hook = m.MempalaceBriefingHook()
-        result = asyncio.run(
-            hook("session:start", {"opening_prompt": "start working"})
-        )
+        result = asyncio.run(hook("session:start", {"opening_prompt": "start working"}))
 
         assert result.action == "inject_context"
         assembled = [e for e in emitted if e[0][1] == "briefing_assembled"]
@@ -322,6 +319,8 @@ class TestBriefingHookEmissions:
         data = kwargs.get("data", {})
         assert "project" in data
         assert "section_count" in data
+        assert isinstance(data["results_fetched"], int)
+        assert isinstance(data["results_after_rerank"], int)
         assert data["results_fetched"] == data["results_after_rerank"]
         assert data["importance_weight"] == 1.0
 
@@ -385,7 +384,12 @@ class TestInterjectHookEmissions:
 
         hook = m.MempalaceInterjectHook({})
         memories = [
-            {"id": "mem_1", "text": "test memory content", "score": 0.85, "metadata": {}}
+            {
+                "id": "mem_1",
+                "text": "test memory content",
+                "score": 0.85,
+                "metadata": {},
+            }
         ]
 
         hook._retrieve_and_gate = AsyncMock(  # type: ignore[method-assign]

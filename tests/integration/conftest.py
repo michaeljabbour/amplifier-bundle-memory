@@ -1,6 +1,9 @@
 """Integration test fixtures for the amplifier-bundle-memory DTU.
 
-These fixtures are designed to run INSIDE the DTU container:
+These tests run INSIDE the memory-bundle-e2e DTU container. On the host
+machine they are automatically skipped — see pytest_collection_modifyitems.
+
+Fixtures designed to run inside the DTU container:
 
 - reset_palace: autouse module-scope fixture that resets the memory palace
   before each test module so each module starts with a clean slate. Calls the
@@ -18,6 +21,31 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip all integration tests when not running inside the DTU container.
+
+    The sentinel path /root/.mempalace only exists inside the
+    memory-bundle-e2e DTU profile. On the host the tests are marked as
+    SKIP so they are visible in CI output without failing the suite.
+
+    A PermissionError is treated as "not in DTU" — it means we are running
+    as a non-root user that cannot stat /root/.mempalace.
+    """
+    try:
+        in_dtu = Path("/root/.mempalace").exists()
+    except PermissionError:
+        in_dtu = False
+
+    if in_dtu:
+        return
+
+    skip_marker = pytest.mark.skip(
+        reason="DTU environment required (run inside memory-bundle-e2e container)"
+    )
+    for item in items:
+        item.add_marker(skip_marker)
 
 
 @pytest.fixture(scope="module", autouse=True)

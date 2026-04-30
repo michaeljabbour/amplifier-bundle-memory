@@ -90,6 +90,26 @@ except ImportError:
         return os.environ.get("AMPLIFIER_SESSION_ID") or "unknown"
 
 
+try:
+    from amplifier_module_tool_mempalace.coordinator_bridge import (
+        NOOP_SYNC_BRIDGE,
+        SyncBridge,
+        make_sync_bridge,
+        register_events,
+    )
+except ImportError:
+    SyncBridge = Any  # type: ignore
+
+    def NOOP_SYNC_BRIDGE(event: str, payload: Any) -> None:  # type: ignore[misc]
+        pass
+
+    def make_sync_bridge(coordinator: Any) -> Any:  # type: ignore[misc]
+        return NOOP_SYNC_BRIDGE
+
+    def register_events(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        pass
+
+
 def _detect_wing(cwd: str | None = None) -> str:
     """Detect the active project wing from git remote or directory name."""
     try:
@@ -243,6 +263,8 @@ _QUEUE_MAXSIZE = 1024  # bounded — drop with a recorded event on overflow
 _QUEUE: queue.Queue["_CaptureJob"] | None = None
 _DRAIN_THREAD: threading.Thread | None = None
 _DRAIN_LOCK = threading.Lock()
+# Bridge for drain thread → coordinator forwarding. Set by mount().
+_DRAIN_BRIDGE: SyncBridge = NOOP_SYNC_BRIDGE
 
 
 @dataclass(frozen=True)
@@ -345,6 +367,16 @@ def _drain_loop() -> None:
                         },
                         session_id=job.session_id,
                     )
+                    try:
+                        _DRAIN_BRIDGE(
+                            "memory-mempalace:capture_failed",
+                            {
+                                "capture_id": job.capture_id,
+                                "reason": "worker_exception",
+                            },
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 pass
             _spool_delete(job.spool_path)
@@ -383,6 +415,22 @@ def _process_job(job: _CaptureJob) -> None:
                 },
                 session_id=job.session_id,
             )
+            try:
+                _DRAIN_BRIDGE(
+                    "memory-mempalace:drawer_filed",
+                    {
+                        "capture_id": job.capture_id,
+                        "wing": wing,
+                        "room": room,
+                        "category": job.category,
+                        "content_bytes": len(job.tool_output.encode("utf-8")),
+                        "source": job.source,
+                        "ok": True,
+                        "preview": truncate_preview(job.tool_output),
+                    },
+                )
+            except Exception:
+                pass
         _spool_delete(job.spool_path)
     except Exception:
         if job.emit_events:
@@ -394,6 +442,16 @@ def _process_job(job: _CaptureJob) -> None:
                 data={"capture_id": job.capture_id, "reason": "mcp_error"},
                 session_id=job.session_id,
             )
+            try:
+                _DRAIN_BRIDGE(
+                    "memory-mempalace:capture_failed",
+                    {
+                        "capture_id": job.capture_id,
+                        "reason": "mcp_error",
+                    },
+                )
+            except Exception:
+                pass
         # Leave the spool entry in place so a future resume can retry.
 
 
@@ -458,7 +516,12 @@ class MempalaceCaptureHook:
     name = "hooks-mempalace-capture"
     events = ["tool:post"]
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        bridge_emit: SyncBridge | None = None,
+    ) -> None:
         self.config = config or {}
         self.auto_wing: bool = self.config.get("auto_wing", True)
         self.auto_room: bool = self.config.get("auto_room", True)
@@ -466,6 +529,8 @@ class MempalaceCaptureHook:
         self.emit_events: bool = bool(self.config.get("emit_events", True))
         # Categories to capture (empty list = capture all palace-worthy content)
         self.categories: list[str] = self.config.get("categories", [])
+        # Coordinator bridge — no-op default keeps the drain thread safe in tests
+        self._bridge_emit: SyncBridge = bridge_emit or NOOP_SYNC_BRIDGE
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         """Hot-path handler.
@@ -581,12 +646,25 @@ async def mount(
 ) -> dict[str, Any]:
     """Mount the mempalace-capture hook into the Amplifier coordinator.
 
-    Side effect: starts the drain thread (idempotent) and replays any
-    spool entries left over from a prior crashed run of the same session.
+    Side effect: registers the contributor, wires the coordinator bridge,
+    starts the drain thread (idempotent), and replays any spool entries
+    left over from a prior crashed run of the same session.
     Amplifier's native session re-hydration restores the spool dir; we
     just sweep it.
     """
-    hook = MempalaceCaptureHook(config)
+    global _DRAIN_BRIDGE
+
+    cfg = config or {}
+
+    register_events(
+        coordinator,
+        "memory-mempalace-capture",
+        ["memory-mempalace:drawer_filed", "memory-mempalace:capture_failed"],
+    )
+
+    bridge_emit = make_sync_bridge(coordinator)
+    _DRAIN_BRIDGE = bridge_emit
+    hook = MempalaceCaptureHook(cfg, bridge_emit=bridge_emit)
     for event in hook.events:
         coordinator.hooks.register(event, hook, name=hook.name)
 

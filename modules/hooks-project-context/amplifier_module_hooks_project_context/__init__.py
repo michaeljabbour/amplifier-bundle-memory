@@ -44,7 +44,27 @@ except ImportError:
         pass
 
 
-# ── Template stubs ────────────────────────────────────────────────────────────
+try:
+    from amplifier_module_tool_mempalace.coordinator_bridge import (
+        NOOP_ASYNC_BRIDGE,
+        AsyncBridge,
+        make_async_bridge,
+        register_events,
+    )
+except ImportError:
+    AsyncBridge = Any  # type: ignore
+
+    async def NOOP_ASYNC_BRIDGE(event: str, payload: Any) -> None:  # type: ignore[misc]
+        pass
+
+    def make_async_bridge(coordinator: Any) -> Any:  # type: ignore[misc]
+        return NOOP_ASYNC_BRIDGE
+
+    def register_events(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        pass
+
+
+# ── Template stubs ─────────────────────────────────────────────────────────────
 
 _AGENTS_MD = """\
 # Agent Instructions
@@ -142,7 +162,7 @@ _HANDOFF_STUB = f"""\
 """
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 
 def _find_git_root() -> Path | None:
@@ -239,19 +259,25 @@ def _read_tier1(pc_dir: Path, token_budget: int) -> tuple[str, list[str], int]:
     return result, files_read, token_estimate
 
 
-# ── Hook classes ─────────────────────────────────────────────────────────────
+# ── Hook classes ───────────────────────────────────────────────────────────────
 
 
 class ProjectContextStartHook:
     name = "hooks-project-context-start"
     events = ["session:start"]
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        bridge_emit: AsyncBridge | None = None,
+    ) -> None:
         self.config = config or {}
         self.tier1_always: bool = self.config.get("tier1_always", True)
         self.setup_if_missing: bool = self.config.get("setup_if_missing", True)
         self.token_budget: int = self.config.get("token_budget", 800)
         self.emit_events: bool = bool(self.config.get("emit_events", True))
+        self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         sid = data.get("session_id")
@@ -273,6 +299,17 @@ class ProjectContextStartHook:
                         },
                         session_id=sid,
                     )
+                    try:
+                        await self._bridge_emit(
+                            "memory-mempalace:coordination_scaffolded",
+                            {
+                                "ok": True,
+                                "pc_dir": str(pc_dir),
+                                "files_created": files_created,
+                            },
+                        )
+                    except Exception:
+                        pass
 
         if pc_dir is None:
             return HookResult(action="continue")
@@ -291,6 +328,17 @@ class ProjectContextStartHook:
                         },
                         session_id=sid,
                     )
+                    try:
+                        await self._bridge_emit(
+                            "memory-mempalace:coordination_read",
+                            {
+                                "ok": True,
+                                "files_read": files_read,
+                                "token_estimate": token_estimate,
+                            },
+                        )
+                    except Exception:
+                        pass
                 return HookResult(
                     action="inject_context",
                     context_injection=block,
@@ -306,10 +354,16 @@ class ProjectContextEndHook:
     name = "hooks-project-context-end"
     events = ["session:end"]
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        bridge_emit: AsyncBridge | None = None,
+    ) -> None:
         self.config = config or {}
         self.handoff_on_end: bool = self.config.get("handoff_on_end", True)
         self.emit_events: bool = bool(self.config.get("emit_events", True))
+        self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         if not self.handoff_on_end:
@@ -339,6 +393,16 @@ class ProjectContextEndHook:
                 data={"prompt_preview": prompt[:200]},
                 session_id=sid,
             )
+            try:
+                await self._bridge_emit(
+                    "memory-mempalace:curator_handoff_requested",
+                    {
+                        "ok": True,
+                        "prompt_preview": prompt[:200],
+                    },
+                )
+            except Exception:
+                pass
         return HookResult(action="continue")
 
 
@@ -346,8 +410,21 @@ async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Mount the project-context hooks into the Amplifier coordinator."""
-    start_hook = ProjectContextStartHook(config)
-    end_hook = ProjectContextEndHook(config)
+
+    register_events(
+        coordinator,
+        "memory-mempalace-project-context",
+        [
+            "memory-mempalace:coordination_read",
+            "memory-mempalace:coordination_scaffolded",
+            "memory-mempalace:curator_handoff_requested",
+        ],
+    )
+
+    bridge_emit = make_async_bridge(coordinator)
+
+    start_hook = ProjectContextStartHook(config, bridge_emit=bridge_emit)
+    end_hook = ProjectContextEndHook(config, bridge_emit=bridge_emit)
     for hook in (start_hook, end_hook):
         for evt in hook.events:
             coordinator.hooks.register(evt, hook, name=hook.name)

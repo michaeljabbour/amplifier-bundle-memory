@@ -47,6 +47,26 @@ except ImportError:
         pass
 
 
+try:
+    from amplifier_module_tool_mempalace.coordinator_bridge import (
+        NOOP_ASYNC_BRIDGE,
+        AsyncBridge,
+        make_async_bridge,
+        register_events,
+    )
+except ImportError:
+    AsyncBridge = Any  # type: ignore
+
+    async def NOOP_ASYNC_BRIDGE(event: str, payload: Any) -> None:  # type: ignore[misc]
+        pass
+
+    def make_async_bridge(coordinator: Any) -> Any:  # type: ignore[misc]
+        return NOOP_ASYNC_BRIDGE
+
+    def register_events(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        pass
+
+
 # ── Re-ranking ──────────────────────────────────────────────────────────────
 
 #: Scaling constant. Bounds max boost/penalty to ±0.04 at weight=1.0.
@@ -227,7 +247,7 @@ def _build_briefing(
     include_diary: bool,
     include_project_context: bool,
     importance_weight: float = 1.0,
-) -> tuple[str, list[str], int, int, int]:
+) -> tuple[str, list[str], int, list[dict[str, Any]], list[dict[str, Any]]]:
     """Assemble a concise briefing from palace search, KG, diary, and coordination files.
 
     Returns (briefing_text, sections, token_estimate, results_fetched, results_after_rerank).
@@ -241,8 +261,8 @@ def _build_briefing(
     """
     sections: list[str] = []
     approx_tokens = 0
-    results_fetched = 0
-    results_after_rerank = 0
+    results_fetched: list = []
+    results_after_rerank: list = []
 
     # 1. Semantic search — fetch extra candidates for re-ranking headroom (CP4: 8 → top 5)
     wing = f"wing_{project}"
@@ -255,7 +275,7 @@ def _build_briefing(
         },
     )
     raw_results = search_result.get("results", [])
-    results_fetched = len(raw_results)
+    results_fetched = list(raw_results)
 
     # 2. Importance re-ranking (CP4)
     if importance_weight == 0.0 or not raw_results:
@@ -268,7 +288,7 @@ def _build_briefing(
         reranked = _rerank_by_importance(raw_results, lookup, weight=importance_weight)
         results = reranked[:5]
 
-    results_after_rerank = len(results)
+    results_after_rerank = list(results)
 
     if results:
         lines = [f"**Recent palace memories — `{project}`:**"]
@@ -344,7 +364,12 @@ class MempalaceBriefingHook:
     name = "hooks-mempalace-briefing"
     events = ["session:start"]
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        bridge_emit: AsyncBridge | None = None,
+    ) -> None:
         self.config = config or {}
         self.token_budget: int = self.config.get("token_budget", 1500)
         self.include_kg: bool = self.config.get("include_kg", True)
@@ -358,6 +383,8 @@ class MempalaceBriefingHook:
         self.briefing_importance_weight: float = float(
             self.config.get("briefing_importance_weight", 1.0)
         )
+
+        self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         sid = data.get("session_id")
@@ -374,6 +401,13 @@ class MempalaceBriefingHook:
                     data={"reason": "mempalace_unavailable"},
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:briefing_skipped",
+                        {"ok": False, "reason": "mempalace_unavailable"},
+                    )
+                except Exception:
+                    pass
             # Still inject project-context coordination files even without MemPalace
             if self.include_project_context:
                 pc_dir = _find_project_context_dir()
@@ -408,6 +442,13 @@ class MempalaceBriefingHook:
             )
         )
 
+        # Derive drawer_ids from results_after_rerank (list of dicts)
+        drawer_ids = [
+            r["id"]
+            for r in (results_after_rerank or [])
+            if isinstance(r, dict) and "id" in r
+        ]
+
         if briefing:
             if self.emit_events:
                 emit_event(
@@ -419,12 +460,26 @@ class MempalaceBriefingHook:
                         "project": project,
                         "section_count": len(sections),
                         "token_estimate": token_estimate,
-                        "results_fetched": results_fetched,
-                        "results_after_rerank": results_after_rerank,
+                        "results_fetched": len(results_fetched or []),
+                        "results_after_rerank": len(results_after_rerank or []),
                         "importance_weight": self.briefing_importance_weight,
                     },
                     session_id=sid,
                 )
+                try:
+                    await self._bridge_emit(
+                        "memory-mempalace:briefing_assembled",
+                        {
+                            "ok": True,
+                            "project": project,
+                            "section_count": len(sections),
+                            "token_estimate": token_estimate,
+                            "drawer_ids": drawer_ids,
+                            "importance_weight": self.briefing_importance_weight,
+                        },
+                    )
+                except Exception:
+                    pass
             return HookResult(
                 action="inject_context",
                 context_injection=briefing,
@@ -441,6 +496,13 @@ class MempalaceBriefingHook:
                 data={"reason": "no_content"},
                 session_id=sid,
             )
+            try:
+                await self._bridge_emit(
+                    "memory-mempalace:briefing_skipped",
+                    {"ok": False, "reason": "no_content", "project": project},
+                )
+            except Exception:
+                pass
         return HookResult(action="continue")
 
 
@@ -448,7 +510,15 @@ async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Mount the mempalace-briefing hook into the Amplifier coordinator."""
-    hook = MempalaceBriefingHook(config)
+    register_events(
+        coordinator,
+        "memory-mempalace-briefing",
+        ["memory-mempalace:briefing_assembled", "memory-mempalace:briefing_skipped"],
+    )
+
+    bridge_emit = make_async_bridge(coordinator)
+
+    hook = MempalaceBriefingHook(config, bridge_emit=bridge_emit)
     for event in hook.events:
         coordinator.hooks.register(event, hook, name=hook.name)
     return {

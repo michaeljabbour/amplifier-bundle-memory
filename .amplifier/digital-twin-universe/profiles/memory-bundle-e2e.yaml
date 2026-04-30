@@ -70,11 +70,12 @@ provision:
       echo 'export PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
       export PATH="/root/.local/bin:$PATH"
 
-    # 4. Install mempalace + pytest (system-wide via pip with break-system-packages)
+    # 4. Install mempalace + pytest + pytest-asyncio (system-wide via pip with break-system-packages)
     # --ignore-installed skips reinstalling packages already present (e.g. rich
     # installed by Debian's python3-rich package which has no RECORD file).
     # pytest is required to run tests/integration/ inside the DTU.
-    - pip install --break-system-packages --ignore-installed mempalace pytest
+    # pytest-asyncio is required for async test support in test_event_wiring.py.
+    - pip install --break-system-packages --ignore-installed mempalace pytest pytest-asyncio
 
     # 5. Create the palace directory — mempalace mine will populate it.
     # mempalace init is a project-level entity-detection setup command;
@@ -108,6 +109,20 @@ provision:
       export PATH="/root/.local/bin:$PATH"
       uv tool install -vv git+https://github.com/microsoft/amplifier
 
+    # 12.5. Pin amplifier-core to 1.4.1 and reinstall amplifier-app-cli from latest git
+    # amplifier-core >= 1.4.1 is required: register_contributor / collect_contributions
+    # and the on_session_ready lifecycle work correctly only from this version.
+    # The meta-package uv install above may resolve an older PyPI release; this guarantees
+    # the correct versions are present before the bundle is added.
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+      uv pip install --python "$VENV_PY" \
+        --reinstall-package amplifier-core \
+        --reinstall-package amplifier-app-cli \
+        'amplifier-core==1.4.1' \
+        git+https://github.com/microsoft/amplifier-app-cli@main
+
     # 13. Write API keys to keys.env (passthrough env vars; chmod 600 for security)
     - |
       mkdir -p /root/.amplifier
@@ -119,19 +134,107 @@ provision:
       export PATH="/root/.local/bin:$PATH"
       amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml"
 
-    # 15. Validate that both tools are installed and reachable
+    # 15. Install hooks-logging fork with on_session_ready + collect_contributions support
+    #
+    # Why this fork: stock hooks-logging predates amplifier-core 1.4.1's on_session_ready
+    # lifecycle. Without it, collect_contributions("observability.events") is never called,
+    # so no handlers register for memory-mempalace:* events and events.jsonl stays empty.
+    #
+    # Why delete the cache dir (not just install via pip):
+    # Amplifier prepends ~/.amplifier/cache/<module>-<hash>/ to sys.path BEFORE site-packages.
+    # Even after `uv pip install --force-reinstall`, the old cache copy (without on_session_ready)
+    # is imported first and placed in sys.modules — the fork in site-packages is never reached.
+    # Deleting the cache dir lets Python fall through to site-packages on every session start.
+    # No timing dependency, no primer session needed. (Investigated in session 9201aaf7.)
+    - |
+      set -euo pipefail
+      export PATH="/root/.local/bin:$PATH"
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+      uv pip install --python "$VENV_PY" --force-reinstall \
+        git+https://github.com/colombod/amplifier-module-hooks-logging@feat/on-session-ready
+      # Delete any pre-existing cache that would shadow site-packages
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-logging-*
+      echo "[hooks-logging] fork installed and shadowing cache cleared"
+      # Verify the fork is reachable and exposes on_session_ready
+      "$VENV_PY" -c "
+      import amplifier_module_hooks_logging as m
+      assert hasattr(m, 'on_session_ready'), f'FAIL: on_session_ready missing at {m.__file__}'
+      print(f'[hooks-logging] OK: on_session_ready present ({m.__file__})')
+      "
+
+    # 16. Validate that both tools are installed and reachable
     - |
       export PATH="/root/.local/bin:$PATH"
       amplifier --version
       mempalace --version || true
 
+    # 17. Post-provision smoke test — fail fast if coordinator events are not flowing.
+    # Runs a real Amplifier session and verifies that memory-mempalace:* events appear
+    # in events.jsonl. Surfaces broken wiring before the developer discovers it manually.
+    - |
+      set -euo pipefail
+      export PATH="/root/.local/bin:$PATH"
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+
+      echo "=== DTU smoke test ==="
+
+      # 1. on_session_ready accessible
+      "$VENV_PY" -c "
+      import amplifier_module_hooks_logging as m
+      assert hasattr(m, 'on_session_ready'), f'FAIL: on_session_ready missing at {m.__file__}'
+      print('PASS  hooks-logging has on_session_ready')
+      "
+
+      # 2. No shadowing cache dir
+      SHADOW=$(find /root/.amplifier/cache -maxdepth 1 -type d \
+        -name 'amplifier-module-hooks-logging-*' 2>/dev/null | wc -l)
+      [ "$SHADOW" -eq 0 ] \
+        && echo "PASS  no shadowing hooks-logging cache" \
+        || echo "WARN  $SHADOW shadowing cache dir(s) present — coordinator events may not flow"
+
+      # 3. Session produces coordinator events
+      cd /workspace
+      amplifier run 'hello' >/tmp/smoke.log 2>&1 || true
+      LATEST=$(ls -t /root/.amplifier/projects/*/sessions/*/events.jsonl 2>/dev/null | head -1)
+      if [ -n "$LATEST" ]; then
+        COUNT=$(grep -c '"memory-mempalace:' "$LATEST" 2>/dev/null || echo 0)
+        [ "$COUNT" -gt 0 ] \
+          && echo "PASS  coordinator events flowing ($COUNT memory-mempalace:* events)" \
+          || { echo "FAIL  zero coordinator events in $LATEST"; cat /tmp/smoke.log; exit 1; }
+      else
+        echo "WARN  no events.jsonl found — run a session manually to verify"
+      fi
+
+      echo "=== smoke test passed ==="
+
 update:
   refresh_pypi: true
   cmds:
-    # Clear Amplifier module cache so re-add fetches the latest bundle from Gitea.
-    # The palace is intentionally NOT reset here — accumulated memories are preserved
-    # across updates. Use reset-palace manually to restore the seed state.
-    - rm -rf /root/.amplifier/cache/
+    # Targeted cache invalidation — ONLY the memory bundle modules and hooks-logging.
+    # NEVER wipe the whole cache (rm -rf /root/.amplifier/cache/) — that removes
+    # provider-anthropic, loop-streaming, and all foundation modules, breaking every
+    # session until Amplifier is fully reinstalled (5-10 min).
+    # The palace is intentionally NOT reset — accumulated memories are preserved.
+    # Use reset-palace manually to restore the seed state.
+    - |
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-mempalace-*
+      rm -rf /root/.amplifier/cache/amplifier-module-tool-mempalace-*
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-project-context-*
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-logging-*
+      echo "[update] cleared memory bundle + hooks-logging caches"
     - |
       export PATH="/root/.local/bin:$PATH"
       amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml"
+    # Re-apply hooks-logging fork (same approach as provision step 15)
+    - |
+      set -euo pipefail
+      export PATH="/root/.local/bin:$PATH"
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+      uv pip install --python "$VENV_PY" --force-reinstall \
+        git+https://github.com/colombod/amplifier-module-hooks-logging@feat/on-session-ready
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-logging-*
+      "$VENV_PY" -c "
+      import amplifier_module_hooks_logging as m
+      assert hasattr(m, 'on_session_ready'), f'FAIL: on_session_ready missing at {m.__file__}'
+      print(f'[hooks-logging] OK: on_session_ready present')
+      "
