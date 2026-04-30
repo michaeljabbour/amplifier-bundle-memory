@@ -40,7 +40,6 @@ Credits: MemPalace (github.com/MemPalace/mempalace).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import queue
@@ -89,6 +88,26 @@ except ImportError:
         if session_id is not None:
             return session_id
         return os.environ.get("AMPLIFIER_SESSION_ID") or "unknown"
+
+
+try:
+    from amplifier_module_tool_mempalace.coordinator_bridge import (
+        NOOP_SYNC_BRIDGE,
+        SyncBridge,
+        make_sync_bridge,
+        register_events,
+    )
+except ImportError:
+    SyncBridge = Any  # type: ignore
+
+    def NOOP_SYNC_BRIDGE(event: str, payload: Any) -> None:  # type: ignore[misc]
+        pass
+
+    def make_sync_bridge(coordinator: Any) -> Any:  # type: ignore[misc]
+        return NOOP_SYNC_BRIDGE
+
+    def register_events(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        pass
 
 
 def _detect_wing(cwd: str | None = None) -> str:
@@ -244,9 +263,8 @@ _QUEUE_MAXSIZE = 1024  # bounded — drop with a recorded event on overflow
 _QUEUE: queue.Queue["_CaptureJob"] | None = None
 _DRAIN_THREAD: threading.Thread | None = None
 _DRAIN_LOCK = threading.Lock()
-_SYNC_BRIDGE_EMIT: Any = (
-    None  # set by mount(); used by drain thread to forward to coordinator
-)
+# Bridge for drain thread → coordinator forwarding. Set by mount().
+_DRAIN_BRIDGE: SyncBridge = NOOP_SYNC_BRIDGE
 
 
 @dataclass(frozen=True)
@@ -350,7 +368,7 @@ def _drain_loop() -> None:
                         session_id=job.session_id,
                     )
                     try:
-                        _SYNC_BRIDGE_EMIT(
+                        _DRAIN_BRIDGE(
                             "memory-mempalace:capture_failed",
                             {
                                 "capture_id": job.capture_id,
@@ -398,7 +416,7 @@ def _process_job(job: _CaptureJob) -> None:
                 session_id=job.session_id,
             )
             try:
-                _SYNC_BRIDGE_EMIT(
+                _DRAIN_BRIDGE(
                     "memory-mempalace:drawer_filed",
                     {
                         "capture_id": job.capture_id,
@@ -425,7 +443,7 @@ def _process_job(job: _CaptureJob) -> None:
                 session_id=job.session_id,
             )
             try:
-                _SYNC_BRIDGE_EMIT(
+                _DRAIN_BRIDGE(
                     "memory-mempalace:capture_failed",
                     {
                         "capture_id": job.capture_id,
@@ -502,7 +520,7 @@ class MempalaceCaptureHook:
         self,
         config: dict[str, Any] | None = None,
         *,
-        sync_bridge_emit: Any = None,
+        bridge_emit: SyncBridge | None = None,
     ) -> None:
         self.config = config or {}
         self.auto_wing: bool = self.config.get("auto_wing", True)
@@ -512,7 +530,7 @@ class MempalaceCaptureHook:
         # Categories to capture (empty list = capture all palace-worthy content)
         self.categories: list[str] = self.config.get("categories", [])
         # Coordinator bridge — no-op default keeps the drain thread safe in tests
-        self._sync_bridge_emit = sync_bridge_emit or (lambda e, p: None)
+        self._bridge_emit: SyncBridge = bridge_emit or NOOP_SYNC_BRIDGE
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         """Hot-path handler.
@@ -634,35 +652,19 @@ async def mount(
     Amplifier's native session re-hydration restores the spool dir; we
     just sweep it.
     """
-    global _SYNC_BRIDGE_EMIT
+    global _DRAIN_BRIDGE
 
     cfg = config or {}
-    loop = asyncio.get_running_loop()
 
-    try:
-        coordinator.register_contributor(
-            "observability.events",
-            "memory-mempalace-capture",
-            lambda: [
-                "memory-mempalace:drawer_filed",
-                "memory-mempalace:capture_failed",
-            ],
-        )
-    except Exception:
-        pass
+    register_events(
+        coordinator,
+        "memory-mempalace-capture",
+        ["memory-mempalace:drawer_filed", "memory-mempalace:capture_failed"],
+    )
 
-    def sync_bridge_emit(event: str, payload: Any) -> None:
-        try:
-            if not loop.is_closed():
-                asyncio.run_coroutine_threadsafe(
-                    coordinator.hooks.emit(event, payload), loop
-                )
-        except Exception:
-            pass
-
-    _SYNC_BRIDGE_EMIT = sync_bridge_emit
-
-    hook = MempalaceCaptureHook(cfg, sync_bridge_emit=sync_bridge_emit)
+    bridge_emit = make_sync_bridge(coordinator)
+    _DRAIN_BRIDGE = bridge_emit
+    hook = MempalaceCaptureHook(cfg, bridge_emit=bridge_emit)
     for event in hook.events:
         coordinator.hooks.register(event, hook, name=hook.name)
 

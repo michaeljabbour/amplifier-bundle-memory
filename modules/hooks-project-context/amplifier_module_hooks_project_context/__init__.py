@@ -44,6 +44,26 @@ except ImportError:
         pass
 
 
+try:
+    from amplifier_module_tool_mempalace.coordinator_bridge import (
+        NOOP_ASYNC_BRIDGE,
+        AsyncBridge,
+        make_async_bridge,
+        register_events,
+    )
+except ImportError:
+    AsyncBridge = Any  # type: ignore
+
+    async def NOOP_ASYNC_BRIDGE(event: str, payload: Any) -> None:  # type: ignore[misc]
+        pass
+
+    def make_async_bridge(coordinator: Any) -> Any:  # type: ignore[misc]
+        return NOOP_ASYNC_BRIDGE
+
+    def register_events(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        pass
+
+
 # ── Template stubs ─────────────────────────────────────────────────────────────
 
 _AGENTS_MD = """\
@@ -242,10 +262,6 @@ def _read_tier1(pc_dir: Path, token_budget: int) -> tuple[str, list[str], int]:
 # ── Hook classes ───────────────────────────────────────────────────────────────
 
 
-async def _noop(event_name: str, payload: Any) -> None:  # type: ignore[misc]
-    """No-op async bridge_emit used when no coordinator is provided."""
-
-
 class ProjectContextStartHook:
     name = "hooks-project-context-start"
     events = ["session:start"]
@@ -254,14 +270,14 @@ class ProjectContextStartHook:
         self,
         config: dict[str, Any] | None = None,
         *,
-        bridge_emit: Any = None,
+        bridge_emit: AsyncBridge | None = None,
     ) -> None:
         self.config = config or {}
         self.tier1_always: bool = self.config.get("tier1_always", True)
         self.setup_if_missing: bool = self.config.get("setup_if_missing", True)
         self.token_budget: int = self.config.get("token_budget", 800)
         self.emit_events: bool = bool(self.config.get("emit_events", True))
-        self._bridge_emit = bridge_emit or _noop
+        self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         sid = data.get("session_id")
@@ -342,12 +358,12 @@ class ProjectContextEndHook:
         self,
         config: dict[str, Any] | None = None,
         *,
-        bridge_emit: Any = None,
+        bridge_emit: AsyncBridge | None = None,
     ) -> None:
         self.config = config or {}
         self.handoff_on_end: bool = self.config.get("handoff_on_end", True)
         self.emit_events: bool = bool(self.config.get("emit_events", True))
-        self._bridge_emit = bridge_emit or _noop
+        self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         if not self.handoff_on_end:
@@ -395,20 +411,17 @@ async def mount(
 ) -> dict[str, Any]:
     """Mount the project-context hooks into the Amplifier coordinator."""
 
-    _COORDINATOR_EVENTS = [
-        "memory-mempalace:coordination_read",
-        "memory-mempalace:coordination_scaffolded",
-        "memory-mempalace:curator_handoff_requested",
-    ]
-
-    coordinator.register_contributor(
-        "observability.events",
+    register_events(
+        coordinator,
         "memory-mempalace-project-context",
-        lambda: _COORDINATOR_EVENTS,
+        [
+            "memory-mempalace:coordination_read",
+            "memory-mempalace:coordination_scaffolded",
+            "memory-mempalace:curator_handoff_requested",
+        ],
     )
 
-    async def bridge_emit(event_name: str, payload: Any) -> None:
-        await coordinator.hooks.emit(event_name, payload)
+    bridge_emit = make_async_bridge(coordinator)
 
     start_hook = ProjectContextStartHook(config, bridge_emit=bridge_emit)
     end_hook = ProjectContextEndHook(config, bridge_emit=bridge_emit)

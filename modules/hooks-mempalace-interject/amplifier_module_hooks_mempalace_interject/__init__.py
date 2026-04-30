@@ -61,9 +61,24 @@ except ImportError:
         pass
 
 
-async def _noop(*args: Any, **kwargs: Any) -> None:
-    """No-op async function used as default bridge_emit when none is provided."""
-    pass
+try:
+    from amplifier_module_tool_mempalace.coordinator_bridge import (
+        NOOP_ASYNC_BRIDGE,
+        AsyncBridge,
+        make_async_bridge,
+        register_events,
+    )
+except ImportError:
+    AsyncBridge = Any  # type: ignore
+
+    async def NOOP_ASYNC_BRIDGE(event: str, payload: Any) -> None:  # type: ignore[misc]
+        pass
+
+    def make_async_bridge(coordinator: Any) -> Any:  # type: ignore[misc]
+        return NOOP_ASYNC_BRIDGE
+
+    def register_events(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        pass
 
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -234,7 +249,7 @@ class MempalaceInterjectHook:
         self,
         config: dict[str, Any] | None = None,
         *,
-        bridge_emit: Any = None,
+        bridge_emit: AsyncBridge | None = None,
     ) -> None:
         config = config or {}
         self.cosine_threshold: float = float(
@@ -263,8 +278,8 @@ class MempalaceInterjectHook:
         self._turn: int = 0
         # Briefing memory IDs (populated via cross-hook briefing_assembled listener)
         self._briefed_ids: set[str] = set()
-        # Coordinator bridge emit function (async callable or _noop)
-        self._bridge_emit = bridge_emit or _noop
+        # Coordinator bridge emit function
+        self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
     def _is_on_cooldown(self, memory_id: str) -> bool:
         """Check if a memory was recently injected (within cooldown_turns)."""
@@ -778,19 +793,13 @@ async def mount(
     """
     cfg = config or {}
 
-    # Register contributor so the coordinator knows which events this module emits
-    coordinator.register_contributor(
-        "observability.events",
+    register_events(
+        coordinator,
         "memory-mempalace-interject",
-        lambda: [
-            "memory-mempalace:memory_surfaced",
-            "memory-mempalace:interject_skipped",
-        ],
+        ["memory-mempalace:memory_surfaced", "memory-mempalace:interject_skipped"],
     )
 
-    # Async bridge_emit closure: routes events through coordinator.hooks
-    async def bridge_emit(event_name: str, payload: Any) -> None:
-        await coordinator.hooks.emit(event_name, payload)
+    bridge_emit = make_async_bridge(coordinator)
 
     # Instantiate the hook with the bridge_emit closure
     hook = MempalaceInterjectHook(cfg, bridge_emit=bridge_emit)

@@ -47,6 +47,26 @@ except ImportError:
         pass
 
 
+try:
+    from amplifier_module_tool_mempalace.coordinator_bridge import (
+        NOOP_ASYNC_BRIDGE,
+        AsyncBridge,
+        make_async_bridge,
+        register_events,
+    )
+except ImportError:
+    AsyncBridge = Any  # type: ignore
+
+    async def NOOP_ASYNC_BRIDGE(event: str, payload: Any) -> None:  # type: ignore[misc]
+        pass
+
+    def make_async_bridge(coordinator: Any) -> Any:  # type: ignore[misc]
+        return NOOP_ASYNC_BRIDGE
+
+    def register_events(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        pass
+
+
 # ── Re-ranking ──────────────────────────────────────────────────────────────
 
 #: Scaling constant. Bounds max boost/penalty to ±0.04 at weight=1.0.
@@ -348,7 +368,7 @@ class MempalaceBriefingHook:
         self,
         config: dict[str, Any] | None = None,
         *,
-        bridge_emit: Any = None,
+        bridge_emit: AsyncBridge | None = None,
     ) -> None:
         self.config = config or {}
         self.token_budget: int = self.config.get("token_budget", 1500)
@@ -364,10 +384,7 @@ class MempalaceBriefingHook:
             self.config.get("briefing_importance_weight", 1.0)
         )
 
-        async def _noop(*args: Any, **kwargs: Any) -> None:
-            pass
-
-        self._bridge_emit = bridge_emit or _noop
+        self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         sid = data.get("session_id")
@@ -493,22 +510,13 @@ async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Mount the mempalace-briefing hook into the Amplifier coordinator."""
-    # Register coordinator contributor so the observability channel knows which events we emit
-    coordinator.register_contributor(
-        "observability.events",
+    register_events(
+        coordinator,
         "memory-mempalace-briefing",
-        lambda: [
-            "memory-mempalace:briefing_assembled",
-            "memory-mempalace:briefing_skipped",
-        ],
+        ["memory-mempalace:briefing_assembled", "memory-mempalace:briefing_skipped"],
     )
 
-    # Bridge emit: forward events to the coordinator hooks system
-    async def bridge_emit(event_name: str, payload: Any) -> None:
-        try:
-            await coordinator.hooks.emit(event_name, payload)
-        except Exception:
-            pass
+    bridge_emit = make_async_bridge(coordinator)
 
     hook = MempalaceBriefingHook(config, bridge_emit=bridge_emit)
     for event in hook.events:

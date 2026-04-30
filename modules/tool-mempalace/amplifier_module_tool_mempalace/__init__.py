@@ -26,15 +26,17 @@ from typing import Any
 
 from amplifier_core import Tool, ToolResult  # type: ignore
 
+from .coordinator_bridge import (
+    NOOP_SYNC_BRIDGE,
+    SyncBridge,
+    make_sync_bridge,
+    register_events,
+)
 from .event_emitter import _read_events_with_skip_count, emit_event
 from .garden import execute_garden
 
 # Hard wall-clock budget for garden operations. Patchable in tests.
 _GARDEN_TIMEOUT_S: float = 120.0
-
-# Module-level bridge holder. Set by mount() to forward synchronous garden-thread
-# events to the coordinator. None when the tool runs without a mounted coordinator.
-_SYNC_BRIDGE_EMIT: Any = None
 
 
 PALACE_PATH = Path.home() / ".mempalace"
@@ -63,6 +65,11 @@ class PalaceTool(Tool):
         "MemPalace memory operations. Operations: search, remember, status, "
         "kg (knowledge graph), traverse, diary, mine, events, garden."
     )
+
+    def __init__(self, *, bridge_emit: SyncBridge | None = None) -> None:
+        super().__init__()
+        self._bridge_emit: SyncBridge = bridge_emit or NOOP_SYNC_BRIDGE
+
     input_schema = {
         "type": "object",
         "properties": {
@@ -405,12 +412,11 @@ class PalaceTool(Tool):
                         data=data,
                         session_id=session_id,
                     )
-                    if _SYNC_BRIDGE_EMIT is not None:
-                        try:
-                            payload = {"ok": ok, "preview": preview, **(data or {})}
-                            _SYNC_BRIDGE_EMIT(f"memory-mempalace:{event}", payload)
-                        except Exception:
-                            pass
+                    try:
+                        payload = {"ok": ok, "preview": preview, **(data or {})}
+                        self._bridge_emit(f"memory-mempalace:{event}", payload)
+                    except Exception:
+                        pass
 
                 try:
                     garden_result = await asyncio.wait_for(
@@ -448,22 +454,21 @@ class PalaceTool(Tool):
                         )
                     except Exception:
                         pass  # never let event emission failure crash the error path
-                    if _SYNC_BRIDGE_EMIT is not None:
-                        try:
-                            _SYNC_BRIDGE_EMIT(
-                                "memory-mempalace:garden_completed",
-                                {
-                                    "ok": False,
-                                    "scope_wing": kwargs.get("wing"),
-                                    "scope_room": kwargs.get("room"),
-                                    "drawers_analyzed": 0,
-                                    "clusters_found": 0,
-                                    "kg_edges_created": 0,
-                                    "timed_out": True,
-                                },
-                            )
-                        except Exception:
-                            pass
+                    try:
+                        self._bridge_emit(
+                            "memory-mempalace:garden_completed",
+                            {
+                                "ok": False,
+                                "scope_wing": kwargs.get("wing"),
+                                "scope_room": kwargs.get("room"),
+                                "drawers_analyzed": 0,
+                                "clusters_found": 0,
+                                "kg_edges_created": 0,
+                                "timed_out": True,
+                            },
+                        )
+                    except Exception:
+                        pass
                     return ToolResult(
                         success=False,
                         error={
@@ -488,21 +493,20 @@ class PalaceTool(Tool):
                     },
                     session_id=kwargs.get("session_id"),
                 )
-                if _SYNC_BRIDGE_EMIT is not None:
-                    try:
-                        _SYNC_BRIDGE_EMIT(
-                            "memory-mempalace:garden_completed",
-                            {
-                                "ok": True,
-                                "scope_wing": kwargs.get("wing"),
-                                "scope_room": kwargs.get("room"),
-                                "drawers_analyzed": garden_result["drawers_analyzed"],
-                                "clusters_found": len(garden_result["clusters"]),
-                                "kg_edges_created": garden_result["kg_edges_created"],
-                            },
-                        )
-                    except Exception:
-                        pass
+                try:
+                    self._bridge_emit(
+                        "memory-mempalace:garden_completed",
+                        {
+                            "ok": True,
+                            "scope_wing": kwargs.get("wing"),
+                            "scope_room": kwargs.get("room"),
+                            "drawers_analyzed": garden_result["drawers_analyzed"],
+                            "clusters_found": len(garden_result["clusters"]),
+                            "kg_edges_created": garden_result["kg_edges_created"],
+                        },
+                    )
+                except Exception:
+                    pass
 
                 return ToolResult(output=json.dumps(garden_result, indent=2))
 
@@ -529,28 +533,14 @@ async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Mount the palace tool into the Amplifier coordinator."""
-    global _SYNC_BRIDGE_EMIT
-
-    loop = asyncio.get_running_loop()
-
-    coordinator.register_contributor(
-        "observability.events",
+    register_events(
+        coordinator,
         "memory-mempalace-tool",
-        lambda: [
-            "memory-mempalace:garden_completed",
-            "memory-mempalace:garden_progress",
-        ],
+        ["memory-mempalace:garden_completed", "memory-mempalace:garden_progress"],
     )
 
-    def sync_bridge_emit(event_name: str, payload: Any) -> None:
-        asyncio.run_coroutine_threadsafe(
-            coordinator.hooks.emit(event_name, payload),
-            loop,
-        )
-
-    _SYNC_BRIDGE_EMIT = sync_bridge_emit
-
-    tool = PalaceTool()
+    bridge_emit = make_sync_bridge(coordinator)
+    tool = PalaceTool(bridge_emit=bridge_emit)
     await coordinator.mount("tools", tool, name=tool.name)
     return {
         "name": "tool-mempalace",

@@ -175,9 +175,9 @@ class TestCaptureCoordinatorBridge:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
         """After a worthy tool:post event, the drain thread must emit
-        'memory-mempalace:drawer_filed' to the coordinator via _sync_bridge_emit.
+        'memory-mempalace:drawer_filed' to the coordinator via _bridge_emit.
 
-        The hook must expose a _sync_bridge_emit attribute confirming bridge wiring.
+        The hook must expose a _bridge_emit attribute confirming bridge wiring.
         drawer_filed must also appear in the private-JSONL emit log.
         """
         import asyncio
@@ -221,9 +221,9 @@ class TestCaptureCoordinatorBridge:
                 break
             time.sleep(0.01)
 
-        # The hook must have a _sync_bridge_emit attribute (coordinator bridge wiring)
-        assert hasattr(hook, "_sync_bridge_emit"), (
-            "MempalaceCaptureHook must have a _sync_bridge_emit attribute "
+        # The hook must have a _bridge_emit attribute (coordinator bridge wiring)
+        assert hasattr(hook, "_bridge_emit"), (
+            "MempalaceCaptureHook must have a _bridge_emit attribute "
             "to wire the drain thread into the coordinator bridge"
         )
 
