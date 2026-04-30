@@ -1,0 +1,40 @@
+{
+  "no_pip": true,
+  "no_comments": false,
+  "kebab_case_routes": true,
+  "syntactic_validity": false,
+  "all_three": false,
+  "n_code_blocks": 3,
+  "n_python_blocks": 1,
+  "n_routes_found": 3,
+  "routes": [
+    "/healthz",
+    "/users/<user_id>/profile",
+    "/orders/recent"
+  ],
+  "pip_violations": [],
+  "comment_violations": [
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 1,
+      "text": "# liveness/readiness probe"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 2,
+      "text": "# single-user profile, 404 if unknown"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 3,
+      "text": "# last-24h orders; ?limit= (default 20, max 100)"
+    }
+  ],
+  "route_violations": [],
+  "syntax_errors": [
+    "block 0: invalid syntax (<unknown>, line 3)"
+  ]
+}

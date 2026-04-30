@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "response": "Here's a minimal Flask app with your constraints:\n\n**Setup with uv:**\n```bash\nuv init my-api\ncd my-api\nuv add flask\n```\n\n**`app.py`:**\n```python\nfrom flask import Flask, jsonify\n\napp = Flask(__name__)\n\nusers = [\n    {\"id\": 1, \"name\": \"Alice\"},\n    {\"id\": 2, \"name\": \"Bob\"},\n]\n\n@app.route(\"/users\")\ndef get_users():\n    return jsonify(users)\n\nif __name__ == \"__main__\":\n    app.run(debug=True)\n```\n\n**Run it:**\n```bash\nuv run python app.py\n```\n\n**Test it:**\n```bash\ncurl http://localhost:5000/users\n```\n\n```json\n[{\"id\": 1, \"name\": \"Alice\"}, {\"id\": 2, \"name\": \"Bob\"}]\n```\n\n---\n\nA few notes relevant to your constraints:\n\n**Kebab-case routes** \u2014 `/users` is fine as-is. When you add multi-word routes, Flask handles them naturally: `@app.route(\"/user-profile\")`. No extra config needed.\n\n**uv run** vs activating a venv \u2014 `uv run python app.py` is the idiomatic way; you don't need to activate anything manually.\n\n**For production**, swap `app.run(debug=True)` for a proper WSGI server:\n```bash\nuv add gunicorn\nuv run gunicorn app:app\n```",
+  "session_id": "d7ba9062-1652-4545-98b1-917a5e89de45",
+  "bundle": "bundle:foundation",
+  "model": "anthropic/claude-sonnet-4-6",
+  "timestamp": "2026-04-30T07:55:07.552105+00:00"
+}

@@ -1,0 +1,64 @@
+{
+  "no_pip": true,
+  "no_comments": false,
+  "kebab_case_routes": true,
+  "syntactic_validity": false,
+  "all_three": false,
+  "n_code_blocks": 3,
+  "n_python_blocks": 1,
+  "n_routes_found": 3,
+  "routes": [
+    "/healthz",
+    "/users/<user_id>/profile",
+    "/orders/recent"
+  ],
+  "pip_violations": [],
+  "comment_violations": [
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 7,
+      "text": "# in-memory stub data"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 8,
+      "text": "# in-memory stub data"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 12,
+      "text": "# Returns: status, uptime_seconds, timestamp"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 16,
+      "text": "# Returns user dict \u2192 200, or {error} \u2192 404 if not found"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 20,
+      "text": "# ?limit= param (default 20, max 100, validates range)"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 21,
+      "text": "# Returns orders from last 24 h, newest-first"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 22,
+      "text": "# 400 on invalid or out-of-range limit"
+    }
+  ],
+  "route_violations": [],
+  "syntax_errors": [
+    "block 0: expected an indented block after function definition on line 11 (<unknown>, line 14)"
+  ]
+}

@@ -1,0 +1,126 @@
+{
+  "n_pairs_total_in_file": 1,
+  "n_pairs_used": 1,
+  "constraints": {
+    "all_three": {
+      "name": "All-3 constraint adherence (primary)",
+      "n_pairs": 1,
+      "with_pass": 0,
+      "with_rate": 0.0,
+      "with_ci_95": [
+        0.0,
+        0.7934506856227626
+      ],
+      "without_pass": 0,
+      "without_rate": 0.0,
+      "without_ci_95": [
+        0.0,
+        0.7934506856227626
+      ],
+      "risk_difference": 0.0,
+      "discordant_b_with_yes_without_no": 0,
+      "discordant_c_with_no_without_yes": 0,
+      "mcnemar_exact_p": 1.0,
+      "odds_ratio_ci_95": [
+        null,
+        null
+      ]
+    },
+    "no_pip": {
+      "name": "No pip / requirements.txt",
+      "n_pairs": 1,
+      "with_pass": 0,
+      "with_rate": 0.0,
+      "with_ci_95": [
+        0.0,
+        0.7934506856227626
+      ],
+      "without_pass": 0,
+      "without_rate": 0.0,
+      "without_ci_95": [
+        0.0,
+        0.7934506856227626
+      ],
+      "risk_difference": 0.0,
+      "discordant_b_with_yes_without_no": 0,
+      "discordant_c_with_no_without_yes": 0,
+      "mcnemar_exact_p": 1.0,
+      "odds_ratio_ci_95": [
+        null,
+        null
+      ]
+    },
+    "no_comments": {
+      "name": "No comments / docstrings",
+      "n_pairs": 1,
+      "with_pass": 0,
+      "with_rate": 0.0,
+      "with_ci_95": [
+        0.0,
+        0.7934506856227626
+      ],
+      "without_pass": 0,
+      "without_rate": 0.0,
+      "without_ci_95": [
+        0.0,
+        0.7934506856227626
+      ],
+      "risk_difference": 0.0,
+      "discordant_b_with_yes_without_no": 0,
+      "discordant_c_with_no_without_yes": 0,
+      "mcnemar_exact_p": 1.0,
+      "odds_ratio_ci_95": [
+        null,
+        null
+      ]
+    },
+    "kebab_case_routes": {
+      "name": "Kebab-case routes",
+      "n_pairs": 1,
+      "with_pass": 1,
+      "with_rate": 1.0,
+      "with_ci_95": [
+        0.20654931437723745,
+        1.0
+      ],
+      "without_pass": 0,
+      "without_rate": 0.0,
+      "without_ci_95": [
+        0.0,
+        0.7934506856227626
+      ],
+      "risk_difference": 1.0,
+      "discordant_b_with_yes_without_no": 1,
+      "discordant_c_with_no_without_yes": 0,
+      "mcnemar_exact_p": 1.0,
+      "odds_ratio_ci_95": [
+        null,
+        null
+      ]
+    },
+    "syntactic_validity": {
+      "name": "Syntactic validity (guardrail)",
+      "n_pairs": 1,
+      "with_pass": 1,
+      "with_rate": 1.0,
+      "with_ci_95": [
+        0.20654931437723745,
+        1.0
+      ],
+      "without_pass": 1,
+      "without_rate": 1.0,
+      "without_ci_95": [
+        0.20654931437723745,
+        1.0
+      ],
+      "risk_difference": 0.0,
+      "discordant_b_with_yes_without_no": 0,
+      "discordant_c_with_no_without_yes": 0,
+      "mcnemar_exact_p": 1.0,
+      "odds_ratio_ci_95": [
+        null,
+        null
+      ]
+    }
+  }
+}

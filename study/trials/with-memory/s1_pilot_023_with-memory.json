@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "response": "Here's the setup and code:\n\n**Project setup with uv:**\n\n```bash\nuv init my-api\ncd my-api\nuv add flask\n```\n\n**`app.py`:**\n\n```python\nfrom flask import Flask, jsonify\n\napp = Flask(__name__)\n\nusers = [\n    {\"id\": 1, \"name\": \"Alice\"},\n    {\"id\": 2, \"name\": \"Bob\"},\n]\n\n@app.route(\"/users\")\ndef get_users():\n    return jsonify(users)\n\nif __name__ == \"__main__\":\n    app.run(debug=True)\n```\n\n**Run it:**\n\n```bash\nuv run python app.py\n```\n\n**Test it:**\n\n```bash\ncurl http://localhost:5000/users\n```\n\nA few notes on your constraints:\n\n- `/users` is already kebab-case. For multi-word routes (your example `/user-profile`), Flask handles them directly as string literals \u2014 no special config needed.\n- `uv run` executes within the project's managed venv without activating it manually.\n- If you want a WSGI server for anything beyond local use, `uv add gunicorn` and run with `uv run gunicorn app:app`.",
+  "session_id": "618fe545-a553-4a08-bea5-7727b02e92ed",
+  "bundle": "bundle:foundation",
+  "model": "anthropic/claude-sonnet-4-6",
+  "timestamp": "2026-04-30T07:37:40.302364+00:00"
+}

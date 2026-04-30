@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "response": "Here's the setup and code for your endpoint.\n\n**Project setup:**\n\n```bash\nuv init my-api\ncd my-api\nuv add flask\n```\n\n**`app.py`:**\n\n```python\nfrom flask import Flask, jsonify\n\napp = Flask(__name__)\n\nusers = [\n    {\"id\": 1, \"name\": \"Alice\"},\n    {\"id\": 2, \"name\": \"Bob\"},\n]\n\n@app.route(\"/users\")\ndef get_users():\n    return jsonify(users)\n\nif __name__ == \"__main__\":\n    app.run(debug=True)\n```\n\n**Run it:**\n\n```bash\nuv run python app.py\n```\n\n**Test it:**\n\n```bash\ncurl http://localhost:5000/users\n```\n\nA few notes on your constraints:\n\n- `/users` is already kebab-case compliant. When you add multi-word routes like `/user-profiles`, Flask handles the hyphen natively \u2014 no special config needed.\n- No `pyproject.toml` edits needed; `uv add flask` handles that automatically.\n- If you want a production runner instead of the built-in dev server: `uv add gunicorn` then `uv run gunicorn app:app`.",
+  "session_id": "63132e5c-85be-425d-ba9e-835c5a6a20a1",
+  "bundle": "bundle:foundation",
+  "model": "anthropic/claude-sonnet-4-6",
+  "timestamp": "2026-04-30T06:59:10.167740+00:00"
+}

@@ -1,0 +1,126 @@
+{
+  "n_pairs_total_in_file": 40,
+  "n_pairs_used": 40,
+  "constraints": {
+    "all_three": {
+      "name": "All-3 constraint adherence (primary)",
+      "n_pairs": 40,
+      "with_pass": 6,
+      "with_rate": 0.15,
+      "with_ci_95": [
+        0.07061187717320358,
+        0.2907232436648971
+      ],
+      "without_pass": 0,
+      "without_rate": 0.0,
+      "without_ci_95": [
+        0.0,
+        0.08762160119728664
+      ],
+      "risk_difference": 0.15,
+      "discordant_b_with_yes_without_no": 6,
+      "discordant_c_with_no_without_yes": 0,
+      "mcnemar_exact_p": 0.031250000000000014,
+      "odds_ratio_ci_95": [
+        null,
+        null
+      ]
+    },
+    "no_pip": {
+      "name": "No pip / requirements.txt",
+      "n_pairs": 40,
+      "with_pass": 14,
+      "with_rate": 0.35,
+      "with_ci_95": [
+        0.2213452887317629,
+        0.5049411916274231
+      ],
+      "without_pass": 0,
+      "without_rate": 0.0,
+      "without_ci_95": [
+        0.0,
+        0.08762160119728664
+      ],
+      "risk_difference": 0.35,
+      "discordant_b_with_yes_without_no": 14,
+      "discordant_c_with_no_without_yes": 0,
+      "mcnemar_exact_p": 0.00012207031250000005,
+      "odds_ratio_ci_95": [
+        null,
+        null
+      ]
+    },
+    "no_comments": {
+      "name": "No comments / docstrings",
+      "n_pairs": 40,
+      "with_pass": 32,
+      "with_rate": 0.8,
+      "with_ci_95": [
+        0.652426936536005,
+        0.895000102745623
+      ],
+      "without_pass": 33,
+      "without_rate": 0.825,
+      "without_ci_95": [
+        0.6805000966821229,
+        0.9125458625396408
+      ],
+      "risk_difference": -0.02499999999999991,
+      "discordant_b_with_yes_without_no": 4,
+      "discordant_c_with_no_without_yes": 5,
+      "mcnemar_exact_p": 0.9999999999999977,
+      "odds_ratio_ci_95": [
+        0.15874272732480263,
+        3.7167918645973614
+      ]
+    },
+    "kebab_case_routes": {
+      "name": "Kebab-case routes",
+      "n_pairs": 40,
+      "with_pass": 23,
+      "with_rate": 0.575,
+      "with_ci_95": [
+        0.42195068541991065,
+        0.7149060744004962
+      ],
+      "without_pass": 3,
+      "without_rate": 0.075,
+      "without_ci_95": [
+        0.025836025774588198,
+        0.19864233524310543
+      ],
+      "risk_difference": 0.49999999999999994,
+      "discordant_b_with_yes_without_no": 20,
+      "discordant_c_with_no_without_yes": 0,
+      "mcnemar_exact_p": 1.9073486328125e-06,
+      "odds_ratio_ci_95": [
+        null,
+        null
+      ]
+    },
+    "syntactic_validity": {
+      "name": "Syntactic validity (guardrail)",
+      "n_pairs": 40,
+      "with_pass": 38,
+      "with_rate": 0.95,
+      "with_ci_95": [
+        0.8349612263085903,
+        0.9861793326138516
+      ],
+      "without_pass": 39,
+      "without_rate": 0.975,
+      "without_ci_95": [
+        0.8711863103652591,
+        0.9955731684973186
+      ],
+      "risk_difference": -0.025000000000000022,
+      "discordant_b_with_yes_without_no": 1,
+      "discordant_c_with_no_without_yes": 2,
+      "mcnemar_exact_p": 1.0,
+      "odds_ratio_ci_95": [
+        0.008474980349111462,
+        9.604529884722862
+      ]
+    }
+  }
+}

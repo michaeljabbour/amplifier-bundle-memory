@@ -1,0 +1,45 @@
+{
+  "no_pip": false,
+  "no_comments": false,
+  "kebab_case_routes": false,
+  "syntactic_validity": true,
+  "all_three": false,
+  "n_code_blocks": 6,
+  "n_python_blocks": 3,
+  "n_routes_found": 0,
+  "routes": [],
+  "pip_violations": [
+    "pip install",
+    "pip install",
+    "requirements.txt",
+    "requirements.txt"
+  ],
+  "comment_violations": [
+    {
+      "block": 1,
+      "kind": "comment",
+      "line": 1,
+      "text": "# 200: {\"id\": 1, \"name\": \"Alice Smith\", \"email\": \"alice@example.com\", \"role\": \"admin\"}"
+    },
+    {
+      "block": 1,
+      "kind": "comment",
+      "line": 2,
+      "text": "# 404: {\"error\": \"not_found\", \"message\": \"User 99 not found.\"}"
+    },
+    {
+      "block": 2,
+      "kind": "comment",
+      "line": 1,
+      "text": "# 200: [{...}, {...}]  \u2014 sorted by created_at descending"
+    },
+    {
+      "block": 2,
+      "kind": "comment",
+      "line": 2,
+      "text": "# 400: {\"error\": \"bad_request\", \"message\": \"Query parameter 'limit' must be an integer.\"}"
+    }
+  ],
+  "route_violations": [],
+  "syntax_errors": []
+}

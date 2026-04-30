@@ -1,0 +1,18 @@
+{
+  "no_pip": true,
+  "no_comments": true,
+  "kebab_case_routes": true,
+  "syntactic_validity": true,
+  "all_three": true,
+  "n_code_blocks": 7,
+  "n_python_blocks": 3,
+  "n_routes_found": 2,
+  "routes": [
+    "/healthz",
+    "/orders/recent"
+  ],
+  "pip_violations": [],
+  "comment_violations": [],
+  "route_violations": [],
+  "syntax_errors": []
+}

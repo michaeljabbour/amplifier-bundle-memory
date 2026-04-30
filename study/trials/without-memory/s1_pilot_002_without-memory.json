@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "response": "Here's a minimal Flask API with a `GET /users` endpoint following your constraints.\n\n**Project setup with uv:**\n\n```bash\nuv init flask-api\ncd flask-api\nuv add flask\n```\n\n**`app.py`:**\n\n```python\nfrom flask import Flask, jsonify\n\napp = Flask(__name__)\n\nusers = [\n    {\"id\": 1, \"name\": \"Alice\"},\n    {\"id\": 2, \"name\": \"Bob\"},\n]\n\n@app.get(\"/users\")\ndef get_users():\n    return jsonify(users)\n\nif __name__ == \"__main__\":\n    app.run(debug=True)\n```\n\n**Run it:**\n\n```bash\nuv run python app.py\n```\n\n**Test it:**\n\n```bash\ncurl http://localhost:5000/users\n```\n\n```json\n[{\"id\": 1, \"name\": \"Alice\"}, {\"id\": 2, \"name\": \"Bob\"}]\n```\n\n---\n\nA few notes on your kebab-case constraint as the API grows:\n\n- `/users` \u2014 fine, single word\n- `/user-profile` \u2014 Flask handles this naturally: `@app.get(\"/user-profile\")`\n- The only gotcha is Python function names can't contain hyphens, so your handler names will use underscores while the route string uses hyphens:\n\n```python\n@app.get(\"/user-profile\")\ndef get_user_profile():\n    ...\n```\n\nThat's the standard pattern \u2014 route string is kebab-case, function name is snake_case. Flask treats them independently.",
+  "session_id": "04db86cb-69e8-4854-97ce-b625348c9f43",
+  "bundle": "bundle:foundation",
+  "model": "anthropic/claude-sonnet-4-6",
+  "timestamp": "2026-04-30T06:16:08.768260+00:00"
+}

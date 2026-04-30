@@ -1,0 +1,124 @@
+# study-without-memory DTU Profile
+#
+# Control arm for the cross-session memory study. Identical to
+# memory-bundle-e2e.yaml EXCEPT:
+#   - Does NOT install mempalace
+#   - Does NOT seed a palace
+#   - Does NOT copy project-context fixtures
+#   - Does NOT add amplifier-bundle-memory
+#
+# Both arms share: same Ubuntu 24.04 base, same Amplifier install via Gitea
+# mirror, same foundation bundle, same provider-anthropic configuration with
+# default model claude-sonnet-4-6.
+#
+# Variables (provided at launch via --var):
+#   GITEA_URL    -- Gitea base URL reachable from inside the environment
+#   GITEA_TOKEN  -- API token for Gitea (admin user)
+#
+# Required host environment variables (forwarded via passthrough):
+#   ANTHROPIC_API_KEY  -- Anthropic API key for LLM calls
+
+name: study-without-memory
+description: |
+  Control arm of the amplifier-bundle-memory cross-session study.
+  Provisions Amplifier with no memory bundle and no palace state.
+
+base:
+  image: ubuntu:24.04
+
+# Same Gitea url-rewrites as the with-memory arm so the install path is
+# identical (apart from which bundles get added).
+url_rewrites:
+  auth:
+    username: admin
+    token_var: GITEA_TOKEN
+  allow_uv_github_fast_path: false
+  rules:
+    - match: github.com/michaeljabbour/amplifier-bundle-memory
+      target: ${GITEA_URL}/admin/amplifier-bundle-memory
+
+passthrough:
+  allow_external: true
+  services:
+    - name: anthropic
+      key_env: ANTHROPIC_API_KEY
+
+provision:
+  setup_cmds:
+    # 1. Core system packages (no mempalace install)
+    - apt-get update && apt-get install -y git curl python3 python3-pip jq python3-yaml
+
+    # 2. Install uv
+    - curl -LsSf https://astral.sh/uv/install.sh | sh
+
+    # 3. PATH
+    - |
+      echo 'export PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
+      export PATH="/root/.local/bin:$PATH"
+
+    # 4. (intentionally no mempalace install)
+
+    # 5. Empty workspace
+    - mkdir -p /workspace
+
+    # 6. Install Amplifier via uv
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      uv tool install -vv git+https://github.com/microsoft/amplifier
+
+    # 7. Write API key to keys.env
+    - |
+      mkdir -p /root/.amplifier
+      printf 'ANTHROPIC_API_KEY=%s\n' "${ANTHROPIC_API_KEY}" > /root/.amplifier/keys.env
+      chmod 600 /root/.amplifier/keys.env
+
+    # 8. Add foundation bundle (provides tools, hooks, default agents)
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      amplifier bundle add git+https://github.com/microsoft/amplifier-foundation@main
+
+    # 9. Add provider-anthropic module + write provider config to settings.yaml
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      amplifier module add provider-anthropic --source 'git+https://github.com/microsoft/amplifier-module-provider-anthropic@main'
+      python3 <<EOF
+      import yaml, os
+      p = "/root/.amplifier/settings.yaml"
+      try:
+          with open(p) as f:
+              s = yaml.safe_load(f) or {}
+      except FileNotFoundError:
+          s = {}
+      key = os.environ["ANTHROPIC_API_KEY"]
+      s.setdefault("apiKeys", {})["provider-anthropic"] = key
+      s.setdefault("modules", {})["providers"] = [{
+          "module": "provider-anthropic",
+          "source": "git+https://github.com/microsoft/amplifier-module-provider-anthropic@main",
+      }]
+      s["config"] = {"providers": [{
+          "module": "provider-anthropic",
+          "type": "anthropic",
+          "config": {
+              "api_key": key,
+              "default_model": "claude-sonnet-4-6",
+              "priority": 1,
+          },
+      }]}
+      with open(p, "w") as f:
+          yaml.safe_dump(s, f, sort_keys=False)
+      EOF
+
+    # 10. Validate
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      amplifier --version
+      amplifier provider list 2>&1 | tail -5
+
+    # 11. Smoke-test a real LLM call
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      cd /tmp && mkdir -p probe && cd probe && amplifier run --output-format json "Reply with the single word: OK" | tail -3
+
+update:
+  cmds:
+    - rm -rf /root/.amplifier/cache/

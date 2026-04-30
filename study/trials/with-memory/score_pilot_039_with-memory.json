@@ -1,0 +1,81 @@
+{
+  "no_pip": false,
+  "no_comments": false,
+  "kebab_case_routes": true,
+  "syntactic_validity": true,
+  "all_three": false,
+  "n_code_blocks": 3,
+  "n_python_blocks": 1,
+  "n_routes_found": 3,
+  "routes": [
+    "/healthz",
+    "/users/<user_id>/profile",
+    "/orders/recent"
+  ],
+  "pip_violations": [
+    "pip install",
+    "requirements.txt",
+    "requirements.txt"
+  ],
+  "comment_violations": [
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 10,
+      "text": "# ---------------------------------------------------------------------------"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 11,
+      "text": "# Mock data \u2014 replace with real DB calls in production"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 12,
+      "text": "# ---------------------------------------------------------------------------"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 27,
+      "text": "# ---------------------------------------------------------------------------"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 28,
+      "text": "# Endpoints"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 29,
+      "text": "# ---------------------------------------------------------------------------"
+    },
+    {
+      "block": 0,
+      "kind": "comment",
+      "line": 59,
+      "text": "# clamp to [1, 100]"
+    },
+    {
+      "block": 0,
+      "kind": "docstring",
+      "owner": "healthz"
+    },
+    {
+      "block": 0,
+      "kind": "docstring",
+      "owner": "get_user_profile"
+    },
+    {
+      "block": 0,
+      "kind": "docstring",
+      "owner": "list_recent_orders"
+    }
+  ],
+  "route_violations": [],
+  "syntax_errors": []
+}

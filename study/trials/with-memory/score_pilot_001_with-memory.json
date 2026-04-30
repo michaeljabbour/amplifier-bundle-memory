@@ -1,0 +1,22 @@
+{
+  "no_pip": false,
+  "no_comments": true,
+  "kebab_case_routes": false,
+  "syntactic_validity": true,
+  "all_three": false,
+  "n_code_blocks": 6,
+  "n_python_blocks": 0,
+  "n_routes_found": 0,
+  "routes": [],
+  "pip_violations": [
+    "pip install",
+    "pip install",
+    "pip install",
+    "requirements.txt",
+    "requirements.txt",
+    "requirements.txt"
+  ],
+  "comment_violations": [],
+  "route_violations": [],
+  "syntax_errors": []
+}

@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "response": "Here's a minimal Flask API meeting all your constraints:\n\n**`app.py`**\n```python\nfrom flask import Flask, jsonify\n\napp = Flask(__name__)\n\nusers = [\n    {\"id\": 1, \"name\": \"Alice\", \"email\": \"alice@example.com\"},\n    {\"id\": 2, \"name\": \"Bob\", \"email\": \"bob@example.com\"},\n]\n\n@app.route(\"/users\", methods=[\"GET\"])\ndef get_users():\n    return jsonify(users)\n\nif __name__ == \"__main__\":\n    app.run(debug=True)\n```\n\n**Setup with uv:**\n```bash\nuv init my-api\ncd my-api\nuv add flask\nuv run python app.py\n```\n\nOr if you prefer a `pyproject.toml`-first approach:\n\n**`pyproject.toml`**\n```toml\n[project]\nname = \"my-api\"\nversion = \"0.1.0\"\nrequires-python = \">=3.11\"\ndependencies = [\n    \"flask>=3.1.0\",\n]\n```\n\nThen `uv sync && uv run python app.py`.\n\n**Test it:**\n```bash\ncurl http://localhost:5000/users\n```\n\nA few notes on your kebab-case constraint as the project grows:\n\n- `/users` is fine as-is \u2014 single-word routes are already compliant\n- For multi-word routes, Flask handles kebab-case natively: `@app.route(\"/user-profile\")` just works\n- Watch out for Python function names \u2014 they can't contain hyphens, so the handler name will differ from the route (e.g., `def get_user_profile():` under `@app.route(\"/user-profile\")`) \u2014 that's expected and correct",
+  "session_id": "7dc79c5a-5532-4a4d-8df9-650bc633e899",
+  "bundle": "bundle:foundation",
+  "model": "anthropic/claude-sonnet-4-6",
+  "timestamp": "2026-04-30T06:18:43.512640+00:00"
+}

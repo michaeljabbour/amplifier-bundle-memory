@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "response": "Here's a minimal Flask app following your constraints:\n\n**Project setup with uv:**\n```bash\nuv init flask-api\ncd flask-api\nuv add flask\n```\n\n**`app.py`:**\n```python\nfrom flask import Flask, jsonify\n\napp = Flask(__name__)\n\nUSERS = [\n    {\"id\": 1, \"name\": \"Alice\"},\n    {\"id\": 2, \"name\": \"Bob\"},\n]\n\n@app.route(\"/users\")\ndef get_users():\n    return jsonify(USERS)\n\nif __name__ == \"__main__\":\n    app.run(debug=True)\n```\n\n**Run it:**\n```bash\nuv run python app.py\n```\n\n**Test it:**\n```bash\ncurl http://localhost:5000/users\n```\n\n**Response:**\n```json\n[\n  {\"id\": 1, \"name\": \"Alice\"},\n  {\"id\": 2, \"name\": \"Bob\"}\n]\n```\n\nA few notes on your constraints in context:\n\n- `/users` is already kebab-case-ready. Multi-word routes like `/user-profiles` work the same way \u2014 just use hyphens in the string literal passed to `@app.route`.\n- Flask's built-in `jsonify` handles the `Content-Type: application/json` header automatically.\n- `uv run` executes inside the project's virtual environment without needing to activate it manually.\n\nWhen you're ready to add more routes (e.g. `/user-profiles`, `/recent-orders`), they follow the exact same pattern \u2014 just new `@app.route` decorators with hyphenated strings.",
+  "session_id": "0d8aa44c-6909-420b-b8df-7c096c1094ef",
+  "bundle": "bundle:foundation",
+  "model": "anthropic/claude-sonnet-4-6",
+  "timestamp": "2026-04-30T08:08:12.962412+00:00"
+}

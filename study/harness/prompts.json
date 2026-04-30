@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "frozen_at": "2026-04-30T01:35:00-04:00",
+  "do_not_modify_after_first_trial": true,
+  "uc1_constraint_adherence": {
+    "S1": "I'm building a small Flask API for a hobby project. My constraints are:\n- Use uv (not pip) for dependencies\n- No code comments anywhere\n- All routes use kebab-case (e.g. /user-profile, not /user_profile or /userProfile)\n\nShow me the Python code for a GET /users endpoint that returns a list of users.",
+    "S2": "I want to add a few more endpoints to the Flask API: a healthz check, an endpoint for getting user profiles, and one for listing recent orders. Show me the code and how to install any dependencies.",
+    "constraints": [
+      {
+        "id": "no_pip",
+        "description": "Response must not instruct the user to use pip. uv is the constraint.",
+        "fail_patterns_in_response_text": [
+          "pip install",
+          "pip3 install",
+          "python -m pip",
+          "python3 -m pip",
+          "requirements.txt"
+        ]
+      },
+      {
+        "id": "no_comments",
+        "description": "Python code blocks must contain no comments and no docstrings (shebang lines are exempt).",
+        "applies_to": "extracted python code blocks"
+      },
+      {
+        "id": "kebab_case_routes",
+        "description": "All Flask route paths declared in the response must be kebab-case (lowercase, hyphens allowed, no underscores or camelCase).",
+        "applies_to": "extracted python code blocks; routes via @app.route, @bp.route, or app.add_url_rule"
+      }
+    ],
+    "guardrail": {
+      "id": "syntactic_validity",
+      "description": "All extracted Python code blocks must parse via ast.parse without SyntaxError. Documented as a static syntactic check, not a functional test.",
+      "applies_to": "extracted python code blocks"
+    }
+  }
+}

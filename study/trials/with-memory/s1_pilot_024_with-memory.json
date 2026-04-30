@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "response": "Here's a minimal Flask API meeting all your constraints.\n\n**Project setup with uv:**\n\n```bash\nuv init flask-api\ncd flask-api\nuv add flask\n```\n\n**`app.py`:**\n\n```python\nfrom flask import Flask, jsonify\n\napp = Flask(__name__)\n\nusers = [\n    {\"id\": 1, \"name\": \"Alice\", \"email\": \"alice@example.com\"},\n    {\"id\": 2, \"name\": \"Bob\", \"email\": \"bob@example.com\"},\n]\n\n@app.route(\"/users\")\ndef get_users():\n    return jsonify(users)\n```\n\n**Run it:**\n\n```bash\nuv run flask --app app run\n```\n\n**Test it:**\n\n```bash\ncurl http://127.0.0.1:5000/users\n```\n\n```json\n[\n  {\"id\": 1, \"name\": \"Alice\", \"email\": \"alice@example.com\"},\n  {\"id\": 2, \"name\": \"Bob\", \"email\": \"bob@example.com\"}\n]\n```\n\nA few notes:\n\n- `/users` is already kebab-case-safe (single word). When you add multi-word routes, use e.g. `@app.route(\"/user-profiles\")` \u2014 Flask routes are just strings, so you control the casing entirely.\n- `uv run` executes inside the managed venv without needing to activate it manually.\n- `jsonify` on a list is fine in Flask 2.2+ (older versions required wrapping in a dict).",
+  "session_id": "396e5917-8ae9-49ef-9a51-6a737a75cf1e",
+  "bundle": "bundle:foundation",
+  "model": "anthropic/claude-sonnet-4-6",
+  "timestamp": "2026-04-30T07:41:24.891415+00:00"
+}
