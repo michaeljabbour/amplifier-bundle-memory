@@ -446,3 +446,120 @@ connecting to `api.anthropic.com` or `api.openai.com`.
      --var GITEA_TOKEN="${GITEA_TOKEN}" \
      | tail -n1
    ```
+
+---
+
+### Zero `memory-mempalace:*` events in events.jsonl
+
+**Symptom:** An Amplifier session runs successfully but
+`grep 'memory-mempalace:' ~/.amplifier/projects/*/sessions/*/events.jsonl`
+returns nothing, even though the memory bundle is active.
+
+**Root cause — Amplifier module cache shadowing**
+
+The Amplifier loader prepends `~/.amplifier/cache/amplifier-module-hooks-logging-*/` to
+`sys.path` before site-packages. If that cache copy lacks `on_session_ready`, B2 detection
+in `_load_entry_point` sets `has_osr=False` and never enqueues the callback. Result:
+`register_contributor("observability.events", ...)` is never called, no handlers register
+for `memory-mempalace:*` events, and events.jsonl stays empty.
+
+This also means `uv pip install --force-reinstall <fork>` alone is insufficient — the old
+cache wins over the freshly installed version in site-packages.
+
+**Quick diagnosis:**
+```bash
+amplifier-digital-twin exec ${DTU_ID} -- \
+  /root/.local/share/uv/tools/amplifier/bin/python -c "
+import amplifier_module_hooks_logging as m
+print('file:', m.__file__)
+print('has on_session_ready:', hasattr(m, 'on_session_ready'))
+"
+```
+
+If `has on_session_ready: False` — the cache is shadowing the fork.
+
+**Fix:**
+```bash
+amplifier-digital-twin exec ${DTU_ID} -- bash -c "
+  rm -rf /root/.amplifier/cache/amplifier-module-hooks-logging-*
+  echo 'Cleared shadowing cache — next session will use site-packages fork'
+"
+```
+
+Deleting the cache dir lets Python fall through to site-packages on the next session
+start. No reinstall or primer session required.
+
+---
+
+### "No providers available" after `amplifier-digital-twin update`
+
+**Symptom:** After running `update`, Amplifier sessions fail immediately with
+`Error: No providers available`. The provider (Anthropic) is configured in
+`~/.amplifier/settings.yaml` but the module isn't loading.
+
+**Root cause:** An earlier version of this profile used `rm -rf /root/.amplifier/cache/`
+in the update section, which wiped **all** module caches — including provider-anthropic,
+loop-streaming, context-simple, and every other foundation module. Amplifier
+cannot start a session until those modules are re-downloaded and cached.
+
+This was fixed in the profile. If you are seeing this on a DTU provisioned from
+an older profile version:
+
+**Fix:**
+```bash
+# Reinstall Amplifier to repopulate the module cache (~2-3 min)
+amplifier-digital-twin exec ${DTU_ID} -- bash -c "
+  export PATH=/root/.local/bin:\$PATH
+  uv tool install -vv git+https://github.com/microsoft/amplifier
+  amplifier --version
+"
+```
+
+After this completes, re-apply the memory bundle:
+```bash
+amplifier-digital-twin exec ${DTU_ID} -- bash -c "
+  export PATH=/root/.local/bin:\$PATH
+  amplifier bundle add --app 'git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml'
+"
+```
+
+**Prevention:** the `update` section in the current profile does targeted cache
+invalidation (`rm -rf ...amplifier-module-hooks-mempalace-*` etc.) rather than a
+full wipe. Do not add `rm -rf /root/.amplifier/cache/` to this profile.
+
+---
+
+### Debug patches in `amplifier_core/loader.py` break module loading
+
+**Symptom:** All module loads fail with
+`UnboundLocalError: cannot access local variable 'sys' where it is not associated
+with a value` at `loader.py, in _load_entry_point, mod = sys.modules.get(module_name)`.
+
+**Root cause:** A debug patch added `import pathlib, sys` inside an `if` block
+within `_load_entry_point()`. Python's scoping treats any assignment to a name
+inside a function (including `import x`) as making that name *local to the entire
+function*. When the `if` block is not entered, `sys` is never assigned but Python
+still looks for it as a local — causing `UnboundLocalError` every time `sys` is
+referenced anywhere else in the function.
+
+**Fix:** Remove the offending lines from `loader.py`:
+```bash
+amplifier-digital-twin exec ${DTU_ID} -- \
+  /root/.local/share/uv/tools/amplifier/bin/python -c "
+import pathlib, re
+LOADER = pathlib.Path('/root/.local/share/uv/tools/amplifier/lib/python3.12/site-packages/amplifier_core/loader.py')
+src = LOADER.read_text()
+lines = [l for l in src.split('\n')
+         if not ('import pathlib' in l and 'pathlib.Path(' in l and l.strip().startswith('import'))]
+LOADER.write_text('\n'.join(lines))
+import py_compile; py_compile.compile(str(LOADER), doraise=True)
+print('loader.py cleaned and syntax OK')
+"
+# Clear the stale .pyc
+amplifier-digital-twin exec ${DTU_ID} -- \
+  rm -f '/root/.local/share/uv/tools/amplifier/lib/python3.12/site-packages/amplifier_core/__pycache__/loader.cpython-312.pyc'
+```
+
+**Prevention:** never add `import <name>` inside an `if` block within a function
+that also references `<name>` outside the block. Use `import <name> as _<name>`
+if a conditional import is genuinely needed, or import at module top level.

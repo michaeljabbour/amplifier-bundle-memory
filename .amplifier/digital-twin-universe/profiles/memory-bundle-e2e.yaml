@@ -135,33 +135,32 @@ provision:
       amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml"
 
     # 15. Install hooks-logging fork with on_session_ready + collect_contributions support
-    # The upstream hooks-logging does not yet call collect_contributions("observability.events")
-    # in on_session_ready, so memory-mempalace: coordinator events are invisible in events.jsonl
-    # without this fork. This is a workaround until the upstream merges the on_session_ready PR.
-    # Fork: https://github.com/colombod/amplifier-module-hooks-logging (feat/on-session-ready)
     #
-    # Root cause (investigated in session 9201aaf7): The Amplifier CLI caches modules in
-    # ~/.amplifier/cache/. When the session starts, the loader adds cache dirs to sys.path and
-    # imports from there BEFORE site-packages. Even after `uv pip install --reinstall-package`,
-    # the old cache copy (without on_session_ready) shadows the fork in sys.modules. B2 detection
-    # in loader.py's _load_entry_point() then finds has_osr=False and never sets
-    # __on_session_ready__ on the mount function — so Phase 6 queue stays at 0 and on_session_ready
-    # is never called.
-    # Fix: install the fork via pip AND overwrite all Amplifier cache copies of the old module.
+    # Why this fork: stock hooks-logging predates amplifier-core 1.4.1's on_session_ready
+    # lifecycle. Without it, collect_contributions("observability.events") is never called,
+    # so no handlers register for memory-mempalace:* events and events.jsonl stays empty.
+    #
+    # Why delete the cache dir (not just install via pip):
+    # Amplifier prepends ~/.amplifier/cache/<module>-<hash>/ to sys.path BEFORE site-packages.
+    # Even after `uv pip install --force-reinstall`, the old cache copy (without on_session_ready)
+    # is imported first and placed in sys.modules — the fork in site-packages is never reached.
+    # Deleting the cache dir lets Python fall through to site-packages on every session start.
+    # No timing dependency, no primer session needed. (Investigated in session 9201aaf7.)
     - |
+      set -euo pipefail
       export PATH="/root/.local/bin:$PATH"
       VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
-      # Step A: install the fork into the venv
-      uv pip install --python "$VENV_PY" \
-        --force-reinstall \
+      uv pip install --python "$VENV_PY" --force-reinstall \
         git+https://github.com/colombod/amplifier-module-hooks-logging@feat/on-session-ready
-      # Step B: overwrite the Amplifier module cache copy so sys.path import uses the fork
-      FORK_INIT="$("$VENV_PY" -c "import amplifier_module_hooks_logging as m; print(m.__file__)")"
-      for cache_init in $(find /root/.amplifier/cache -name '__init__.py' -path '*/hooks_logging/*' 2>/dev/null); do
-        cp "$FORK_INIT" "$cache_init"
-        rm -f "$(dirname "$cache_init")/__pycache__/__init__.cpython-312.pyc"
-        echo "Patched cache: $cache_init"
-      done
+      # Delete any pre-existing cache that would shadow site-packages
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-logging-*
+      echo "[hooks-logging] fork installed and shadowing cache cleared"
+      # Verify the fork is reachable and exposes on_session_ready
+      "$VENV_PY" -c "
+      import amplifier_module_hooks_logging as m
+      assert hasattr(m, 'on_session_ready'), f'FAIL: on_session_ready missing at {m.__file__}'
+      print(f'[hooks-logging] OK: on_session_ready present ({m.__file__})')
+      "
 
     # 16. Validate that both tools are installed and reachable
     - |
@@ -169,24 +168,73 @@ provision:
       amplifier --version
       mempalace --version || true
 
+    # 17. Post-provision smoke test — fail fast if coordinator events are not flowing.
+    # Runs a real Amplifier session and verifies that memory-mempalace:* events appear
+    # in events.jsonl. Surfaces broken wiring before the developer discovers it manually.
+    - |
+      set -euo pipefail
+      export PATH="/root/.local/bin:$PATH"
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+
+      echo "=== DTU smoke test ==="
+
+      # 1. on_session_ready accessible
+      "$VENV_PY" -c "
+      import amplifier_module_hooks_logging as m
+      assert hasattr(m, 'on_session_ready'), f'FAIL: on_session_ready missing at {m.__file__}'
+      print('PASS  hooks-logging has on_session_ready')
+      "
+
+      # 2. No shadowing cache dir
+      SHADOW=$(find /root/.amplifier/cache -maxdepth 1 -type d \
+        -name 'amplifier-module-hooks-logging-*' 2>/dev/null | wc -l)
+      [ "$SHADOW" -eq 0 ] \
+        && echo "PASS  no shadowing hooks-logging cache" \
+        || echo "WARN  $SHADOW shadowing cache dir(s) present — coordinator events may not flow"
+
+      # 3. Session produces coordinator events
+      cd /workspace
+      amplifier run 'hello' >/tmp/smoke.log 2>&1 || true
+      LATEST=$(ls -t /root/.amplifier/projects/*/sessions/*/events.jsonl 2>/dev/null | head -1)
+      if [ -n "$LATEST" ]; then
+        COUNT=$(grep -c '"memory-mempalace:' "$LATEST" 2>/dev/null || echo 0)
+        [ "$COUNT" -gt 0 ] \
+          && echo "PASS  coordinator events flowing ($COUNT memory-mempalace:* events)" \
+          || { echo "FAIL  zero coordinator events in $LATEST"; cat /tmp/smoke.log; exit 1; }
+      else
+        echo "WARN  no events.jsonl found — run a session manually to verify"
+      fi
+
+      echo "=== smoke test passed ==="
+
 update:
   refresh_pypi: true
   cmds:
-    # Clear Amplifier module cache so re-add fetches the latest bundle from Gitea.
-    # The palace is intentionally NOT reset here — accumulated memories are preserved
-    # across updates. Use reset-palace manually to restore the seed state.
-    - rm -rf /root/.amplifier/cache/
+    # Targeted cache invalidation — ONLY the memory bundle modules and hooks-logging.
+    # NEVER wipe the whole cache (rm -rf /root/.amplifier/cache/) — that removes
+    # provider-anthropic, loop-streaming, and all foundation modules, breaking every
+    # session until Amplifier is fully reinstalled (5-10 min).
+    # The palace is intentionally NOT reset — accumulated memories are preserved.
+    # Use reset-palace manually to restore the seed state.
+    - |
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-mempalace-*
+      rm -rf /root/.amplifier/cache/amplifier-module-tool-mempalace-*
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-project-context-*
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-logging-*
+      echo "[update] cleared memory bundle + hooks-logging caches"
     - |
       export PATH="/root/.local/bin:$PATH"
       amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml"
-    # Re-apply the hooks-logging cache patch after bundle re-add (same fix as provision step 15).
+    # Re-apply hooks-logging fork (same approach as provision step 15)
     - |
+      set -euo pipefail
       export PATH="/root/.local/bin:$PATH"
       VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
       uv pip install --python "$VENV_PY" --force-reinstall \
         git+https://github.com/colombod/amplifier-module-hooks-logging@feat/on-session-ready
-      FORK_INIT="$("$VENV_PY" -c "import amplifier_module_hooks_logging as m; print(m.__file__)")"
-      for cache_init in $(find /root/.amplifier/cache -name '__init__.py' -path '*/hooks_logging/*' 2>/dev/null); do
-        cp "$FORK_INIT" "$cache_init"
-        rm -f "$(dirname "$cache_init")/__pycache__/__init__.cpython-312.pyc"
-      done
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-logging-*
+      "$VENV_PY" -c "
+      import amplifier_module_hooks_logging as m
+      assert hasattr(m, 'on_session_ready'), f'FAIL: on_session_ready missing at {m.__file__}'
+      print(f'[hooks-logging] OK: on_session_ready present')
+      "
