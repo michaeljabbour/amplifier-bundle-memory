@@ -42,17 +42,25 @@ pull request or shipping a release.
 
 ## Prerequisites
 
-You need five things before you can launch the DTU:
+You need six things before you can launch the DTU:
 
-1. **Incus** — the container runtime used by `amplifier-digital-twin`.
-2. **`amplifier-digital-twin` CLI** — install with `uv`:
+1. **Incus** — the container runtime used by `amplifier-digital-twin`. On
+   macOS this requires Colima as a Linux host VM; see the
+   [`installing-incus` guide](https://github.com/microsoft/amplifier-bundle-digital-twin-universe/blob/main/docs/installing-incus.md)
+   for platform-specific steps.
+2. **`amplifier-digital-twin` CLI** — install with `uv` (the package is not
+   on PyPI, so install from the bundle repo):
    ```bash
-   uv tool install amplifier-digital-twin
+   uv tool install git+https://github.com/microsoft/amplifier-bundle-digital-twin-universe@main
    ```
-3. **A running Gitea instance with the bundle mirrored.** See the one-time setup
-   section below.
-4. **`ANTHROPIC_API_KEY`** — an Anthropic API key starting with `sk-ant`.
-5. **`OPENAI_API_KEY`** — an OpenAI API key starting with `sk-`.
+3. **`amplifier-gitea` CLI** — install with `uv`:
+   ```bash
+   uv tool install git+https://github.com/microsoft/amplifier-bundle-gitea@main
+   ```
+4. **A running Gitea instance with the bundle mirrored.** See the one-time
+   setup section below — `amplifier-gitea` provisions one for you.
+5. **`ANTHROPIC_API_KEY`** — an Anthropic API key starting with `sk-ant`.
+6. **`OPENAI_API_KEY`** — an OpenAI API key starting with `sk-`.
 
 ### Verify your environment
 
@@ -67,11 +75,15 @@ incus --version
 amplifier-digital-twin --version
 # expected: a version string
 
-# 3. Anthropic key is set (first 6 chars should be sk-ant)
+# 3. amplifier-gitea CLI is available
+amplifier-gitea --version
+# expected: a version string
+
+# 4. Anthropic key is set (first 6 chars should be sk-ant)
 echo $ANTHROPIC_API_KEY | head -c 6
 # expected: sk-ant
 
-# 4. OpenAI key is set (first 3 chars should be sk-)
+# 5. OpenAI key is set (first 3 chars should be sk-)
 echo $OPENAI_API_KEY | head -c 3
 # expected: sk-
 ```
@@ -86,66 +98,80 @@ the host shell.
 
 The DTU profile rewrites GitHub URLs to a local Gitea mirror so that
 `amplifier bundle add` installs your local version of the bundle, not the
-upstream one on GitHub. You need to create this mirror once.
+upstream one on GitHub. The `amplifier-gitea` CLI provisions the Gitea
+instance and mirrors the repo for you.
 
-### 1. Get your Gitea base URL and token
+### 1. Create the Gitea environment
 
 ```bash
-GITEA_URL=$(amplifier-gitea url <gitea-id>)
-GITEA_TOKEN=$(amplifier-gitea token <gitea-id> | jq -r .token)
+GITEA_JSON=$(amplifier-gitea create --port 10110 --name dtu-memory-gitea)
+GITEA_ID=$(echo "$GITEA_JSON" | jq -r .id)
+GITEA_URL=$(echo "$GITEA_JSON" | jq -r .gitea_url)
+GITEA_TOKEN=$(echo "$GITEA_JSON" | jq -r .token)
 
+echo "ID:    $GITEA_ID"
 echo "URL:   $GITEA_URL"
 echo "Token: ${GITEA_TOKEN:0:8}..."
 ```
 
-Replace `<gitea-id>` with the identifier printed when you provisioned your
-Gitea instance.
+`amplifier-gitea create` returns a JSON object with the Gitea ID, the host
+base URL (`http://localhost:10110`), the admin token, and admin credentials
+(`admin` / `admin1234`). Capture all three values for use below.
 
-### 2. Create the mirror repository
+### 2. Mirror the bundle repo
 
 ```bash
-curl -s -X POST "${GITEA_URL}/api/v1/repos/migrate" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: token ${GITEA_TOKEN}" \
-  -d '{
-    "clone_addr":    "https://github.com/michaeljabbour/amplifier-bundle-memory",
-    "repo_name":     "amplifier-bundle-memory",
-    "uid":           1,
-    "mirror":        true,
-    "private":       false,
-    "description":   "Mirror of amplifier-bundle-memory for DTU use"
-  }' | jq .full_name
-# expected output: "admin/amplifier-bundle-memory"
+amplifier-gitea mirror-from-github "$GITEA_ID" \
+  --github-repo https://github.com/michaeljabbour/amplifier-bundle-memory
 ```
 
-The `uid: 1` is the admin user. Adjust if your admin has a different UID
-(`GET /api/v1/users/admin` to check).
+This populates `admin/amplifier-bundle-memory` inside the Gitea instance.
+By default only the git history and branches are mirrored — pass
+`--include-issues`, `--include-prs`, etc. if you also need metadata.
 
 ### Working from a fork
 
-If you are developing on a personal fork rather than the upstream repo, change
-`clone_addr` to your fork URL. The DTU url-rewrite rule matches
-`github.com/michaeljabbour/amplifier-bundle-memory`; update it in the profile
-YAML if your fork is at a different path.
+If you are developing on a personal fork rather than the upstream repo,
+change the `--github-repo` URL to your fork. The DTU url-rewrite rule
+matches `github.com/michaeljabbour/amplifier-bundle-memory`; update the
+`url_rewrites.rules[0].match` field in the profile YAML if your fork is at
+a different path.
+
+### Generating a fresh token later
+
+If you need a new token without recreating the environment:
+
+```bash
+GITEA_TOKEN=$(amplifier-gitea token "$GITEA_ID" | jq -r .token)
+```
 
 ---
 
 ## Launch the DTU
 
 Run the following from the **bundle root** (the directory that contains
-`amplifier-bundle-memory/`):
+this `docs/` folder and `.amplifier/digital-twin-universe/profiles/`):
 
 ```bash
-DTU_ID=$(amplifier-digital-twin launch memory-bundle-e2e \
-  --var GITEA_URL="${GITEA_URL}" \
-  --var GITEA_TOKEN="${GITEA_TOKEN}" \
-  | tail -n1)
+DTU_ID=memory-bundle-e2e
 
-echo "DTU environment ID: ${DTU_ID}"
+amplifier-digital-twin launch \
+  .amplifier/digital-twin-universe/profiles/memory-bundle-e2e.yaml \
+  --name "$DTU_ID" \
+  --var GITEA_URL="$GITEA_URL" \
+  --var GITEA_TOKEN="$GITEA_TOKEN"
 ```
 
-The `tail -n1` captures the environment ID printed as the last line of the
-launch output. Save it; every subsequent command uses it.
+The `--name` flag pins the DTU id to a known value so subsequent commands
+can reference `${DTU_ID}` directly without parsing JSON. Without it, the id
+is auto-generated and printed as the final JSON line of launch output
+(e.g. `{"id": "dtu-a1b2c3d4", ...}`).
+
+> **Note on `GITEA_URL`:** `amplifier-digital-twin` automatically rewrites
+> `localhost` and `127.0.0.1` in launch variables to the host gateway IP
+> reachable from inside the container, so the URL returned by
+> `amplifier-gitea create` (e.g. `http://localhost:10110`) works as-is —
+> you do not need to substitute a bridge IP yourself.
 
 > **First launch takes 5–10 minutes.** The profile has 15 `setup_cmds` that
 > install system packages, compile Python wheels, initialise MemPalace, mine
