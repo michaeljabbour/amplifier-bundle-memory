@@ -109,6 +109,20 @@ provision:
       export PATH="/root/.local/bin:$PATH"
       uv tool install -vv git+https://github.com/microsoft/amplifier
 
+    # 12.5. Pin amplifier-core to 1.4.1 and reinstall amplifier-app-cli from latest git
+    # amplifier-core >= 1.4.1 is required: register_contributor / collect_contributions
+    # and the on_session_ready lifecycle work correctly only from this version.
+    # The meta-package uv install above may resolve an older PyPI release; this guarantees
+    # the correct versions are present before the bundle is added.
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+      uv pip install --python "$VENV_PY" \
+        --reinstall-package amplifier-core \
+        --reinstall-package amplifier-app-cli \
+        'amplifier-core==1.4.1' \
+        git+https://github.com/microsoft/amplifier-app-cli@main
+
     # 13. Write API keys to keys.env (passthrough env vars; chmod 600 for security)
     - |
       mkdir -p /root/.amplifier
@@ -120,7 +134,18 @@ provision:
       export PATH="/root/.local/bin:$PATH"
       amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml"
 
-    # 15. Validate that both tools are installed and reachable
+    # 15. Install hooks-logging fork with collect_contributions support
+    # The upstream hooks-logging does not yet call collect_contributions("observability.events")
+    # in on_session_ready, so memory-mempalace: coordinator events are invisible in events.jsonl
+    # without this fork. This is a workaround until the upstream merges the on_session_ready PR.
+    # Fork: https://github.com/colombod/amplifier-module-hooks-logging (feat/on-session-ready)
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      uv pip install --python /root/.local/share/uv/tools/amplifier/bin/python \
+        --force-reinstall \
+        git+https://github.com/colombod/amplifier-module-hooks-logging@feat/on-session-ready
+
+    # 16. Validate that both tools are installed and reachable
     - |
       export PATH="/root/.local/bin:$PATH"
       amplifier --version
