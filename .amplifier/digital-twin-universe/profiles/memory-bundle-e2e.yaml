@@ -134,16 +134,34 @@ provision:
       export PATH="/root/.local/bin:$PATH"
       amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml"
 
-    # 15. Install hooks-logging fork with collect_contributions support
+    # 15. Install hooks-logging fork with on_session_ready + collect_contributions support
     # The upstream hooks-logging does not yet call collect_contributions("observability.events")
     # in on_session_ready, so memory-mempalace: coordinator events are invisible in events.jsonl
     # without this fork. This is a workaround until the upstream merges the on_session_ready PR.
     # Fork: https://github.com/colombod/amplifier-module-hooks-logging (feat/on-session-ready)
+    #
+    # Root cause (investigated in session 9201aaf7): The Amplifier CLI caches modules in
+    # ~/.amplifier/cache/. When the session starts, the loader adds cache dirs to sys.path and
+    # imports from there BEFORE site-packages. Even after `uv pip install --reinstall-package`,
+    # the old cache copy (without on_session_ready) shadows the fork in sys.modules. B2 detection
+    # in loader.py's _load_entry_point() then finds has_osr=False and never sets
+    # __on_session_ready__ on the mount function — so Phase 6 queue stays at 0 and on_session_ready
+    # is never called.
+    # Fix: install the fork via pip AND overwrite all Amplifier cache copies of the old module.
     - |
       export PATH="/root/.local/bin:$PATH"
-      uv pip install --python /root/.local/share/uv/tools/amplifier/bin/python \
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+      # Step A: install the fork into the venv
+      uv pip install --python "$VENV_PY" \
         --force-reinstall \
         git+https://github.com/colombod/amplifier-module-hooks-logging@feat/on-session-ready
+      # Step B: overwrite the Amplifier module cache copy so sys.path import uses the fork
+      FORK_INIT="$("$VENV_PY" -c "import amplifier_module_hooks_logging as m; print(m.__file__)")"
+      for cache_init in $(find /root/.amplifier/cache -name '__init__.py' -path '*/hooks_logging/*' 2>/dev/null); do
+        cp "$FORK_INIT" "$cache_init"
+        rm -f "$(dirname "$cache_init")/__pycache__/__init__.cpython-312.pyc"
+        echo "Patched cache: $cache_init"
+      done
 
     # 16. Validate that both tools are installed and reachable
     - |
@@ -161,3 +179,14 @@ update:
     - |
       export PATH="/root/.local/bin:$PATH"
       amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml"
+    # Re-apply the hooks-logging cache patch after bundle re-add (same fix as provision step 15).
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+      uv pip install --python "$VENV_PY" --force-reinstall \
+        git+https://github.com/colombod/amplifier-module-hooks-logging@feat/on-session-ready
+      FORK_INIT="$("$VENV_PY" -c "import amplifier_module_hooks_logging as m; print(m.__file__)")"
+      for cache_init in $(find /root/.amplifier/cache -name '__init__.py' -path '*/hooks_logging/*' 2>/dev/null); do
+        cp "$FORK_INIT" "$cache_init"
+        rm -f "$(dirname "$cache_init")/__pycache__/__init__.cpython-312.pyc"
+      done
