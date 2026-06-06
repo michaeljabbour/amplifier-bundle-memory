@@ -15,6 +15,11 @@ dependencies = [
 [project.entry-points."amplifier.modules"]
 tool-mempalace = "amplifier_module_tool_mempalace:mount"
 
+[project.scripts]
+# Cold-path consolidation pipeline nodes (invoked by pipelines/curate.dot).
+mempalace-load-captures = "amplifier_module_tool_mempalace.scripts.load_captures:main"
+mempalace-write-cells = "amplifier_module_tool_mempalace.scripts.write_cells:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

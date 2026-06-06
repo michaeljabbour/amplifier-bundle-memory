@@ -1,0 +1,66 @@
+// curate.dot — cold-path memory consolidation pipeline.
+//
+// Run by the amplifier-bundle-attractor loop-pipeline engine, on-demand
+// ("consolidate my memory") or via a volume-gated session:end trigger. NEVER on
+// the hot per-capture path — each box node spawns a child LLM session.
+//
+// Data path:
+//   load  (tool)  -> reads this session's filed drawers from the event log
+//   dedup (LLM)   -> merges near-duplicates
+//   classify(LLM) -> tags each item against the capture manifest
+//   verify(LLM)   -> goal_gate convergence: loops back to classify until every
+//                    item has a target category + importance (bounded retries)
+//   write (tool)  -> files the consolidated cells through the MemoryStore
+//
+// $session_id and $manifest_path are passed as params by the caller.
+digraph curate {
+    graph [
+        goal="Consolidate the memory captured during session $session_id using the capture manifest at $manifest_path",
+        params="session_id, manifest_path",
+        default_max_retry=3
+    ]
+
+    start [shape=Mdiamond]
+
+    load [
+        shape=parallelogram,
+        tool_command="mempalace-load-captures $session_id",
+        outputs="captures"
+    ]
+
+    dedup [
+        shape=box,
+        prompt="You are consolidating memory. Merge near-duplicate items in the captured set ($captures) into a single unique set, preserving verbatim content. Report the unique set.",
+        outputs="unique"
+    ]
+
+    classify [
+        shape=box,
+        prompt="Classify each item in $unique against the capture manifest at $manifest_path. Tag each item with a target category id and an importance in [0,1]. Report the tagged set as 'cells'.",
+        outputs="classified"
+    ]
+
+    verify [
+        shape=box,
+        goal_gate=true,
+        retry_target=classify,
+        max_retries=3,
+        prompt="Verify that every item in $classified has both a target category and an importance value. If any item is missing either, report failure so classification re-runs. Otherwise report success with the final list of cells.",
+        outputs="cells"
+    ]
+
+    write [
+        shape=parallelogram,
+        tool_command="mempalace-write-cells",
+        outputs="filed"
+    ]
+
+    done [shape=Msquare]
+
+    start -> load
+    load -> dedup
+    dedup -> classify
+    classify -> verify
+    verify -> write [condition="outcome=success"]
+    write -> done
+}

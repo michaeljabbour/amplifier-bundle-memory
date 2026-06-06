@@ -94,3 +94,25 @@ Tools for computing Phase 3 deterministically: `amplifier_module_tool_mempalace.
 - **Keep the knowledge graph current.** Invalidate stale facts immediately — a knowledge graph with expired facts is worse than no graph.
 - **Diary entries are for reasoning.** Use the diary to record *why* decisions were made, not just what was decided.
 - **HANDOFF.md is the human-readable bridge.** Write it as if briefing a colleague who has never seen this session. Be specific — file names, line numbers, error messages, not vague summaries.
+
+## Cold-path consolidation (opt-in, requires attractor)
+
+When the `memory-curate-behavior` (behaviors/curate.yaml) is composed, the
+`run_pipeline` tool is available and you can run the consolidation pipeline
+`pipelines/curate.dot` on demand — e.g. when the user says "consolidate my
+memory".
+
+- **On-demand only (Phase 2).** Run it when asked, not automatically. Each
+  box node spawns a child LLM session, so this is a deliberately occasional,
+  cold-path operation — never per capture.
+- **How:** call `run_pipeline` with `dot_file=pipelines/curate.dot` and
+  `params={session_id, manifest_path}`. The pipeline loads this session's filed
+  drawers (via the `mempalace-load-captures` entry point), dedups, classifies
+  each item against the capture manifest, converges via a `goal_gate` loop, and
+  re-files consolidated cells (via `mempalace-write-cells`).
+- **Graceful optionality:** if `run_pipeline` is not available (attractor not
+  installed), do NOT error — just do the normal in-line curation instead.
+- **Substrate:** consolidated cells are written through the MemoryStore seam
+  (`scripts/memory_store.py`). Today that is `PalaceMemoryStore`; the
+  `AmplifierDataMemoryStore` path is a declared stub pending amplifier-data
+  persistence + vector lens.
