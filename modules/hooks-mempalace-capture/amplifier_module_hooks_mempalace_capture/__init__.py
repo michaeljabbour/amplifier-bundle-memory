@@ -110,6 +110,14 @@ except ImportError:
         pass
 
 
+try:
+    from amplifier_module_tool_mempalace.manifest import (
+        load_manifest as _load_manifest,
+    )
+except ImportError:
+    _load_manifest = None  # type: ignore[assignment]
+
+
 def _detect_wing(cwd: str | None = None) -> str:
     """Detect the active project wing from git remote or directory name."""
     try:
@@ -240,11 +248,20 @@ _CATEGORY_SIGNALS: dict[str, list[str]] = {
 }
 
 
-def _detect_category(text: str) -> str | None:
-    """Heuristically detect a memory category from text content."""
+def _detect_category(
+    text: str, signals: dict[str, list[str]] | None = None
+) -> str | None:
+    """Heuristically detect a memory category from text content.
+
+    ``signals`` maps category id -> list of lowercase keyword seeds. When None,
+    the legacy hardcoded ``_CATEGORY_SIGNALS`` table is used so callers that do
+    not supply a manifest behave exactly as before. First category (in
+    declaration order) with any matching seed wins.
+    """
+    table = signals if signals is not None else _CATEGORY_SIGNALS
     lower = text.lower()
-    for category, signals in _CATEGORY_SIGNALS.items():
-        if any(signal in lower for signal in signals):
+    for category, seeds in table.items():
+        if any(seed in lower for seed in seeds):
             return category
     return None
 
@@ -529,6 +546,18 @@ class MempalaceCaptureHook:
         self.emit_events: bool = bool(self.config.get("emit_events", True))
         # Categories to capture (empty list = capture all palace-worthy content)
         self.categories: list[str] = self.config.get("categories", [])
+        # Load category signals from the capture manifest (the "knowable list").
+        # Resolution order is handled by load_manifest; falls back to the legacy
+        # hardcoded table when the manifest module is unavailable or the file is
+        # missing/malformed, so behavior is unchanged when no manifest exists.
+        manifest_path = self.config.get("manifest_path")
+        signals: dict[str, list[str]] = dict(_CATEGORY_SIGNALS)
+        if _load_manifest is not None:
+            try:
+                signals = _load_manifest(config_path=manifest_path).category_signals()
+            except Exception:
+                signals = dict(_CATEGORY_SIGNALS)
+        self._signals: dict[str, list[str]] = signals
         # Coordinator bridge — no-op default keeps the drain thread safe in tests
         self._bridge_emit: SyncBridge = bridge_emit or NOOP_SYNC_BRIDGE
 
@@ -557,7 +586,7 @@ class MempalaceCaptureHook:
                 )
             return HookResult(action="continue")
 
-        category = _detect_category(tool_output)
+        category = _detect_category(tool_output, self._signals)
         if self.categories and category not in self.categories:
             if self.emit_events:
                 emit_event(

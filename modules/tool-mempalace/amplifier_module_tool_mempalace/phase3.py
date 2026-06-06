@@ -116,21 +116,37 @@ _NEAR_IDENTICAL_THRESHOLD = 0.95
 _RELATED_THRESHOLD = 0.85
 
 
-def compute_importance(category: str | None, signals: dict[str, bool]) -> float:
+def compute_importance(
+    category: str | None,
+    signals: dict[str, bool],
+    base_overrides: dict[str, float] | None = None,
+) -> float:
     """Return the importance score for a drawer based on its category and signals.
 
     Applies the rubric: base score + per-signal boosts, capped at the
     category maximum.  Unknown category strings fall back to the uncategorized
     defaults (base 0.40, no boosts, cap 0.50).
 
+    The capture manifest can declare a per-category ``importance_base``; pass
+    those as ``base_overrides`` to replace the rubric's base score for matching
+    categories. Boosts still apply on top of the overridden base, and the
+    effective cap is raised to at least the overridden base so a manifest's
+    declared importance is never clamped below its stated value. When
+    ``base_overrides`` is None (the default) behavior is identical to the
+    legacy rubric.
+
     Args:
-        category: Detected category string, or None for uncategorized.
-        signals:  Dict of boolean flags; absent keys are treated as False.
+        category:       Detected category string, or None for uncategorized.
+        signals:        Dict of boolean flags; absent keys are treated as False.
+        base_overrides: Optional ``{category: base}`` from the capture manifest.
 
     Returns:
         Importance score in [0.0, 1.0].
     """
     base, boosts, cap = _RUBRIC.get(category, _RUBRIC[None])
+    if base_overrides and category is not None and category in base_overrides:
+        base = float(base_overrides[category])
+        cap = max(cap, base)
     score = base + sum(
         amount for key, amount in boosts.items() if signals.get(key, False)
     )
@@ -159,7 +175,10 @@ def duplicate_action(
 # ---------------------------------------------------------------------------
 
 
-def plan_phase3_actions(drawers: list[DrawerRecord]) -> list[KGFact]:
+def plan_phase3_actions(
+    drawers: list[DrawerRecord],
+    base_overrides: dict[str, float] | None = None,
+) -> list[KGFact]:
     """Produce the complete set of KG facts to add for a batch of drawers.
 
     For each DrawerRecord:
@@ -196,7 +215,9 @@ def plan_phase3_actions(drawers: list[DrawerRecord]) -> list[KGFact]:
         if is_near_identical:
             importance = _DUPLICATE_IMPORTANCE_OVERRIDE
         else:
-            importance = compute_importance(drawer.category, drawer.signals)
+            importance = compute_importance(
+                drawer.category, drawer.signals, base_overrides
+            )
 
         # Always emit importance fact
         facts.append(

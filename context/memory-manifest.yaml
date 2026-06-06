@@ -1,0 +1,65 @@
+# Memory Capture Manifest — the "knowable list" of what memory captures.
+#
+# This file declares WHAT the memory system pays attention to. It replaces the
+# previously hardcoded keyword table buried in the capture hook. Edit this file
+# to steer what gets captured and how important each kind of knowledge is.
+#
+# Resolution order (first found wins):
+#   1. manifest_path set in behaviors/mempalace.yaml (hooks-mempalace-capture config)
+#   2. <project>/project-context/memory-manifest.yaml   (per-project override)
+#   3. ~/.amplifier/memory-manifest.yaml                 (per-user default)
+#   4. the built-in default baked into the module (mirrors this file)
+#
+# Each attractor is a category the capture hook recognises by keyword (zero-LLM,
+# hot-path safe) and that the cold-path consolidation pipeline (curate.dot) uses
+# as a classification target.
+#
+# Fields per attractor:
+#   id              required  — stable category name (also the room suffix)
+#   intent          optional  — human description of what belongs here
+#   seeds           required  — lowercase keyword/phrase signals (substring match)
+#   importance_base optional  — base importance score [0.0–1.0] for the rubric
+version: 1
+
+attractors:
+  - id: decision
+    intent: "Decisions that shape what we build or how we build it"
+    seeds: ["decided", "decision", "we will", "going with", "chosen", "agreed"]
+    importance_base: 0.75
+
+  - id: architecture
+    intent: "System structure, design patterns, component boundaries"
+    seeds: ["architecture", "design", "pattern", "structure", "component", "module"]
+    importance_base: 0.70
+
+  - id: blocker
+    intent: "Active problems blocking progress"
+    seeds: ["blocked", "blocking", "cannot", "failed", "error", "issue", "problem"]
+    importance_base: 0.65
+
+  - id: resolved_blocker
+    intent: "Problems that were fixed, with the resolution"
+    seeds: ["fixed", "resolved", "workaround", "solution found", "now works"]
+    importance_base: 0.55
+
+  - id: dependency
+    intent: "What depends on what; external requirements"
+    seeds: ["depends on", "requires", "dependency", "import", "package"]
+    importance_base: 0.50
+
+  - id: pattern
+    intent: "Conventions and rules to follow or avoid"
+    seeds: ["pattern", "convention", "always", "never", "best practice", "rule"]
+    importance_base: 0.50
+
+  - id: lesson_learned
+    intent: "Non-obvious things discovered the hard way"
+    seeds: ["learned", "lesson", "turns out", "discovered", "realized", "note:"]
+    importance_base: 0.45
+
+# Emergent targets: when the consolidation pipeline sees recurring content that
+# fits no declared attractor, it can PROPOSE a new one for you to confirm.
+# Disabled by default — opt in by setting enabled: true.
+emergent:
+  enabled: false
+  promote_threshold: 5

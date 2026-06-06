@@ -31,6 +31,13 @@ hooks:
       auto_room: true
       silent: true
       emit_events: true           # NEW: false to disable JSONL event emission
+      # NEW: the capture manifest is the "knowable list" of what memory captures.
+      # Leave manifest_path unset to use the resolution order:
+      #   <project>/project-context/memory-manifest.yaml  (per-project)
+      #   ~/.amplifier/memory-manifest.yaml                (per-user)
+      #   built-in default (mirrors context/memory-manifest.yaml)
+      # Set it to pin an explicit manifest file:
+      # manifest_path: "context/memory-manifest.yaml"
       categories:
         - decision
         - architecture
