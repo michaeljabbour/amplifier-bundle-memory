@@ -1,0 +1,39 @@
+bundle:
+  name: memory-curate-behavior
+  version: 0.1.0
+  description: |
+    OPT-IN cold-path memory consolidation.
+
+    This behavior is intentionally NOT included by behaviors/mempalace.yaml,
+    because it depends on amplifier-bundle-attractor (the loop-pipeline engine).
+    Add this behavior to your bundle only if attractor is available; the base
+    memory bundle must never hard-depend on it.
+
+    What it adds:
+      - the `run_pipeline` tool (from attractor's tool-pipeline-run module)
+      - the Curator agent runs pipelines/curate.dot on-demand
+        ("consolidate my memory") to dedup, classify against the capture
+        manifest, and re-file consolidated cells.
+
+    Trigger model (see agents/curator.md):
+      - Phase 2 MVP: on-demand only (Curator calls run_pipeline).
+      - Follow-on: a volume-gated session:end hook may call run_pipeline, but
+        the optionality MUST be a Python capability check, never a hard YAML
+        dependency (foundation-expert guidance, 2026-06-05).
+
+    Script path resolution: curate.dot calls the `mempalace-load-captures` and
+    `mempalace-write-cells` entry points (declared in tool-mempalace's
+    pyproject.toml [project.scripts]), so they resolve on PATH regardless of cwd.
+
+# ── Tools ───────────────────────────────────────────────────────────────────
+tools:
+  # Pulls ONLY the run_pipeline tool from attractor — the parent session
+  # orchestrator is unchanged; run_pipeline spawns a child pipeline session.
+  # Pin to a release SHA once attractor has one.
+  - module: tool-pipeline-run
+    source: git+https://github.com/microsoft/amplifier-bundle-attractor@main#subdirectory=modules/tool-pipeline-run
+
+# ── Agents ──────────────────────────────────────────────────────────────────
+agents:
+  include:
+    - memory:curator      # Curator drives curate.dot on demand
