@@ -130,12 +130,21 @@ class AmplifierDataMemoryStore:
         *,
         path: str | None = None,
         base_url: str | None = None,
+        token: str | None = None,
         record_access: bool = False,
     ) -> None:
         if store is None:
-            if base_url is not None:
-                # Server mode: funnel writes through the single-writer companion
-                # server so multiple processes (sessions) share one palace safely.
+            if base_url is not None and token is not None:
+                # Authed MCP gateway: token-protected, single-writer, MCP-shaped.
+                from amplifier_module_tool_mempalace.scripts.amplifier_data_gateway import (
+                    GatewayClient,
+                )
+
+                store = GatewayClient(base_url, token)
+            elif base_url is not None:
+                # Native companion server (localhost, no auth): funnel writes
+                # through the single-writer server so multiple processes share
+                # one palace safely.
                 try:
                     from amplifier_data.client import RemoteStore
                 except ImportError as exc:  # pragma: no cover
