@@ -8,6 +8,24 @@ A local-first, two-layer memory system for [Amplifier](https://github.com/micros
 
 ---
 
+## Part of the behavioral-plasticity suite
+
+This repo is one component of the **behavioral-plasticity suite**, composed by the conductor bundle [`amplifier-bundle-behavioral-plasticity`](https://github.com/michaeljabbour/amplifier-bundle-behavioral-plasticity) (memory + the amplifier-data substrate + the context-intelligence survey/scoring pieces + a falsification harness). Installing that one bundle pulls in this repo automatically.
+
+**Install the full suite (always-on):**
+```bash
+amplifier bundle add git+https://github.com/michaeljabbour/amplifier-bundle-behavioral-plasticity@main --app
+amplifier bundle update behavioral-plasticity -y
+```
+
+**Test:**
+```bash
+amplifier run --mode single "List your tools, then call falsification_harness once and print its JSON."
+```
+Passing: tools include `falsification_harness` + the memory tools (`palace`, `add_memory`, …); JSON shows `"verdict": "proxy"`, `"n_probes": 50`, `"lift": ~0.17`, `"success": true`. `proxy` is the expected correct result, not a failure. First compose is slow (pulls the included bundles and compiles amplifier-data's native Rust/PyO3 component); cached after. Remove with `amplifier bundle remove behavioral-plasticity`.
+
+---
+
 ## What's New in v1.2.0
 
 Released 2026-04-17.
