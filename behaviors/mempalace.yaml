@@ -38,6 +38,16 @@ hooks:
       #   built-in default (mirrors context/memory-manifest.yaml)
       # Set it to pin an explicit manifest file:
       # manifest_path: "context/memory-manifest.yaml"
+      # NEW: running shadow — best-effort dual-write every filed drawer to
+      # amplifier-data through the authed gateway. OPT-IN, disabled by default.
+      # Requires the gateway service running (mempalace-amplifier-data-gateway)
+      # and amplifier-data installed in THAT service process only (the capture
+      # process needs neither — the client is pure HTTP). The palace stays the
+      # source of truth; shadow failures never block capture.
+      # shadow_gateway:
+      #   enabled: true
+      #   base_url: "http://127.0.0.1:8799"
+      #   token_file: "~/.amplifier/amplifier-data-token"
       categories:
         - decision
         - architecture

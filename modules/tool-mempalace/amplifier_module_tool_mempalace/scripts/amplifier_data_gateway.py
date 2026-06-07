@@ -21,10 +21,12 @@ the token. Token auto-generates to a 0600 file on first use.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import hmac
 import json
 import secrets
+import sys
 import threading
 import urllib.request
 from dataclasses import dataclass
@@ -247,3 +249,83 @@ class GatewayClient:
                 _Fact(f["subject"], f["predicate"], f["object"]) for f in out["output"]
             ],
         )
+
+
+# ---------------------------------------------------------------------------
+# Launcher — run the gateway as a real service
+# ---------------------------------------------------------------------------
+
+
+def run_server(
+    *,
+    path: str | None = None,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    token_path: str | None = None,
+    allow_localhost_bypass: bool = True,
+    record_access: bool = False,
+) -> tuple[ThreadingHTTPServer, dict[str, Any]]:
+    """Build (not start) a gateway over a durable (or in-memory) AmplifierStore.
+
+    Returns (httpd, info) where info carries the resolved url, port, token_file.
+    Pass ``path`` for a durable store (needs the Rust kernel); omit for in-memory.
+    """
+    from amplifier_data import AmplifierStore
+
+    token = ensure_token(token_path)
+    store = AmplifierStore(path=path, record_access=record_access)
+    httpd = make_gateway(
+        store, host, port, token=token, allow_localhost_bypass=allow_localhost_bypass
+    )
+    chosen = httpd.server_address[1]
+    resolved_token = str(Path(token_path) if token_path else _DEFAULT_TOKEN_PATH)
+    info = {
+        "host": host,
+        "port": chosen,
+        "url": f"http://{host}:{chosen}",
+        "token_file": resolved_token,
+        "durable": path is not None,
+        "localhost_bypass": allow_localhost_bypass,
+    }
+    return httpd, info
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="mempalace-amplifier-data-gateway")
+    parser.add_argument(
+        "--path", default=None, help="durable store path (omit = in-memory)"
+    )
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=0, help="0 = OS-assigned")
+    parser.add_argument(
+        "--token-file", default=None, help="bearer-token file (auto-gen, 0600)"
+    )
+    parser.add_argument(
+        "--no-localhost-bypass",
+        action="store_true",
+        help="require the token even from localhost",
+    )
+    parser.add_argument("--record-access", action="store_true")
+    args = parser.parse_args(argv)
+
+    httpd, info = run_server(
+        path=args.path,
+        host=args.host,
+        port=args.port,
+        token_path=args.token_file,
+        allow_localhost_bypass=not args.no_localhost_bypass,
+        record_access=args.record_access,
+    )
+    sys.stdout.write(json.dumps(info) + "\n")  # discovery line for callers
+    sys.stdout.flush()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:  # pragma: no cover
+        pass
+    finally:
+        httpd.server_close()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

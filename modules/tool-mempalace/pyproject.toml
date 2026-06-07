@@ -23,6 +23,8 @@ mempalace-write-cells = "amplifier_module_tool_mempalace.scripts.write_cells:mai
 mempalace-dualwrite-compare = "amplifier_module_tool_mempalace.scripts.dualwrite_compare:main"
 # Multi-process single-writer companion-server concurrency check.
 mempalace-server-concurrency-check = "amplifier_module_tool_mempalace.scripts.server_concurrency_check:main"
+# Authenticated MCP gateway service over amplifier-data (the running shadow).
+mempalace-amplifier-data-gateway = "amplifier_module_tool_mempalace.scripts.amplifier_data_gateway:main"
 
 [build-system]
 requires = ["hatchling"]

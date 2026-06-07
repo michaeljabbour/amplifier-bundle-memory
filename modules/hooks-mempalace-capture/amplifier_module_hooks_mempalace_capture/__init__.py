@@ -49,7 +49,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 try:
     from amplifier_core import HookResult  # type: ignore
@@ -98,7 +98,8 @@ try:
         register_events,
     )
 except ImportError:
-    SyncBridge = Any  # type: ignore
+    if not TYPE_CHECKING:
+        SyncBridge = Any  # runtime fallback; type comes from the try-import branch
 
     def NOOP_SYNC_BRIDGE(event: str, payload: Any) -> None:  # type: ignore[misc]
         pass
@@ -116,6 +117,19 @@ try:
     )
 except ImportError:
     _load_manifest = None  # type: ignore[assignment]
+
+try:
+    from amplifier_module_tool_mempalace.scripts.memory_store import (
+        AmplifierDataMemoryStore as _AmplifierDataMemoryStore,
+    )
+except ImportError:
+    _AmplifierDataMemoryStore = None  # type: ignore[assignment,misc]
+
+# Best-effort amplifier-data shadow store (the "running shadow"): set by mount()
+# from the shadow_gateway config. None disables shadowing. The client side is
+# pure urllib (GatewayClient) — the capture process does NOT need amplifier-data
+# installed; only the gateway service process does.
+_SHADOW_STORE: Any = None
 
 
 def _detect_wing(cwd: str | None = None) -> str:
@@ -404,6 +418,43 @@ def _drain_loop() -> None:
                 pass
 
 
+def _shadow_job(job: _CaptureJob, wing: str, room: str) -> None:
+    """Best-effort shadow the filed drawer to amplifier-data via the gateway.
+
+    The palace is the source of truth; the shadow NEVER blocks or fails capture.
+    Disabled unless mount() configured ``_SHADOW_STORE`` from ``shadow_gateway``.
+    """
+    store = _SHADOW_STORE
+    if store is None:
+        return
+    try:
+        store.file(
+            wing=wing,
+            room=room,
+            content=job.tool_output,
+            source=job.source,
+            category=job.category,
+        )
+        if job.emit_events:
+            emit_event(
+                "mempalace-capture",
+                "shadow_filed",
+                ok=True,
+                preview=truncate_preview(job.tool_output),
+                data={"capture_id": job.capture_id, "wing": wing, "room": room},
+                session_id=job.session_id,
+            )
+    except Exception as exc:  # shadow must never break the source-of-truth write
+        if job.emit_events:
+            emit_event(
+                "mempalace-capture",
+                "shadow_failed",
+                ok=False,
+                data={"capture_id": job.capture_id, "reason": type(exc).__name__},
+                session_id=job.session_id,
+            )
+
+
 def _process_job(job: _CaptureJob) -> None:
     """Do one capture's slow work: detect wing, file drawer, emit completion."""
     wing = _detect_wing() if job.auto_wing else job.config_wing
@@ -448,6 +499,7 @@ def _process_job(job: _CaptureJob) -> None:
                 )
             except Exception:
                 pass
+        _shadow_job(job, wing, room)
         _spool_delete(job.spool_path)
     except Exception:
         if job.emit_events:
@@ -670,6 +722,33 @@ class MempalaceCaptureHook:
         return HookResult(action="continue")
 
 
+def _configure_shadow(shadow_cfg: dict[str, Any]) -> None:
+    """Configure the amplifier-data shadow store from config (opt-in, best-effort).
+
+    Expects ``{enabled, base_url, token_file}``. The token is read from the file
+    written by the gateway launcher. Any failure disables shadowing silently —
+    the palace remains the source of truth regardless.
+    """
+    global _SHADOW_STORE
+    _SHADOW_STORE = None
+    if not shadow_cfg.get("enabled") or not shadow_cfg.get("base_url"):
+        return
+    if _AmplifierDataMemoryStore is None:
+        return
+    try:
+        token: str | None = None
+        token_file = shadow_cfg.get("token_file")
+        if token_file:
+            p = Path(str(token_file)).expanduser()
+            if p.is_file():
+                token = p.read_text(encoding="utf-8").strip() or None
+        _SHADOW_STORE = _AmplifierDataMemoryStore(
+            base_url=str(shadow_cfg["base_url"]), token=token
+        )
+    except Exception:
+        _SHADOW_STORE = None
+
+
 async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -693,6 +772,11 @@ async def mount(
 
     bridge_emit = make_sync_bridge(coordinator)
     _DRAIN_BRIDGE = bridge_emit
+
+    # Optional "running shadow": dual-write every filed drawer to amplifier-data
+    # through the authed gateway. Opt-in, best-effort, never blocks capture.
+    _configure_shadow(cfg.get("shadow_gateway") or {})
+
     hook = MempalaceCaptureHook(cfg, bridge_emit=bridge_emit)
     for event in hook.events:
         coordinator.hooks.register(event, hook, name=hook.name)
