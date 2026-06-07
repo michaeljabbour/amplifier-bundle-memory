@@ -108,3 +108,32 @@ def test_filed_records_tracked() -> None:
     rec = store.filed[0]
     assert rec["wing"] == "w" and rec["category"] == "decision"
     assert "ref" in rec
+
+
+def test_remote_store_via_companion_server(tmp_path: Path) -> None:
+    """The store works through the single-writer companion server (RemoteStore)."""
+    import threading
+
+    from amplifier_data import AmplifierStore
+    from amplifier_data import server as srv
+
+    backing = AmplifierStore(path=str(tmp_path / "srv.ampd"), record_access=False)
+    httpd = srv.make_server(backing, "127.0.0.1", 0)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        store = AmplifierDataMemoryStore(base_url=f"http://127.0.0.1:{port}")
+        store.file(wing="w", room="r", content="remote verbatim", category="decision")
+        ref = store.filed[-1]["ref"]
+        s = store.store
+        assert s.regenerate(ref).payload == b"remote verbatim"
+        labels = {
+            s.regenerate(n).payload.decode()
+            for n in s.graph_neighbors(ref, rel_type="scoped_to")
+        }
+        assert labels == {"wing:w", "room:r"}
+        facts = s.query_facts(subject=ref, predicate="has_category")
+        assert facts.success and len(facts.output) == 1
+    finally:
+        httpd.shutdown()

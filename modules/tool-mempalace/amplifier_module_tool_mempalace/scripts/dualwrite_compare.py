@@ -230,10 +230,29 @@ def main(argv: list[str] | None = None) -> int:
         help="MemPalace event-log directory to sample real content from.",
     )
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument(
+        "--content-file",
+        default=None,
+        help="JSON list of real drawer dicts {wing,room,content,category} to compare.",
+    )
     args = parser.parse_args(argv)
 
-    cells = load_real_samples(Path(args.events_dir), args.limit)
-    if cells:
+    if args.content_file:
+        loaded = json.loads(Path(args.content_file).read_text(encoding="utf-8"))
+        cells = [
+            {
+                "wing": c.get("wing", "wing_real"),
+                "room": c.get("room", "real"),
+                "content": c["content"],
+                "source": c.get("source", ""),
+                "category": c.get("category"),
+                "importance": c.get("importance"),
+            }
+            for c in loaded[: args.limit]
+            if isinstance(c, dict) and c.get("content")
+        ]
+        content_source = f"real palace drawers ({args.content_file})"
+    elif cells := load_real_samples(Path(args.events_dir), args.limit):
         content_source = f"real event-log previews ({args.events_dir})"
     else:
         # The local palace had no filed drawers / previews were disabled.

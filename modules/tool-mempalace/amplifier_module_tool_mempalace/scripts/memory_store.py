@@ -129,22 +129,40 @@ class AmplifierDataMemoryStore:
         store: object | None = None,
         *,
         path: str | None = None,
+        base_url: str | None = None,
         record_access: bool = False,
     ) -> None:
         if store is None:
-            try:
-                from amplifier_data import AmplifierStore
-            except ImportError as exc:  # pragma: no cover - exercised when absent
-                raise RuntimeError(
-                    "AmplifierDataMemoryStore requires the amplifier-data package, "
-                    "which is not installed. Install it (pip install -e amplifier-data) "
-                    "or use PalaceMemoryStore."
-                ) from exc
-            # record_access=False by default: consolidation is a write path; we
-            # do not want every later read to append AccessEvents (§5 mitigation).
-            store = AmplifierStore(path=path, record_access=record_access)
+            if base_url is not None:
+                # Server mode: funnel writes through the single-writer companion
+                # server so multiple processes (sessions) share one palace safely.
+                try:
+                    from amplifier_data.client import RemoteStore
+                except ImportError as exc:  # pragma: no cover
+                    raise RuntimeError(
+                        "AmplifierDataMemoryStore(base_url=...) requires amplifier-data."
+                    ) from exc
+                store = RemoteStore(base_url)
+            else:
+                try:
+                    from amplifier_data import AmplifierStore
+                except ImportError as exc:  # pragma: no cover - exercised when absent
+                    raise RuntimeError(
+                        "AmplifierDataMemoryStore requires the amplifier-data package, "
+                        "which is not installed. Install it (pip install -e amplifier-data) "
+                        "or use PalaceMemoryStore."
+                    ) from exc
+                # record_access=False by default: consolidation is a write path;
+                # we do not want every later read to append AccessEvents (§5).
+                store = AmplifierStore(path=path, record_access=record_access)
         self.store: Any = store
         self.filed: list[dict[str, object]] = []
+
+    def close(self) -> None:
+        """Close the backing store if it supports it (RemoteStore does not)."""
+        close = getattr(self.store, "close", None)
+        if callable(close):
+            close()
 
     def file(
         self,

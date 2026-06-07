@@ -21,6 +21,8 @@ mempalace-load-captures = "amplifier_module_tool_mempalace.scripts.load_captures
 mempalace-write-cells = "amplifier_module_tool_mempalace.scripts.write_cells:main"
 # §8 amplifier-data dual-write / regeneration-equivalence migration harness.
 mempalace-dualwrite-compare = "amplifier_module_tool_mempalace.scripts.dualwrite_compare:main"
+# Multi-process single-writer companion-server concurrency check.
+mempalace-server-concurrency-check = "amplifier_module_tool_mempalace.scripts.server_concurrency_check:main"
 
 [build-system]
 requires = ["hatchling"]
