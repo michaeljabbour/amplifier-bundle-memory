@@ -1,7 +1,11 @@
 """amplifier-module-hooks-behavioral-write — T1-HOOK-1 (Step-2 integrator).
 
 The behavioral write hook is the memory bundle's half of the behavioral
-plasticity loop. It is CO-MOUNTED by the memory bundle and fires on
+plasticity loop. It ships in the memory repo for dependency-locality (it imports only
+tool-mempalace internals) but is mounted exclusively by the
+behavioral-plasticity conductor via a ``source:`` reference into this
+subdirectory — it is intentionally not wired by any memory behavior, since
+the conductor owns the activation decision. It fires on
 ``orchestrator:complete``. End to end it does:
 
     CI outcome (read events.jsonl)  ->  salience gate (T1-GATE-1)
