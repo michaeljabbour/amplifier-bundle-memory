@@ -48,6 +48,19 @@ except ImportError:
 
 
 try:
+    # T1-MEM-3: bounded, saturating usage boost for the reranker.
+    from amplifier_module_tool_mempalace.usage import (
+        usage_adjustment as _usage_adjustment,
+    )
+except ImportError:
+
+    def _usage_adjustment(  # type: ignore[misc]
+        retrieval_count: int | None, *, weight: float = 1.0, saturation: float = 10.0
+    ) -> float:
+        return 0.0
+
+
+try:
     from amplifier_module_tool_mempalace.coordinator_bridge import (
         NOOP_ASYNC_BRIDGE,
         AsyncBridge,
@@ -81,12 +94,16 @@ def _rerank_by_importance(
     results: list[dict[str, Any]],
     importance_lookup: dict[str, float],
     weight: float,
+    usage_lookup: dict[str, int] | None = None,
+    usage_weight: float = 0.0,
 ) -> list[dict[str, Any]]:
-    """Re-rank search results using the importance signal.
+    """Re-rank search results using the importance signal (+ optional usage).
 
     Formula::
 
-        final = semantic_score + weight * (importance - 0.5) * 0.08
+        final = semantic_score
+                + weight       * (importance - 0.5) * 0.08
+                + usage_weight * usage_adjustment(retrieval_count)   # T1-MEM-3
 
     Args:
         results:           Raw search results (each a dict with at least ``score``
@@ -95,27 +112,41 @@ def _rerank_by_importance(
                            default to 0.5 (zero boost — safe for untagged palaces).
         weight:            Multiplier on the importance signal. 0.0 = disabled
                            (pure semantic, identical to v1.1.0).
+        usage_lookup:      T1-MEM-3. Optional map drawer-id → retrieval_count,
+                           sourced from amplifier-data's access-count fold (NOT
+                           re-implemented here). Missing ids contribute nothing.
+        usage_weight:      Multiplier on the usage term. Default 0.0 = disabled,
+                           so this is a pure no-op vs prior behaviour and the R@5
+                           recall guarantee is preserved unless explicitly enabled.
 
     Returns:
         Results sorted by ``final`` descending. Original list is not modified.
-        When ``weight == 0.0`` the sort is stable and order matches raw semantic
-        (because all boosts are 0.0).
+        When ``weight == 0.0`` and ``usage_weight == 0.0`` the sort is stable and
+        order matches raw semantic (all boosts are 0.0).
 
-    This function is pure — no MCP calls, no side effects. Pass a pre-built
-    ``importance_lookup`` dict so tests can inject fixed values.
+    This function is pure — no MCP calls, no side effects. Pass pre-built lookup
+    dicts so tests can inject fixed values.
     """
     if not results:
         return []
 
-    if weight == 0.0:  # exact: config-parsed float, not computed — safe for ==
-        # Fast path: weight=0 means zero boost for every result.
-        # Return a stable sort by semantic score (descending) — identical to v1.1.0.
+    usage_on = usage_weight > 0.0 and bool(usage_lookup)
+
+    if weight == 0.0 and not usage_on:  # exact: config-parsed float — safe for ==
+        # Fast path: zero boost for every result. Stable sort by semantic score
+        # (descending) — identical to v1.1.0.
         return sorted(results, key=lambda r: r.get("score", 0.0), reverse=True)
+
+    ulookup = usage_lookup or {}
 
     def _final(r: dict[str, Any]) -> float:
         sem = r.get("score", 0.0)
-        imp = importance_lookup.get(r.get("id", ""), _DEFAULT_IMPORTANCE)
-        return sem + weight * (imp - _DEFAULT_IMPORTANCE) * _RERANK_SCALE
+        rid = r.get("id", "")
+        imp = importance_lookup.get(rid, _DEFAULT_IMPORTANCE)
+        score = sem + weight * (imp - _DEFAULT_IMPORTANCE) * _RERANK_SCALE
+        if usage_on:
+            score += _usage_adjustment(ulookup.get(rid, 0), weight=usage_weight)
+        return score
 
     # Python's sort is stable: equal finals preserve original relative order.
     return sorted(results, key=_final, reverse=True)

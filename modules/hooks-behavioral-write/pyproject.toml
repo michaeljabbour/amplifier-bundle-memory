@@ -1,0 +1,38 @@
+[project]
+name = "amplifier-module-hooks-behavioral-write"
+version = "0.1.0"
+description = "Amplifier hook module — T1-HOOK-1: salience-gated, post-session behavioral write that recomputes drawer importance from session outcome and applies a reversible update through the amplifier-data seam"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Michael Jabbour" },
+]
+dependencies = [
+    "amplifier-core>=0.1.0",
+    "amplifier-module-tool-mempalace>=1.0.0",
+]
+
+[project.entry-points."amplifier.modules"]
+hooks-behavioral-write = "amplifier_module_hooks_behavioral_write:mount"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["amplifier_module_hooks_behavioral_write"]
+
+[tool.uv.sources]
+amplifier-module-tool-mempalace = { path = "../tool-mempalace", editable = true }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.1",
+    "pyright>=1.1",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = false
+reportGeneralTypeIssues = false
