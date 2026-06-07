@@ -17,6 +17,12 @@ import json
 import subprocess
 from typing import Any, Protocol, runtime_checkable
 
+from amplifier_module_tool_mempalace.scripts.mutation import (
+    MutationRecord,
+    ReversibleDelta,
+    new_mutation,
+)
+
 
 @runtime_checkable
 class MemoryStore(Protocol):
@@ -45,6 +51,10 @@ class RecordingMemoryStore:
 
     def __init__(self) -> None:
         self.filed: list[dict[str, object]] = []
+        # T1-MEM-2: mutation ledger + simulated current-importance map.
+        self.mutations: list[MutationRecord] = []
+        self.rolled_back: list[str] = []
+        self.importance: dict[str, float] = {}
 
     def file(
         self,
@@ -66,6 +76,52 @@ class RecordingMemoryStore:
                 "importance": importance,
             }
         )
+        if importance is not None:
+            self.importance[str(source or content)] = float(importance)
+
+    def update_importance(
+        self,
+        subject: object,
+        *,
+        old_importance: float | None,
+        new_importance: float,
+        provenance: str,
+        source_outcome: str,
+        confidence: float,
+        interaction_id: str | None = None,
+    ) -> MutationRecord:
+        """T1-MEM-2 (test seam): record an atomic has_importance UPDATE.
+
+        The in-memory store is trivially atomic, so ``atomic=True`` here. It
+        exists so the behavioral hook and contract can be exercised with no
+        amplifier-data dependency.
+        """
+        delta = ReversibleDelta(
+            subject=str(subject),
+            predicate="has_importance",
+            new_value=str(new_importance),
+            old_value=None if old_importance is None else str(old_importance),
+        )
+        record = new_mutation(
+            provenance=provenance,
+            source_outcome=source_outcome,
+            delta=delta,
+            confidence=confidence,
+            atomic=True,
+            interaction_id=interaction_id,
+        ).mark_applied()
+        self.importance[str(subject)] = float(new_importance)
+        self.mutations.append(record)
+        return record
+
+    def rollback(self, record: MutationRecord) -> None:
+        """Reverse a prior UPDATE: restore old value, or drop if none existed."""
+        d = record.delta
+        if d.old_value is None:
+            self.importance.pop(d.subject, None)
+        else:
+            self.importance[d.subject] = float(d.old_value)
+        self.rolled_back.append(record.interaction_id)
 
 
 class PalaceMemoryStore:
@@ -166,6 +222,9 @@ class AmplifierDataMemoryStore:
                 store = AmplifierStore(path=path, record_access=record_access)
         self.store: Any = store
         self.filed: list[dict[str, object]] = []
+        # T1-MEM-2: ledger of plasticity mutations applied through this seam.
+        self.mutations: list[MutationRecord] = []
+        self.rolled_back: list[str] = []
 
     def close(self) -> None:
         """Close the backing store if it supports it (RemoteStore does not)."""
@@ -211,6 +270,87 @@ class AmplifierDataMemoryStore:
             }
         )
         return ref
+
+    def _supports_atomic_update(self) -> bool:
+        """True iff the substrate exposes a multi-event atomic primitive.
+
+        amplifier-data does NOT expose one today (no ``update_fact``, no public
+        ``append_batch``); this is the Step-3 / T3D-2 addition owned by the
+        amplifier-data repo. We probe via getattr so this seam upgrades to the
+        atomic path automatically the moment the primitive lands upstream.
+        """
+        s = self.store
+        return callable(getattr(s, "update_fact", None)) or callable(
+            getattr(s, "append_batch", None)
+        )
+
+    def update_importance(
+        self,
+        subject: Any,
+        *,
+        old_importance: float | None,
+        new_importance: float,
+        provenance: str,
+        source_outcome: str,
+        confidence: float,
+        interaction_id: str | None = None,
+    ) -> MutationRecord:
+        """T1-MEM-2: replace a drawer's ``has_importance`` fact (UPDATE, not add).
+
+        Atomic WHEN the substrate supports it; otherwise a sequential
+        invalidate+assert that the MutationRecord (atomic=False) + rollback
+        handle make recoverable. Carries the full mutation contract. Intended
+        to run async / post-turn, never on the hot path.
+        """
+        s = self.store
+        new_ref = s.write_cell(str(new_importance).encode())  # type: ignore[attr-defined]
+        old_ref = (
+            s.write_cell(str(old_importance).encode())  # type: ignore[attr-defined]
+            if old_importance is not None
+            else None
+        )
+        atomic = self._supports_atomic_update()
+        delta = ReversibleDelta(
+            subject=str(subject),
+            predicate="has_importance",
+            new_value=str(new_importance),
+            old_value=None if old_importance is None else str(old_importance),
+        )
+        record = new_mutation(
+            provenance=provenance,
+            source_outcome=source_outcome,
+            delta=delta,
+            confidence=confidence,
+            atomic=atomic,
+            interaction_id=interaction_id,
+        )
+        update_fact = getattr(s, "update_fact", None)
+        if atomic and callable(update_fact):
+            # Future amplifier-data atomic primitive (T3D-2): one batch.
+            update_fact(subject, "has_importance", old_ref, new_ref)
+        else:
+            # Degraded sequential path. NOT atomic: a crash between the two
+            # leaves the fact invalidated-but-not-reasserted. Recoverable via
+            # the rollback handle on the returned record.
+            if old_ref is not None:
+                s.invalidate_fact(subject, "has_importance", old_ref)  # type: ignore[attr-defined]
+            s.assert_fact(subject, "has_importance", new_ref)  # type: ignore[attr-defined]
+        record = record.mark_applied()
+        self.mutations.append(record)
+        return record
+
+    def rollback(self, record: MutationRecord) -> None:
+        """Reverse a prior UPDATE via the rollback handle: invalidate the new
+        value and, if a prior value existed, re-assert it."""
+        s = self.store
+        d = record.delta
+        new_ref = s.write_cell(str(d.new_value).encode())  # type: ignore[attr-defined]
+        s.invalidate_fact(d.subject, d.predicate, new_ref)  # type: ignore[attr-defined]
+        if d.old_value is not None:
+            s.assert_fact(  # type: ignore[attr-defined]
+                d.subject, d.predicate, s.write_cell(str(d.old_value).encode())
+            )
+        self.rolled_back.append(record.interaction_id)
 
 
 class DualWriteMemoryStore:

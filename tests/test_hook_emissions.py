@@ -563,3 +563,75 @@ class TestProjectContextHookEmissions:
         hook = m.ProjectContextStartHook(config={"emit_events": False})
         asyncio.run(hook("session:start", {}))
         assert emitted == []
+
+
+# ---------------------------------------------------------------------------
+# T1-MEM-1: outcome-aware capture (tool_success)
+# ---------------------------------------------------------------------------
+
+
+def _run_capture(monkeypatch: pytest.MonkeyPatch, tmp_path: Any, data: dict) -> list:
+    """File one capture through the drain thread and return emitted events."""
+    import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+
+    emitted: list[tuple[Any, ...]] = []
+    _patch_capture_emitter(monkeypatch, emitted)
+    monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+    monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
+    monkeypatch.setattr(
+        m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
+    )
+    hook = m.MempalaceCaptureHook()
+    asyncio.run(hook("tool:post", data))
+    _drain()
+    return emitted
+
+
+def test_capture_marks_failed_tool_unsuccessful(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """is_error=True -> drawer_filed carries tool_success=False."""
+    emitted = _run_capture(
+        monkeypatch,
+        tmp_path,
+        {
+            "tool_name": "bash",
+            "tool_input": {"command": "false"},
+            "tool_output": "x" * 200,
+            "is_error": True,
+        },
+    )
+    filed = [e for e in emitted if e[0][1] == "drawer_filed"]
+    assert len(filed) == 1, f"Expected drawer_filed in {emitted}"
+    assert filed[0][1]["data"]["tool_success"] is False
+
+
+def test_capture_explicit_success_flag_wins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """explicit success=False overrides absence of is_error."""
+    emitted = _run_capture(
+        monkeypatch,
+        tmp_path,
+        {
+            "tool_name": "bash",
+            "tool_input": {},
+            "tool_output": "x" * 200,
+            "success": False,
+        },
+    )
+    filed = [e for e in emitted if e[0][1] == "drawer_filed"]
+    assert filed and filed[0][1]["data"]["tool_success"] is False
+
+
+def test_capture_defaults_to_success_when_outcome_blind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """No success/is_error keys -> tool_success defaults True (back-compat)."""
+    emitted = _run_capture(
+        monkeypatch,
+        tmp_path,
+        {"tool_name": "bash", "tool_input": {}, "tool_output": "x" * 200},
+    )
+    filed = [e for e in emitted if e[0][1] == "drawer_filed"]
+    assert filed and filed[0][1]["data"]["tool_success"] is True

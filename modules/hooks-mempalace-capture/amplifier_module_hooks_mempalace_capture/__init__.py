@@ -315,6 +315,11 @@ class _CaptureJob:
     config_wing: str = "wing_general"
     config_room: str = "general"
     emit_events: bool = True
+    # Outcome-awareness (T1-MEM-1): whether the captured tool call succeeded.
+    # Defaults to True so payloads with no outcome key behave as before.
+    # tool_success=False maps to signals["unresolved"]=True downstream, which
+    # *boosts* importance (a failed tool is more palace-worthy, not less).
+    tool_success: bool = True
     spool_path: str | None = field(default=None, compare=False)
 
 
@@ -480,6 +485,7 @@ def _process_job(job: _CaptureJob) -> None:
                     "category": job.category,
                     "content_bytes": len(job.tool_output.encode("utf-8")),
                     "source": job.source,
+                    "tool_success": job.tool_success,
                 },
                 session_id=job.session_id,
             )
@@ -493,6 +499,7 @@ def _process_job(job: _CaptureJob) -> None:
                         "category": job.category,
                         "content_bytes": len(job.tool_output.encode("utf-8")),
                         "source": job.source,
+                        "tool_success": job.tool_success,
                         "ok": True,
                         "preview": truncate_preview(job.tool_output),
                     },
@@ -626,6 +633,13 @@ class MempalaceCaptureHook:
         tool_output: str = str(data.get("tool_output", ""))
         sid = data.get("session_id")
 
+        # T1-MEM-1: read the tool outcome BEFORE the worthiness gate so the
+        # signal is known regardless of whether the drawer is filed. Prefer an
+        # explicit ``success`` flag; fall back to ``is_error``; default to
+        # success when neither key is present (outcome-blind payloads unchanged).
+        is_error = bool(data.get("is_error", False))
+        tool_success = bool(data.get("success", not is_error))
+
         if not _is_palace_worthy(tool_name, tool_output):
             if self.emit_events:
                 emit_event(
@@ -667,6 +681,7 @@ class MempalaceCaptureHook:
             config_wing=self.config.get("wing", "wing_general"),
             config_room=self.config.get("room", "general"),
             emit_events=self.emit_events,
+            tool_success=tool_success,
         )
 
         # Spool to disk so a crash leaves the work recoverable on next mount.
