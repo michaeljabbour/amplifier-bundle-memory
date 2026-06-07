@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -109,12 +109,42 @@ class PalaceMemoryStore:
 
 
 class AmplifierDataMemoryStore:
-    """Phase 3 seam: the amplifier-data substrate (event-log + lenses).
+    """Writes consolidated cells into the amplifier-data event-log substrate.
 
-    Not wired yet — amplifier-data is blocked on persistence and a vector lens.
-    This stub exists so the pipeline can target the substrate by configuration
-    once those land, and so the gap is explicit and loud rather than silent.
+    Mapping onto amplifier-data's API (verified against the real library,
+    docs/CONSUMER_INTEGRATION.md §3):
+      - drawer content -> ``write_cell(bytes)`` (verbatim, content-addressed; E1)
+      - wing/room      -> ``scope(ref, scope_cell)`` (``scoped_to`` edges;
+                          hierarchy = multiple scope edges per drawer)
+      - category/importance/source -> ``assert_fact(ref, predicate, object_cell)``
+                          (queryable, invalidatable KG facts; the object of a
+                          fact is itself a content-addressed cell)
+
+    amplifier-data is an OPTIONAL dependency. Construction raises loudly if it
+    is not installed — never a silent no-op.
     """
+
+    def __init__(
+        self,
+        store: object | None = None,
+        *,
+        path: str | None = None,
+        record_access: bool = False,
+    ) -> None:
+        if store is None:
+            try:
+                from amplifier_data import AmplifierStore
+            except ImportError as exc:  # pragma: no cover - exercised when absent
+                raise RuntimeError(
+                    "AmplifierDataMemoryStore requires the amplifier-data package, "
+                    "which is not installed. Install it (pip install -e amplifier-data) "
+                    "or use PalaceMemoryStore."
+                ) from exc
+            # record_access=False by default: consolidation is a write path; we
+            # do not want every later read to append AccessEvents (§5 mitigation).
+            store = AmplifierStore(path=path, record_access=record_access)
+        self.store: Any = store
+        self.filed: list[dict[str, object]] = []
 
     def file(
         self,
@@ -126,8 +156,86 @@ class AmplifierDataMemoryStore:
         category: str | None = None,
         importance: float | None = None,
     ) -> None:
-        raise NotImplementedError(
-            "AmplifierDataMemoryStore is not wired: amplifier-data needs "
-            "persistence + a vector lens before it can back memory. "
-            "Use PalaceMemoryStore for now."
+        s = self.store
+        ref = s.write_cell(content.encode("utf-8"))  # type: ignore[attr-defined]
+        # wing/room scoping — content-addressed scope cells (idempotent refs).
+        s.scope(ref, s.write_cell(f"wing:{wing}".encode()))  # type: ignore[attr-defined]
+        s.scope(ref, s.write_cell(f"room:{room}".encode()))  # type: ignore[attr-defined]
+        # queryable KG facts; a fact's object must itself be a cell ref.
+        if source:
+            s.assert_fact(ref, "has_source", s.write_cell(source.encode()))  # type: ignore[attr-defined]
+        if category is not None:
+            s.assert_fact(  # type: ignore[attr-defined]
+                ref, "has_category", s.write_cell(str(category).encode())
+            )
+        if importance is not None:
+            s.assert_fact(  # type: ignore[attr-defined]
+                ref, "has_importance", s.write_cell(str(importance).encode())
+            )
+        self.filed.append(
+            {
+                "ref": ref,
+                "wing": wing,
+                "room": room,
+                "content": content,
+                "source": source,
+                "category": category,
+                "importance": importance,
+            }
         )
+        return ref
+
+
+class DualWriteMemoryStore:
+    """Migration fan-out: write to a primary (source of truth) and a shadow.
+
+    The primary stays authoritative (the palace today); the shadow
+    (amplifier-data) is written in parallel so regenerated views can be compared
+    against the primary. A shadow failure NEVER breaks the primary write — it is
+    recorded in ``shadow_errors`` (set ``fail_on_shadow_error=True`` to surface
+    it). This is the §8 dual-write migration pattern.
+    """
+
+    def __init__(
+        self,
+        primary: MemoryStore,
+        shadow: MemoryStore,
+        *,
+        fail_on_shadow_error: bool = False,
+    ) -> None:
+        self.primary = primary
+        self.shadow = shadow
+        self.fail_on_shadow_error = fail_on_shadow_error
+        self.shadow_errors: list[str] = []
+
+    def file(
+        self,
+        *,
+        wing: str,
+        room: str,
+        content: str,
+        source: str = "",
+        category: str | None = None,
+        importance: float | None = None,
+    ) -> None:
+        self.primary.file(
+            wing=wing,
+            room=room,
+            content=content,
+            source=source,
+            category=category,
+            importance=importance,
+        )
+        try:
+            self.shadow.file(
+                wing=wing,
+                room=room,
+                content=content,
+                source=source,
+                category=category,
+                importance=importance,
+            )
+        except Exception as exc:  # shadow must never break the source of truth
+            self.shadow_errors.append(f"{type(exc).__name__}: {exc}")
+            if self.fail_on_shadow_error:
+                raise

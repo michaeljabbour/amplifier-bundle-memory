@@ -19,6 +19,7 @@ import pytest
 from amplifier_module_tool_mempalace.scripts.load_captures import load_captures
 from amplifier_module_tool_mempalace.scripts.memory_store import (
     AmplifierDataMemoryStore,
+    DualWriteMemoryStore,
     RecordingMemoryStore,
 )
 from amplifier_module_tool_mempalace.scripts.write_cells import write_cells
@@ -161,10 +162,48 @@ class TestMemoryStoreSeam:
             }
         ]
 
-    def test_amplifierdata_store_is_a_documented_stub(self) -> None:
-        # Phase 3 seam: the amplifier-data substrate is not wired yet
-        # (blocked on persistence + vector lens). It must fail loudly, not
-        # silently pretend to store.
-        store = AmplifierDataMemoryStore()
-        with pytest.raises(NotImplementedError):
-            store.file(wing="w", room="r", content="c")
+    def test_amplifierdata_store_files_when_available(self) -> None:
+        # The amplifier-data seam is now WIRED (full coverage in
+        # test_amplifier_data_store.py). Confirm it is no longer a stub: with
+        # the optional dependency present it stores and returns a content ref.
+        pytest.importorskip("amplifier_data")
+        store = AmplifierDataMemoryStore(record_access=False)
+        store.file(wing="w", room="r", content="c", category="decision")
+        ref = store.filed[-1]["ref"]
+        assert isinstance(ref, str) and ref
+
+
+class TestDualWriteMemoryStore:
+    def test_writes_to_both_stores(self) -> None:
+        primary = RecordingMemoryStore()
+        shadow = RecordingMemoryStore()
+        dw = DualWriteMemoryStore(primary, shadow)
+        write_cells(
+            [{"wing": "w", "room": "r", "content": "x", "category": "decision"}], dw
+        )
+        assert len(primary.filed) == 1
+        assert len(shadow.filed) == 1
+        assert primary.filed[0]["content"] == shadow.filed[0]["content"] == "x"
+
+    def test_shadow_failure_does_not_break_primary(self) -> None:
+        class _Boom:
+            def file(self, **_: object) -> None:
+                raise RuntimeError("shadow down")
+
+        primary = RecordingMemoryStore()
+        dw = DualWriteMemoryStore(primary, _Boom())
+        n = write_cells([{"wing": "w", "room": "r", "content": "x"}], dw)
+        assert n == 1
+        assert len(primary.filed) == 1  # primary unaffected
+        assert dw.shadow_errors and "shadow down" in dw.shadow_errors[0]
+
+    def test_fail_on_shadow_error_raises(self) -> None:
+        class _Boom:
+            def file(self, **_: object) -> None:
+                raise RuntimeError("shadow down")
+
+        dw = DualWriteMemoryStore(
+            RecordingMemoryStore(), _Boom(), fail_on_shadow_error=True
+        )
+        with pytest.raises(RuntimeError):
+            dw.file(wing="w", room="r", content="x")

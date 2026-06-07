@@ -19,6 +19,8 @@ tool-mempalace = "amplifier_module_tool_mempalace:mount"
 # Cold-path consolidation pipeline nodes (invoked by pipelines/curate.dot).
 mempalace-load-captures = "amplifier_module_tool_mempalace.scripts.load_captures:main"
 mempalace-write-cells = "amplifier_module_tool_mempalace.scripts.write_cells:main"
+# §8 amplifier-data dual-write / regeneration-equivalence migration harness.
+mempalace-dualwrite-compare = "amplifier_module_tool_mempalace.scripts.dualwrite_compare:main"
 
 [build-system]
 requires = ["hatchling"]
