@@ -12,6 +12,19 @@ dependencies = [
     "mempalace>=3.3.0",
 ]
 
+# OPTIONAL substrate backend for the AmplifierDataMemoryStore seam
+# (scripts/memory_store.py). amplifier-data is NEVER auto-installed by a base
+# `pip install -e .` or an Amplifier compose of the memory bundle -- the seam
+# stays behind a lazy import and raises loudly if absent. The
+# behavioral-plasticity conductor bundle is what actually requests this
+# substrate (via its own dep-amplifier-data module's [project.dependencies]);
+# this extra documents the canonical, version-pinned dependency so
+# `pip install -e '.[substrate]'` reproduces exactly what the conductor composes.
+[project.optional-dependencies]
+substrate = [
+    "amplifier-data @ git+https://github.com/michaeljabbour/amplifier-data@c1107b4d04da987353d54aa023b7b2a3b506fe01",
+]
+
 [project.entry-points."amplifier.modules"]
 tool-mempalace = "amplifier_module_tool_mempalace:mount"
 
@@ -29,6 +42,11 @@ mempalace-amplifier-data-gateway = "amplifier_module_tool_mempalace.scripts.ampl
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# Required because the optional `substrate` extra declares a direct URL
+# (git+) reference; hatchling refuses to build metadata otherwise.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["amplifier_module_tool_mempalace"]
