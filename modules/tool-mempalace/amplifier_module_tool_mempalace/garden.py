@@ -23,14 +23,13 @@ Design notes:
 from __future__ import annotations
 
 import hashlib
-import json
 import re
-import subprocess
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
 from .phase3 import compute_importance
+from .scripts.memory_store import _call_mcp_tool as _call_mcp_tool_impl
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -141,20 +140,27 @@ _STOPWORDS: frozenset[str] = frozenset(
 
 
 def _mcp_call(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Call a MemPalace MCP tool via the CLI (module-level, patchable for tests)."""
-    payload = json.dumps({"tool": tool_name, "arguments": args})
-    try:
-        result = subprocess.run(
-            ["mempalace", "mcp", "--call", payload],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode == 0:
-            return json.loads(result.stdout)
-    except Exception:
-        pass
-    return {}
+    """Call a MemPalace MCP tool (module-level, patchable for tests).
+
+    Delegates to the canonical ``_call_mcp_tool`` in scripts/memory_store.py --
+    the real ``mempalace-mcp`` JSON-RPC-over-stdio surface (see that
+    function's docstring for why the previous ``mempalace mcp --call``
+    invocation never worked against any published mempalace). Kept as a
+    thin, same-signature wrapper here (rather than calling the shared
+    helper directly from every ``execute_garden`` callsite) so existing
+    tests that patch ``amplifier_module_tool_mempalace.garden._mcp_call``
+    continue to work unchanged.
+
+    Garden is a best-effort, on-demand deep-analysis operation, not a
+    primary write path: an individual KG-add/search/diary-write failure
+    degrades the run (fewer edges created, a cluster left unlabeled) but
+    must never abort the whole garden pass. Preserves the pre-existing
+    "return {} on any failure" contract for that reason.
+    """
+    result = _call_mcp_tool_impl(tool_name, args)
+    if result.get("error"):
+        return {}
+    return result
 
 
 # ── Pure functions ────────────────────────────────────────────────────────────

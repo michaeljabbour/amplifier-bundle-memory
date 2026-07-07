@@ -16,7 +16,6 @@ Scale: 200 drawers × 30 queries (per spec Section 9.2).
 
 from __future__ import annotations
 
-import json
 import os
 import random
 import subprocess
@@ -28,6 +27,9 @@ import pytest
 
 from amplifier_module_hooks_mempalace_briefing import _rerank_by_importance
 from amplifier_module_tool_mempalace.phase3 import compute_importance
+from amplifier_module_tool_mempalace.scripts.memory_store import (
+    _call_mcp_tool as _call_mcp_tool_impl,
+)
 
 # ---------------------------------------------------------------------------
 # CLI availability guard
@@ -1255,21 +1257,20 @@ class TestBenchmarkRecallIntegration:
         return palace
 
     def _mcp(self, palace_dir: Path, tool: str, args: dict) -> dict:
-        payload = json.dumps({"tool": tool, "arguments": args})
+        """Call a real MemPalace MCP tool via ``mempalace-mcp``'s JSON-RPC stdio surface.
+
+        Was ``subprocess.run(["mempalace", "mcp", "--call", payload], ...)`` --
+        a CLI invocation that never existed in any published mempalace (see
+        ``amplifier_module_tool_mempalace.scripts.memory_store._call_mcp_tool``'s
+        docstring). Delegates to that canonical helper, passing ``MEMPALACE_DIR``
+        via ``env`` so each benchmark run is scoped to its own temp palace
+        exactly as the previous (broken) invocation intended.
+        """
         env = {**os.environ, "MEMPALACE_DIR": str(palace_dir)}
-        result = subprocess.run(
-            ["mempalace", "mcp", "--call", payload],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-        )
-        if result.returncode != 0:
-            return {"error": result.stderr}
-        try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return {"result": result.stdout.strip()}
+        result = _call_mcp_tool_impl(tool, args, timeout=30.0, env=env)
+        if result.get("error"):
+            return {"error": result["error"]}
+        return result
 
     def test_benchmark_recall_r5_no_regression(self, palace_dir: Path) -> None:
         """Full integration benchmark: seed real palace, run semantic search, verify R@5."""

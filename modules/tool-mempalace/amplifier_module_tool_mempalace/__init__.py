@@ -35,6 +35,7 @@ from .coordinator_bridge import (
 from .event_emitter import _read_events_with_skip_count, emit_event
 from .garden import execute_garden
 from .scripts.memory_store import AmplifierDataMemoryStore as _AmplifierDataMemoryStore
+from .scripts.memory_store import _call_mcp_tool as _call_mcp_tool_impl
 
 # Hard wall-clock budget for garden operations. Patchable in tests.
 _GARDEN_TIMEOUT_S: float = 120.0
@@ -134,20 +135,21 @@ def _shadow_diary(agent_name: str, entry: str, topic: str) -> None:
 
 
 def _mcp_call(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Call a MemPalace MCP tool via the CLI and return the result."""
-    payload = json.dumps({"tool": tool_name, "arguments": args})
-    result = subprocess.run(
-        ["mempalace", "mcp", "--call", payload],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        return {"error": result.stderr.strip() or "MCP call failed"}
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {"result": result.stdout.strip()}
+    """Call a MemPalace MCP tool and return the result.
+
+    Delegates to the canonical ``_call_mcp_tool`` in scripts/memory_store.py,
+    which speaks the real ``mempalace-mcp`` JSON-RPC-over-stdio surface (see
+    that function's docstring for why the previous ``mempalace mcp --call``
+    invocation never worked against any published mempalace). Kept as a
+    same-name, same-signature wrapper so every operation branch below (and
+    ``execute``'s error handling) is unchanged; only the transport moved.
+
+    Errors surface as ``{"error": "..."}``, same shape as before -- callers
+    already check ``result.get("error")`` and/or serialize the dict straight
+    into the ToolResult content, so a failed call is still visible to the
+    caller (never silently dropped), matching this tool's existing posture.
+    """
+    return _call_mcp_tool_impl(tool_name, args, timeout=30.0)
 
 
 class PalaceTool(Tool):

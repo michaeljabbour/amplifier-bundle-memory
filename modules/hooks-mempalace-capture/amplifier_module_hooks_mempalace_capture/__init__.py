@@ -125,6 +125,86 @@ try:
 except ImportError:
     _AmplifierDataMemoryStore = None  # type: ignore[assignment,misc]
 
+try:
+    # Canonical MCP JSON-RPC-over-stdio helper. Declared as a real dependency
+    # in pyproject.toml (amplifier-module-tool-mempalace>=1.0.0), so this
+    # import succeeds in any properly installed environment; the fallback
+    # below only triggers in degraded/partial environments, matching this
+    # module's existing defensive-import convention for every
+    # amplifier_module_tool_mempalace symbol above.
+    from amplifier_module_tool_mempalace.scripts.memory_store import (
+        _call_mcp_tool as _call_mcp_tool_impl,
+    )
+except ImportError:
+    # Minimal private copy of the canonical helper in
+    # amplifier_module_tool_mempalace/scripts/memory_store.py::_call_mcp_tool.
+    # Keep in sync with that implementation if mempalace's MCP wire format
+    # changes; this is a fallback for degraded environments only, not a
+    # second source of truth.
+    def _call_mcp_tool_impl(  # type: ignore[misc]
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        timeout: float = 15.0,
+    ) -> dict[str, Any]:
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
+        }
+        call_req = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        }
+        stdin_payload = json.dumps(init_req) + "\n" + json.dumps(call_req) + "\n"
+        try:
+            proc = subprocess.run(
+                ["mempalace-mcp"],
+                input=stdin_payload,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        call_response: dict[str, Any] | None = None
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(msg, dict) and msg.get("id") == 2:
+                call_response = msg
+                break
+        if call_response is None:
+            return {
+                "error": (
+                    f"mempalace-mcp produced no tools/call response for "
+                    f"{tool_name!r} (rc={proc.returncode}). "
+                    f"stderr: {proc.stderr.strip()[:500]}"
+                )
+            }
+        if "error" in call_response:
+            rpc_error = call_response["error"]
+            message = (
+                rpc_error.get("message") if isinstance(rpc_error, dict) else rpc_error
+            )
+            return {"error": message or str(rpc_error)}
+        content = (call_response.get("result") or {}).get("content") or []
+        text_out = content[0].get("text") if content else None
+        if text_out is None:
+            return {"error": "tools/call result missing content[0].text"}
+        try:
+            return json.loads(text_out)
+        except json.JSONDecodeError:
+            return {"raw": text_out}
+
 # Best-effort amplifier-data shadow store (the "running shadow"): set by mount()
 # from the shadow_gateway config. None disables shadowing. The client side is
 # pure urllib (GatewayClient) — the capture process does NOT need amplifier-data
@@ -209,25 +289,34 @@ def _skip_reason(tool_name: str, output: str) -> str:
 
 
 def _mcp_add_drawer(wing: str, room: str, content: str, source: str) -> None:
-    """File a verbatim drawer via the MemPalace CLI."""
-    payload = json.dumps(
+    """File a verbatim drawer via the real ``mempalace-mcp`` JSON-RPC surface.
+
+    This is the PRIMARY palace write for the capture pipeline -- mirrors
+    ``PalaceMemoryStore.file`` in tool-mempalace's scripts/memory_store.py.
+    Previously this called ``subprocess.run(["mempalace", "mcp", "--call", ...])``
+    (a CLI invocation that never existed in any published mempalace) and
+    never checked the result at all, so a failed write was silently treated
+    as success: ``_process_job`` would emit ``drawer_filed`` and delete the
+    spool entry even though nothing was ever persisted. Raising here on
+    failure (instead of swallowing it) lets ``_process_job``'s existing
+    ``except Exception`` branch do its job for the first time: it emits
+    ``capture_failed`` and leaves the spool entry in place for a future
+    replay -- this hook's existing "never break the session, but make
+    failure observable and retryable" contract, which was previously dead
+    code for MCP failures.
+    """
+    result = _call_mcp_tool_impl(
+        "mempalace_add_drawer",
         {
-            "tool": "mempalace_add_drawer",
-            "arguments": {
-                "wing": wing,
-                "room": room,
-                "content": content,
-                "source_file": source,
-                "added_by": "hooks-mempalace-capture",
-            },
-        }
+            "wing": wing,
+            "room": room,
+            "content": content,
+            "source_file": source,
+            "added_by": "hooks-mempalace-capture",
+        },
     )
-    subprocess.run(
-        ["mempalace", "mcp", "--call", payload],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    if result.get("error"):
+        raise RuntimeError(f"_mcp_add_drawer failed: {result['error']}")
 
 
 # Category keyword signals (absorbed from hooks-memory-capture)

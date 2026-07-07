@@ -33,6 +33,114 @@ from amplifier_module_tool_mempalace.scripts.mutation import (
 )
 
 
+#: JSON-RPC protocol version negotiated with ``mempalace-mcp``. Any value in
+#: mempalace's ``SUPPORTED_PROTOCOL_VERSIONS`` works; this is simply the
+#: newest one as of mempalace 3.5.0.
+_MCP_PROTOCOL_VERSION = "2025-06-18"
+
+
+def _call_mcp_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    timeout: float = 15.0,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Invoke one palace MCP tool via a fresh ``mempalace-mcp`` stdio session.
+
+    mempalace 3.5.0 has NO synchronous single-shot CLI call surface.
+    Verified against the installed package (mempalace 3.5.0, the latest on
+    PyPI, source inspected in site-packages): ``mempalace mcp``
+    (mempalace/cli.py:cmd_mcp) only PRINTS the shell command to wire
+    MemPalace into an MCP host and exits -- it never accepts ``--call``, and
+    its argparse subparser declares only ``--backend``. The real MCP server
+    is a *separate* console script, ``mempalace-mcp`` (mempalace/mcp_server.py),
+    which speaks newline-delimited JSON-RPC 2.0 over stdio: an
+    ``initialize`` handshake followed by ``tools/call`` requests, one JSON
+    response per line (mempalace/mcp_server.py:_run_stdio_loop).
+
+    This sends both messages up front via a single ``subprocess.run(input=...)``
+    call so the server's normal EOF-on-closed-stdin shutdown
+    (``_run_stdio_loop``'s ``if not line: break``) exits the process cleanly --
+    no separate terminate/kill step needed. A fresh process is spawned per
+    call, mirroring the one-shot-per-call design the previous (nonexistent)
+    ``mempalace mcp --call`` invocation assumed.
+
+    Args:
+        env: Optional environment override passed straight through to
+            ``subprocess.run``. ``None`` (default) inherits the current
+            process environment, identical to omitting the kwarg entirely.
+            Callers that need to target a specific palace directory (e.g.
+            test fixtures pointing ``MEMPALACE_DIR`` at a temp dir) pass a
+            full env dict here rather than mutating ``os.environ``.
+
+    Returns the tool's own result payload, unwrapped from the MCP
+    ``result.content[0].text`` JSON envelope, or ``{"error": "..."}`` on any
+    transport or JSON-RPC-level failure -- the same shape callers already
+    check via ``result.get("error")``.
+    """
+    init_req = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"protocolVersion": _MCP_PROTOCOL_VERSION, "capabilities": {}},
+    }
+    call_req = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    }
+    stdin_payload = json.dumps(init_req) + "\n" + json.dumps(call_req) + "\n"
+
+    try:
+        proc = subprocess.run(
+            ["mempalace-mcp"],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+    call_response: dict[str, Any] | None = None
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(msg, dict) and msg.get("id") == 2:
+            call_response = msg
+            break
+
+    if call_response is None:
+        return {
+            "error": (
+                f"mempalace-mcp produced no tools/call response for "
+                f"{tool_name!r} (rc={proc.returncode}). "
+                f"stderr: {proc.stderr.strip()[:500]}"
+            )
+        }
+    if "error" in call_response:
+        rpc_error = call_response["error"]
+        message = rpc_error.get("message") if isinstance(rpc_error, dict) else rpc_error
+        return {"error": message or str(rpc_error)}
+
+    content = (call_response.get("result") or {}).get("content") or []
+    text_out = content[0].get("text") if content else None
+    if text_out is None:
+        return {"error": "tools/call result missing content[0].text"}
+    try:
+        return json.loads(text_out)
+    except json.JSONDecodeError:
+        return {"raw": text_out}
+
+
 def _resolve_batch_ref(commit_result: Any, ref: Any) -> Any:
     """Resolve a batch-staged ref after ``commit()``.
 
@@ -158,10 +266,12 @@ class RecordingMemoryStore:
 
 
 class PalaceMemoryStore:
-    """Writes consolidated cells as verbatim MemPalace drawers via the CLI.
+    """Writes consolidated cells as verbatim MemPalace drawers via the MCP tool surface.
 
     Mirrors the capture hook's ``_mcp_add_drawer`` call so consolidated content
-    lands in the palace exactly like raw captures do.
+    lands in the palace exactly like raw captures do -- both route through
+    ``_call_mcp_tool`` (see its docstring for why the previous
+    ``mempalace mcp --call`` invocation never worked against real mempalace).
     """
 
     def __init__(self, added_by: str = "curate-pipeline") -> None:
@@ -181,24 +291,22 @@ class PalaceMemoryStore:
         # embedding is intentionally IGNORED: the palace embeds internally via
         # ChromaDB. Passing a vector through here would stand up a second,
         # divergent embedding pipeline for the same content.
-        payload = json.dumps(
+        result = _call_mcp_tool(
+            "mempalace_add_drawer",
             {
-                "tool": "mempalace_add_drawer",
-                "arguments": {
-                    "wing": wing,
-                    "room": room,
-                    "content": content,
-                    "source_file": source,
-                    "added_by": self.added_by,
-                },
-            }
+                "wing": wing,
+                "room": room,
+                "content": content,
+                "source_file": source,
+                "added_by": self.added_by,
+            },
         )
-        subprocess.run(
-            ["mempalace", "mcp", "--call", payload],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
+        if result.get("error"):
+            # The palace is the primary/source-of-truth store -- a failed
+            # write here must be loud, not silently discarded (the previous
+            # subprocess.run(...) never checked returncode or output at all,
+            # which is how this call site's total breakage went unnoticed).
+            raise RuntimeError(f"PalaceMemoryStore.file failed: {result['error']}")
 
 
 class AmplifierDataMemoryStore:
@@ -293,9 +401,7 @@ class AmplifierDataMemoryStore:
             if source:
                 b.assert_fact(ref, "has_source", b.write_cell(source.encode()))
             if category is not None:
-                b.assert_fact(
-                    ref, "has_category", b.write_cell(str(category).encode())
-                )
+                b.assert_fact(ref, "has_category", b.write_cell(str(category).encode()))
             if importance is not None:
                 b.assert_fact(
                     ref, "has_importance", b.write_cell(str(importance).encode())
