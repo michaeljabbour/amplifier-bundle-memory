@@ -79,7 +79,10 @@ hooks:
     config:
       tier1_always: true              # always read PROJECT_CONTEXT.md + GLOSSARY.md
       handoff_on_end: true            # update HANDOFF.md at session:end
-      setup_if_missing: true          # scaffold project-context/ if not present
+      setup_if_missing: false         # SUSPENDED (2026-07-07): no auto-scaffold of
+                                      # project-context/ into every repo. Existing
+                                      # project-context/ dirs are still read/updated.
+                                      # Set true to re-enable scaffolding.
       emit_events: true               # NEW: false to disable JSONL event emission
 
   # Mid-session OR-firing hook: surfaces relevant memories at the right moment.

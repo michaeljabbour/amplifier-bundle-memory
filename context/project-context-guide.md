@@ -43,7 +43,7 @@ The coordination files are organized by how often they change and how critical t
 
 ## Setup
 
-If `project-context/` does not exist in the current project, the `hooks-project-context` hook scaffolds it automatically using the templates from the project-context system. The generated files are customized to the project by scanning the codebase structure.
+Auto-scaffolding is **disabled by default** (`setup_if_missing: false` in `behaviors/mempalace.yaml`): the hook reads and updates an existing `project-context/` directory but will not create one in projects that lack it. To scaffold a project deliberately, use the manual command below, or set `setup_if_missing: true` to restore automatic scaffolding everywhere.
 
 ```bash
 # Manual setup (if needed)
