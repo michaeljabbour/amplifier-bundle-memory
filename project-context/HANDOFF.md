@@ -1,6 +1,34 @@
 # Handoff
 
-*Last updated: 2026-07-07 — substrate adapter complete + DTU-validated; external user-report fixes: palace ToolResult contract, interject store alignment + privacy defaults*
+*Last updated: 2026-07-07 — ROOT CAUSE found & fixed (Tool-protocol signature violation); full conductor-bundle DTU validation 5/5*
+
+## TL;DR for Michael (2026-07-07, fourth pass — THE root cause + conductor DTU 5/5)
+
+**The real bug behind "stored 3 facts, told success, recalled nothing" (commit `e7a975f`):**
+`PalaceTool.execute` was declared `execute(self, operation: str, **kwargs)` but amplifier-core's
+Tool protocol is `execute(self, input: dict)` — ONE positional dict. Orchestrators call
+`tool.execute(tool_call.arguments)`, so the whole arguments dict bound to `operation`, dispatch
+always fell to the unknown-operation branch, and **the palace tool never worked through a real
+session**. Unit tests called it with kwargs directly, masking it; the `# type: ignore[override]`
+was silencing the type checker's exact complaint. Fixed to the protocol signature; all 24 test
+call sites converted to the real single-positional-dict convention; 2 new tests pin the
+orchestrator calling convention. tool-mempalace: 220 passed, 30 contract tests, pyright 0 errors,
+zero suppressions.
+
+**Full-suite DTU validation (behavioral-plasticity conductor, one `bundle add`): 5/5 PASS.**
+Composed conductor `b2ca118` + memory `e7a975f` + amplifier-data pinned `09482f1` (verified in
+BOTH interpreters). The friend's exact scenario proven fixed end-to-end through the REAL
+orchestrator surface: session 1 remember → `{"success": true, "drawer_id": "drawer_ops_deploys_…"}`;
+separate session 2 search → recalled the fact VERBATIM (similarity 0.743). Failures loud:
+with `mempalace-mcp` removed from PATH, palace returns `success=false` + real error, not
+success/null. In-container suites: tool-mempalace 221 passed, interject 25 passed.
+`falsification_harness` smoke: verdict "proxy", success true. DTU destroyed after validation;
+reusable profiles: `~/dev/amplifier-data/.amplifier/digital-twin-universe/profiles/
+{bp-conductor-e2e,memory-substrate-e2e}.yaml`.
+
+**Pin lockstep DONE:** behavioral-plasticity `dep-amplifier-data` advanced `c1107b4` → `09482f1`
+(module version 0.1.1 to refresh the install fingerprint) — conductor commit `b2ca118`. Memory's
+`[substrate]` extra already at `09482f1`. The two pins now move together, as designed.
 
 ## TL;DR for Michael (2026-07-07, third pass — external user report fixes)
 
