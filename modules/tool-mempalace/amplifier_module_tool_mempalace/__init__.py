@@ -34,12 +34,103 @@ from .coordinator_bridge import (
 )
 from .event_emitter import _read_events_with_skip_count, emit_event
 from .garden import execute_garden
+from .scripts.memory_store import AmplifierDataMemoryStore as _AmplifierDataMemoryStore
 
 # Hard wall-clock budget for garden operations. Patchable in tests.
 _GARDEN_TIMEOUT_S: float = 120.0
 
 
 PALACE_PATH = Path.home() / ".mempalace"
+
+# Best-effort amplifier-data shadow store (the "running shadow" — §4b/§4c of
+# docs/plans/2026-07-07-substrate-adapter-completion-design.md): every
+# successful palace ``kg add``/``kg invalidate``/``diary write`` op is
+# best-effort mirrored to amplifier-data via the authed gateway. None disables
+# shadowing. Set by mount() from the ``shadow_gateway`` config block — the
+# SAME knob vocabulary as hooks-mempalace-capture's shadow (one config
+# schema across the bundle). The client side is pure urllib
+# (GatewayClient) — this process does NOT need amplifier-data installed;
+# only the gateway service process does.
+_SHADOW_STORE: Any = None
+
+
+def _configure_shadow(shadow_cfg: dict[str, Any]) -> None:
+    """Configure the amplifier-data shadow store from config (opt-in, best-effort).
+
+    Expects ``{enabled, base_url, token_file}`` — mirrors
+    hooks-mempalace-capture's ``_configure_shadow`` contract exactly. Any
+    failure disables shadowing silently; the palace remains the source of
+    truth regardless.
+    """
+    global _SHADOW_STORE
+    _SHADOW_STORE = None
+    if not shadow_cfg.get("enabled") or not shadow_cfg.get("base_url"):
+        return
+    try:
+        token: str | None = None
+        token_file = shadow_cfg.get("token_file")
+        if token_file:
+            token_path = Path(str(token_file)).expanduser()
+            if token_path.is_file():
+                token = token_path.read_text(encoding="utf-8").strip() or None
+        _SHADOW_STORE = _AmplifierDataMemoryStore(
+            base_url=str(shadow_cfg["base_url"]), token=token
+        )
+    except Exception:
+        _SHADOW_STORE = None
+
+
+def _shadow_kg(kg_action: str, subject: str, predicate: str, object: str) -> None:  # noqa: A002
+    """Best-effort shadow a palace KG add/invalidate to amplifier-data.
+
+    Never raises — the palace op has already succeeded by the time this is
+    called; a shadow failure must never surface to the caller.
+    """
+    store = _SHADOW_STORE
+    if store is None:
+        return
+    try:
+        if kg_action == "add":
+            store.assert_kg(subject, predicate, object)
+        elif kg_action == "invalidate":
+            store.invalidate_kg(subject, predicate, object)
+        else:
+            return
+        emit_event(
+            "tool-mempalace",
+            "kg_shadow_filed",
+            ok=True,
+            data={"kg_action": kg_action, "subject": subject, "predicate": predicate},
+        )
+    except Exception as exc:  # shadow must never break the source-of-truth write
+        emit_event(
+            "tool-mempalace",
+            "kg_shadow_failed",
+            ok=False,
+            data={"kg_action": kg_action, "reason": type(exc).__name__},
+        )
+
+
+def _shadow_diary(agent_name: str, entry: str, topic: str) -> None:
+    """Best-effort shadow a palace diary write to amplifier-data. Never raises."""
+    store = _SHADOW_STORE
+    if store is None:
+        return
+    try:
+        store.file_diary(agent_name=agent_name, entry=entry, topic=topic)
+        emit_event(
+            "tool-mempalace",
+            "diary_shadow_filed",
+            ok=True,
+            data={"agent_name": agent_name, "topic": topic},
+        )
+    except Exception as exc:  # shadow must never break the source-of-truth write
+        emit_event(
+            "tool-mempalace",
+            "diary_shadow_failed",
+            ok=False,
+            data={"agent_name": agent_name, "reason": type(exc).__name__},
+        )
 
 
 def _mcp_call(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -269,6 +360,8 @@ class PalaceTool(Tool):
                         "object": kwargs.get("object", ""),
                     }
                     result = _mcp_call("mempalace_kg_add", args)
+                    if not result.get("error"):
+                        _shadow_kg("add", args["subject"], args["predicate"], args["object"])
                 elif kg_action == "invalidate":
                     args = {
                         "subject": kwargs.get("subject", ""),
@@ -276,6 +369,10 @@ class PalaceTool(Tool):
                         "object": kwargs.get("object", ""),
                     }
                     result = _mcp_call("mempalace_kg_invalidate", args)
+                    if not result.get("error"):
+                        _shadow_kg(
+                            "invalidate", args["subject"], args["predicate"], args["object"]
+                        )
                 elif kg_action == "timeline":
                     args = {"entity": kwargs.get("entity", "")}
                     result = _mcp_call("mempalace_kg_timeline", args)
@@ -301,6 +398,8 @@ class PalaceTool(Tool):
                         "topic": kwargs.get("room", "general"),
                     }
                     result = _mcp_call("mempalace_diary_write", args)
+                    if not result.get("error"):
+                        _shadow_diary(agent_name, args["entry"], args["topic"])
                 else:
                     args = {"agent_name": agent_name, "last_n": kwargs.get("limit", 10)}
                     result = _mcp_call("mempalace_diary_read", args)
@@ -533,11 +632,17 @@ async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Mount the palace tool into the Amplifier coordinator."""
+    cfg = config or {}
+
     register_events(
         coordinator,
         "memory-mempalace-tool",
         ["memory-mempalace:garden_completed", "memory-mempalace:garden_progress"],
     )
+
+    # Optional "running shadow" for kg add/invalidate + diary write — same
+    # shadow_gateway config schema as hooks-mempalace-capture. Off by default.
+    _configure_shadow(cfg.get("shadow_gateway") or {})
 
     bridge_emit = make_sync_bridge(coordinator)
     tool = PalaceTool(bridge_emit=bridge_emit)

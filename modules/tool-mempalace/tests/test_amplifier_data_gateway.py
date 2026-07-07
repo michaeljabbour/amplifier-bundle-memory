@@ -194,3 +194,98 @@ class TestGatewayRoundTrip:
             assert facts.success and len(facts.output) == 1
         finally:
             next(gen, None)
+
+
+# ---------------------------------------------------------------------------
+# KG-G1 -- gateway parity: add_embedding / query_vector / batch
+# ---------------------------------------------------------------------------
+
+
+class TestGatewayVectorAndBatchParity:
+    def test_add_embedding_and_query_vector_round_trip(self, tmp_path: Path) -> None:
+        store = AmplifierStore(path=str(tmp_path / "s.ampd"), record_access=False)
+        url = next(gen := _serve(store, bypass=False))
+        try:
+            client = GatewayClient(url, _TOKEN)
+            ref = client.write_cell(b"vector target")
+            v = [1.0, 0.0, 0.0]
+            emb_ref = client.add_embedding(ref, v)
+            assert emb_ref
+            hits = client.query_vector(v, k=1)
+            assert hits and hits[0][0] == ref
+        finally:
+            next(gen, None)
+
+    def test_query_vector_scoped(self, tmp_path: Path) -> None:
+        store = AmplifierStore(path=str(tmp_path / "s.ampd"), record_access=False)
+        url = next(gen := _serve(store, bypass=False))
+        try:
+            client = GatewayClient(url, _TOKEN)
+            ref = client.write_cell(b"scoped vector target")
+            scope_ref = client.write_cell(b"wing:vec_w")
+            client.scope(ref, scope_ref)
+            v = [0.0, 1.0, 0.0]
+            client.add_embedding(ref, v)
+            hits = client.query_vector(v, k=1, scope=scope_ref)
+            assert hits and hits[0][0] == ref
+            other_scope = client.write_cell(b"wing:vec_other")
+            assert client.query_vector(v, k=1, scope=other_scope) == []
+        finally:
+            next(gen, None)
+
+    def test_add_embedding_requires_auth(self, tmp_path: Path) -> None:
+        store = AmplifierStore(path=str(tmp_path / "s.ampd"), record_access=False)
+        url = next(gen := _serve(store, bypass=False))
+        try:
+            assert (
+                _post(
+                    url,
+                    {
+                        "tool": "add_embedding",
+                        "arguments": {"target_ref": "x", "vector": [1.0]},
+                    },
+                    token=None,
+                )
+                == 401
+            )
+        finally:
+            next(gen, None)
+
+    def test_batch_is_one_atomic_commit(self, tmp_path: Path) -> None:
+        """KG-G1: a batch through the gateway is atomic per KG-A1(i) semantics
+        server-side -- exactly one append_batch call for the whole batch."""
+        store = AmplifierStore(path=str(tmp_path / "s.ampd"), record_access=False)
+        calls = {"n": 0}
+        orig = store.kernel.append_batch
+
+        def counting(events: object) -> object:
+            calls["n"] += 1
+            return orig(events)
+
+        store.kernel.append_batch = counting  # type: ignore[method-assign]
+        url = next(gen := _serve(store, bypass=False))
+        try:
+            client = GatewayClient(url, _TOKEN)
+            batch = client.write_batch()
+            content_ref = batch.write_cell(b"batched content")
+            wing_ref = batch.write_cell(b"wing:batch_w")
+            batch.relate(content_ref, wing_ref, "scoped_to")
+            cat_ref = batch.write_cell(b"decision")
+            batch.assert_fact(content_ref, "has_category", cat_ref)
+            refs = batch.commit()
+            assert calls["n"] == 1
+
+            resolved_content = refs[content_ref] if isinstance(refs, dict) else content_ref
+            direct_ref = client.write_cell(b"batched content")
+            assert resolved_content == direct_ref
+            assert client.regenerate(direct_ref).payload == b"batched content"
+            labels = {
+                client.regenerate(n).payload.decode()
+                for n in client.graph_neighbors(direct_ref, "scoped_to")
+            }
+            assert "wing:batch_w" in labels
+            facts = client.query_facts(subject=direct_ref, predicate="has_category")
+            assert facts.success and len(facts.output) == 1
+        finally:
+            next(gen, None)
+

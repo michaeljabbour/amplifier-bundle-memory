@@ -85,6 +85,49 @@ provision:
     # 6. Clone amplifier-bundle-memory from Gitea mirror into /workspace
     - git clone ${GITEA_URL}/admin/amplifier-bundle-memory /workspace/amplifier-bundle-memory
 
+    # 6.5. Install the seam with the substrate extra (pure-Python fallback --
+    # no Rust toolchain in the container; durable path= is therefore NOT used
+    # in-container, the gateway runs an in-memory store, which is sufficient
+    # for the smoke -- durability is already gated in unit tests where
+    # maturin exists). See docs/plans/2026-07-07-substrate-adapter-completion-design.md §7.
+    - pip install --break-system-packages -e '/workspace/amplifier-bundle-memory/modules/tool-mempalace[substrate]'
+
+    # 6.6. Start the amplifier-data gateway as a background service and
+    # capture its discovery line (host/port/token_file) for the smoke test.
+    - |
+      export PATH="/root/.local/bin:$PATH"
+      nohup mempalace-amplifier-data-gateway --port 8799 > /root/gateway.json.log 2>&1 &
+      sleep 2
+      echo "=== gateway discovery line ==="
+      cat /root/gateway.json.log
+
+    # 6.7. Enable the shadow in the behavior config used by the container run:
+    # set shadow_gateway: {enabled: true, base_url: "http://127.0.0.1:8799"} on
+    # BOTH hooks-mempalace-capture and tool-mempalace config blocks (sed-patch
+    # the cloned behaviors/mempalace.yaml). The committed default stays OFF --
+    # this only mutates the DTU container's copy of the file.
+    - |
+      python3 - <<'PYPATCH'
+      import re
+      from pathlib import Path
+
+      path = Path("/workspace/amplifier-bundle-memory/behaviors/mempalace.yaml")
+      text = path.read_text(encoding="utf-8")
+      enabled_block = (
+          "      shadow_gateway:\n"
+          "        enabled: true\n"
+          "        base_url: \"http://127.0.0.1:8799\"\n"
+      )
+      commented_block = re.compile(
+          r"      # shadow_gateway:\n(?:      #.*\n)+"
+      )
+      new_text, count = commented_block.subn(enabled_block, text)
+      assert count == 2, f"expected 2 shadow_gateway blocks (capture + tool), patched {count}"
+      path.write_text(new_text, encoding="utf-8")
+      print(f"[dtu] patched {count} shadow_gateway block(s)")
+      PYPATCH
+      grep -A2 "shadow_gateway:" /workspace/amplifier-bundle-memory/behaviors/mempalace.yaml
+
     # 7. Mine seed fixture content into the palace
     # mempalace mine --mode projects is for code/docs (the default); 'files' is
     # not a valid mode. Use --mode projects for the markdown fixture content.

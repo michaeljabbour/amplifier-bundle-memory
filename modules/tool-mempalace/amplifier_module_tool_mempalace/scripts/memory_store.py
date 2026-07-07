@@ -2,19 +2,28 @@
 MemoryStore — the storage seam for the consolidation pipeline.
 
 The cold-path ``curate.dot`` pipeline produces consolidated "cells" and writes
-them through a ``MemoryStore``. Today the only real backend is the MemPalace
-drawer store (``PalaceMemoryStore``). The amplifier-data substrate is a declared
-seam (``AmplifierDataMemoryStore``) that fails loudly until persistence + a
-vector lens land in amplifier-data — it must never silently pretend to store.
+them through a ``MemoryStore``. The MemPalace drawer store (``PalaceMemoryStore``)
+is the production read source; the amplifier-data substrate
+(``AmplifierDataMemoryStore``) is a completed consumer seam — drawers, scopes,
+KG facts, vectors, and diary entries all route through it, with three
+interchangeable backends (direct ``AmplifierStore``, ``RemoteStore`` via the
+companion server, and the authed ``GatewayClient``). It is written as a
+shadow/verify surface today (docs/plans/2026-07-07-substrate-adapter-completion-design.md);
+read-path cutover is a deliberate follow-on policy decision, out of scope here.
 
-Keeping this as a one-method protocol means the pipeline's ``write_cells`` node
-is identical regardless of backend; only the injected store changes.
+Keeping ``file()`` as the common protocol method means the pipeline's
+``write_cells`` node is identical regardless of backend; only the injected
+store changes. The additional seam surfaces (``search_vectors``, ``assert_kg``
+/ ``query_kg`` / ``kg_timeline``, ``file_diary``) are verify-only reads and
+additive writes layered on top — they do not change the core ``file()`` contract.
 """
 
 from __future__ import annotations
 
 import json
+import struct
 import subprocess
+from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from amplifier_module_tool_mempalace.scripts.mutation import (
@@ -22,6 +31,21 @@ from amplifier_module_tool_mempalace.scripts.mutation import (
     ReversibleDelta,
     new_mutation,
 )
+
+
+def _resolve_batch_ref(commit_result: Any, ref: Any) -> Any:
+    """Resolve a batch-staged ref after ``commit()``.
+
+    Direct ``WriteBatch.commit()`` (amplifier_data.envelope) returns
+    ``list[SeqPos]``; refs staged via ``write_cell`` are already the real
+    content-addressed hash, computed locally. ``GatewayWriteBatch.commit()``
+    (amplifier_data_gateway) returns ``{pending_token: real_ref}`` because the
+    client cannot replicate the substrate's addressing algorithm client-side
+    -- resolve through the map when commit() returns one.
+    """
+    if isinstance(commit_result, dict):
+        return commit_result.get(ref, ref)
+    return ref
 
 
 @runtime_checkable
@@ -37,8 +61,15 @@ class MemoryStore(Protocol):
         source: str = "",
         category: str | None = None,
         importance: float | None = None,
+        embedding: Sequence[float] | None = None,
     ) -> None:
-        """Persist one consolidated cell."""
+        """Persist one consolidated cell.
+
+        ``embedding``, when provided, is a pre-computed vector to transport
+        alongside the cell. The seam NEVER computes embeddings itself (the
+        embedder is bundle policy, per COMPOSITION.md) — it only carries a
+        vector a caller already has.
+        """
         ...
 
 
@@ -65,17 +96,19 @@ class RecordingMemoryStore:
         source: str = "",
         category: str | None = None,
         importance: float | None = None,
+        embedding: Sequence[float] | None = None,
     ) -> None:
-        self.filed.append(
-            {
-                "wing": wing,
-                "room": room,
-                "content": content,
-                "source": source,
-                "category": category,
-                "importance": importance,
-            }
-        )
+        record: dict[str, object] = {
+            "wing": wing,
+            "room": room,
+            "content": content,
+            "source": source,
+            "category": category,
+            "importance": importance,
+        }
+        if embedding is not None:
+            record["embedding"] = list(embedding)
+        self.filed.append(record)
         if importance is not None:
             self.importance[str(source or content)] = float(importance)
 
@@ -143,7 +176,11 @@ class PalaceMemoryStore:
         source: str = "",
         category: str | None = None,
         importance: float | None = None,
+        embedding: Sequence[float] | None = None,
     ) -> None:
+        # embedding is intentionally IGNORED: the palace embeds internally via
+        # ChromaDB. Passing a vector through here would stand up a second,
+        # divergent embedding pipeline for the same content.
         payload = json.dumps(
             {
                 "tool": "mempalace_add_drawer",
@@ -241,23 +278,56 @@ class AmplifierDataMemoryStore:
         source: str = "",
         category: str | None = None,
         importance: float | None = None,
+        embedding: Sequence[float] | None = None,
     ) -> None:
         s = self.store
-        ref = s.write_cell(content.encode("utf-8"))  # type: ignore[attr-defined]
-        # wing/room scoping — content-addressed scope cells (idempotent refs).
-        s.scope(ref, s.write_cell(f"wing:{wing}".encode()))  # type: ignore[attr-defined]
-        s.scope(ref, s.write_cell(f"room:{room}".encode()))  # type: ignore[attr-defined]
-        # queryable KG facts; a fact's object must itself be a cell ref.
-        if source:
-            s.assert_fact(ref, "has_source", s.write_cell(source.encode()))  # type: ignore[attr-defined]
-        if category is not None:
-            s.assert_fact(  # type: ignore[attr-defined]
-                ref, "has_category", s.write_cell(str(category).encode())
-            )
-        if importance is not None:
-            s.assert_fact(  # type: ignore[attr-defined]
-                ref, "has_importance", s.write_cell(str(importance).encode())
-            )
+        if self._supports_atomic_update():
+            # Batch path: cell + 2 scope edges + facts + optional embedding,
+            # staged on ONE WriteBatch and committed as ONE atomic append_batch.
+            # Refs are knowable pre-commit (content addressing), so the staged
+            # graph wires exactly as the sequential path below does.
+            b = s.write_batch()  # type: ignore[attr-defined]
+            ref = b.write_cell(content.encode("utf-8"))
+            b.scope(ref, b.write_cell(f"wing:{wing}".encode()))
+            b.scope(ref, b.write_cell(f"room:{room}".encode()))
+            if source:
+                b.assert_fact(ref, "has_source", b.write_cell(source.encode()))
+            if category is not None:
+                b.assert_fact(
+                    ref, "has_category", b.write_cell(str(category).encode())
+                )
+            if importance is not None:
+                b.assert_fact(
+                    ref, "has_importance", b.write_cell(str(importance).encode())
+                )
+            if embedding is not None:
+                # Byte-identical to add_embedding's own packing (store.py):
+                # LE-f32, so E1/regeneration equivalence holds across paths.
+                from amplifier_data.lenses.vector import EMBEDDING_OF
+
+                vec = list(embedding)
+                emb_ref = b.write_cell(struct.pack(f"<{len(vec)}f", *vec))
+                b.relate(emb_ref, ref, EMBEDDING_OF)
+            ref = _resolve_batch_ref(b.commit(), ref)
+        else:
+            ref = s.write_cell(content.encode("utf-8"))  # type: ignore[attr-defined]
+            # wing/room scoping — content-addressed scope cells (idempotent refs).
+            s.scope(ref, s.write_cell(f"wing:{wing}".encode()))  # type: ignore[attr-defined]
+            s.scope(ref, s.write_cell(f"room:{room}".encode()))  # type: ignore[attr-defined]
+            # queryable KG facts; a fact's object must itself be a cell ref.
+            if source:
+                s.assert_fact(ref, "has_source", s.write_cell(source.encode()))  # type: ignore[attr-defined]
+            if category is not None:
+                s.assert_fact(  # type: ignore[attr-defined]
+                    ref, "has_category", s.write_cell(str(category).encode())
+                )
+            if importance is not None:
+                s.assert_fact(  # type: ignore[attr-defined]
+                    ref, "has_importance", s.write_cell(str(importance).encode())
+                )
+            if embedding is not None:
+                # Sequential path: the substrate's own add_embedding (dim-agnostic).
+                s.add_embedding(ref, list(embedding))  # type: ignore[attr-defined]
         self.filed.append(
             {
                 "ref": ref,
@@ -267,22 +337,125 @@ class AmplifierDataMemoryStore:
                 "source": source,
                 "category": category,
                 "importance": importance,
+                "embedding": list(embedding) if embedding is not None else None,
             }
         )
         return ref
 
-    def _supports_atomic_update(self) -> bool:
-        """True iff the substrate exposes a multi-event atomic primitive.
+    def search_vectors(
+        self, vector: Sequence[float], k: int, *, wing: str | None = None
+    ) -> list[tuple[Any, float]]:
+        """Top-k cosine over shadowed embeddings, optionally scoped to a wing.
 
-        amplifier-data does NOT expose one today (no ``update_fact``, no public
-        ``append_batch``); this is the Step-3 / T3D-2 addition owned by the
-        amplifier-data repo. We probe via getattr so this seam upgrades to the
-        atomic path automatically the moment the primitive lands upstream.
+        Verify-only read surface (§4a of the substrate-adapter-completion
+        design): scope ref is recomputed via ``write_cell(f"wing:{wing}")``
+        — content addressing makes this idempotent (no duplicate cell, same
+        ref) so no wing needs to have been filed through this call to query it.
         """
         s = self.store
-        return callable(getattr(s, "update_fact", None)) or callable(
-            getattr(s, "append_batch", None)
-        )
+        scope = s.write_cell(f"wing:{wing}".encode()) if wing else None  # type: ignore[attr-defined]
+        return s.query_vector(list(vector), k, scope=scope)  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------
+    # KG facts via anchor cells (§4b)
+    # ------------------------------------------------------------------
+
+    def _anchor(self, name: str) -> Any:
+        """Content-addressed anchor cell for a string KG entity (``entity:{name}``).
+
+        Palace KG entities are strings; substrate facts are ``(Hash, str, Hash)``.
+        Content addressing makes this mapping deterministic, idempotent, and
+        collision-free against the existing ``wing:``/``room:`` scope cells.
+        """
+        return self.store.write_cell(f"entity:{name}".encode("utf-8"))  # type: ignore[attr-defined]
+
+    def assert_kg(self, subject: str, predicate: str, object: str) -> None:  # noqa: A002
+        """Palace-shaped KG assert: strings in, anchor-cell fact in the substrate."""
+        s = self.store
+        s.assert_fact(self._anchor(subject), predicate, self._anchor(object))  # type: ignore[attr-defined]
+
+    def invalidate_kg(self, subject: str, predicate: str, object: str) -> None:  # noqa: A002
+        s = self.store
+        s.invalidate_fact(self._anchor(subject), predicate, self._anchor(object))  # type: ignore[attr-defined]
+
+    def query_kg(
+        self, subject: str | None = None, predicate: str | None = None
+    ) -> list[tuple[str, str, str]]:
+        """Currently-valid facts; anchor refs resolved back to entity strings
+        via ``regenerate(record_access=False)``. Verify-only read surface."""
+        s = self.store
+        subj_ref = self._anchor(subject) if subject is not None else None
+        res = s.query_facts(subject=subj_ref, predicate=predicate)  # type: ignore[attr-defined]
+        out: list[tuple[str, str, str]] = []
+        for fact in res.output:
+            subj_name = self._resolve_anchor(fact.subject)
+            obj_name = self._resolve_anchor(fact.object)
+            out.append((subj_name, fact.predicate, obj_name))
+        return out
+
+    def _resolve_anchor(self, ref: Any) -> str:
+        """Resolve an anchor cell ref back to its ``entity:{name}`` string."""
+        s = self.store
+        payload = s.regenerate(ref, record_access=False).payload.decode("utf-8")  # type: ignore[attr-defined]
+        prefix = "entity:"
+        return payload[len(prefix) :] if payload.startswith(prefix) else payload
+
+    def kg_timeline(self, subject: str) -> list[dict[str, Any]]:
+        """SeqPos-ordered assert/invalidate history for one entity (wraps
+        ``store.timeline(self._anchor(subject))``)."""
+        s = self.store
+        entries = s.timeline(self._anchor(subject))  # type: ignore[attr-defined]
+        return [
+            {
+                "seq_pos": e.seq_pos,
+                "op": e.op,
+                "predicate": e.predicate,
+                "object": self._resolve_anchor(e.object),
+            }
+            for e in entries
+        ]
+
+    # ------------------------------------------------------------------
+    # Diary entries → cells (§4c)
+    # ------------------------------------------------------------------
+
+    def file_diary(self, *, agent_name: str, entry: str, topic: str = "general") -> Any:
+        """Diary entry as a cell, scoped to the agent and the topic.
+
+        Scope cells: ``agent:{agent_name}`` (per-agent scope — a scope axis
+        orthogonal to wings) and ``room:{topic}`` (reuses the existing room
+        convention). A ``has_source`` fact marks provenance (``diary:{agent_name}``).
+        Atomic batch when supported (§4d), sequential fallback otherwise.
+        """
+        s = self.store
+        if self._supports_atomic_update():
+            b = s.write_batch()  # type: ignore[attr-defined]
+            ref = b.write_cell(entry.encode("utf-8"))
+            b.scope(ref, b.write_cell(f"agent:{agent_name}".encode()))
+            b.scope(ref, b.write_cell(f"room:{topic}".encode()))
+            b.assert_fact(
+                ref, "has_source", b.write_cell(f"diary:{agent_name}".encode())
+            )
+            ref = _resolve_batch_ref(b.commit(), ref)
+        else:
+            ref = s.write_cell(entry.encode("utf-8"))  # type: ignore[attr-defined]
+            s.scope(ref, s.write_cell(f"agent:{agent_name}".encode()))  # type: ignore[attr-defined]
+            s.scope(ref, s.write_cell(f"room:{topic}".encode()))  # type: ignore[attr-defined]
+            s.assert_fact(  # type: ignore[attr-defined]
+                ref, "has_source", s.write_cell(f"diary:{agent_name}".encode())
+            )
+        return ref
+
+    def _supports_atomic_update(self) -> bool:
+        """True iff the backend exposes the WriteBatch atomic primitive.
+
+        Direct AmplifierStore: yes (envelope.WriteBatch, shipped at c1107b4).
+        GatewayClient: yes (the gateway 'batch' tool).
+        RemoteStore: NO — the companion server has no batch endpoint; the seam
+        degrades to the sequential path and records atomic=False honestly.
+        """
+        s = self.store
+        return callable(getattr(s, "write_batch", None))
 
     def update_importance(
         self,
@@ -297,19 +470,46 @@ class AmplifierDataMemoryStore:
     ) -> MutationRecord:
         """T1-MEM-2: replace a drawer's ``has_importance`` fact (UPDATE, not add).
 
-        Atomic WHEN the substrate supports it; otherwise a sequential
-        invalidate+assert that the MutationRecord (atomic=False) + rollback
-        handle make recoverable. Carries the full mutation contract. Intended
-        to run async / post-turn, never on the hot path.
+        Atomic WHEN the substrate supports it (``write_batch``, shipped in
+        amplifier-data's ``envelope`` module): the invalidate-old + assert-new
+        pair lands in ONE ``kernel.append_batch`` call, all-or-nothing.
+        Otherwise a sequential invalidate+assert that the MutationRecord
+        (atomic=False) + rollback handle make recoverable. Carries the full
+        mutation contract. Intended to run async / post-turn, never on the
+        hot path.
         """
         s = self.store
-        new_ref = s.write_cell(str(new_importance).encode())  # type: ignore[attr-defined]
-        old_ref = (
-            s.write_cell(str(old_importance).encode())  # type: ignore[attr-defined]
-            if old_importance is not None
-            else None
-        )
         atomic = self._supports_atomic_update()
+        if atomic:
+            # ONE atomic batch: stage the invalidate-old relate (WriteBatch has
+            # no invalidate_fact sugar -- the __invalidate__:-prefixed relate IS
+            # the documented reserved-type convention) + assert-new, commit once.
+            from amplifier_data.lenses.temporal import INVALIDATE_PREFIX
+
+            b = s.write_batch()  # type: ignore[attr-defined]
+            new_ref = b.write_cell(str(new_importance).encode())
+            old_ref = (
+                b.write_cell(str(old_importance).encode())
+                if old_importance is not None
+                else None
+            )
+            if old_ref is not None:
+                b.relate(subject, old_ref, INVALIDATE_PREFIX + "has_importance")
+            b.assert_fact(subject, "has_importance", new_ref)
+            b.commit()
+        else:
+            new_ref = s.write_cell(str(new_importance).encode())  # type: ignore[attr-defined]
+            old_ref = (
+                s.write_cell(str(old_importance).encode())  # type: ignore[attr-defined]
+                if old_importance is not None
+                else None
+            )
+            # Degraded sequential path. NOT atomic: a crash between the two
+            # leaves the fact invalidated-but-not-reasserted. Recoverable via
+            # the rollback handle on the returned record.
+            if old_ref is not None:
+                s.invalidate_fact(subject, "has_importance", old_ref)  # type: ignore[attr-defined]
+            s.assert_fact(subject, "has_importance", new_ref)  # type: ignore[attr-defined]
         delta = ReversibleDelta(
             subject=str(subject),
             predicate="has_importance",
@@ -324,17 +524,6 @@ class AmplifierDataMemoryStore:
             atomic=atomic,
             interaction_id=interaction_id,
         )
-        update_fact = getattr(s, "update_fact", None)
-        if atomic and callable(update_fact):
-            # Future amplifier-data atomic primitive (T3D-2): one batch.
-            update_fact(subject, "has_importance", old_ref, new_ref)
-        else:
-            # Degraded sequential path. NOT atomic: a crash between the two
-            # leaves the fact invalidated-but-not-reasserted. Recoverable via
-            # the rollback handle on the returned record.
-            if old_ref is not None:
-                s.invalidate_fact(subject, "has_importance", old_ref)  # type: ignore[attr-defined]
-            s.assert_fact(subject, "has_importance", new_ref)  # type: ignore[attr-defined]
         record = record.mark_applied()
         self.mutations.append(record)
         return record
@@ -384,6 +573,7 @@ class DualWriteMemoryStore:
         source: str = "",
         category: str | None = None,
         importance: float | None = None,
+        embedding: Sequence[float] | None = None,
     ) -> None:
         self.primary.file(
             wing=wing,
@@ -392,6 +582,7 @@ class DualWriteMemoryStore:
             source=source,
             category=category,
             importance=importance,
+            embedding=embedding,
         )
         try:
             self.shadow.file(
@@ -401,6 +592,7 @@ class DualWriteMemoryStore:
                 source=source,
                 category=category,
                 importance=importance,
+                embedding=embedding,
             )
         except Exception as exc:  # shadow must never break the source of truth
             self.shadow_errors.append(f"{type(exc).__name__}: {exc}")

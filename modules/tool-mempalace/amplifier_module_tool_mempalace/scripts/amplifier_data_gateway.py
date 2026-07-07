@@ -37,6 +37,11 @@ from typing import Any
 _LOCALHOST = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 _DEFAULT_TOKEN_PATH = Path.home() / ".amplifier" / "amplifier-data-token"
 
+#: Reserved-type invalidate prefix (CONSUMER_INTEGRATION §2), duplicated here
+#: (not imported from amplifier_data) so GatewayClient stays stdlib-only — a
+#: process driving the gateway client never needs amplifier-data installed.
+_INVALIDATE_PREFIX = "__invalidate__:"
+
 
 # ---------------------------------------------------------------------------
 # Token management
@@ -134,6 +139,53 @@ def make_gateway(
                     for f in res.output
                 ],
             }
+        if tool == "add_embedding":
+            with lock:
+                ref = store.add_embedding(args["target_ref"], list(args["vector"]))
+            return {"ref": str(ref)}
+        if tool == "query_vector":
+            # Read op, consistent with the existing read dispatch (query_facts,
+            # graph_neighbors) -- no lock needed (D4: no AccessEvents either).
+            hits = store.query_vector(
+                list(args["vector"]), args["k"], scope=args.get("scope")
+            )
+            return {"results": [[str(ref), float(score)] for ref, score in hits]}
+        if tool == "batch":
+            # One HTTP call = one atomic commit. Ops reference each other via
+            # client-minted pending tokens (opaque strings) resolved here as
+            # write_cell ops execute in order -- the server never trusts the
+            # client to have computed a real content-addressed ref itself.
+            with lock:
+                wb = store.write_batch()
+                token_map: dict[str, str] = {}
+
+                def _resolve(ref: str) -> str:
+                    return token_map.get(ref, ref)
+
+                for op in args["ops"]:
+                    kind = op["op"]
+                    if kind == "write_cell":
+                        payload = base64.b64decode(op["payload_b64"])
+                        ref = wb.write_cell(payload)
+                        token_map[op["token"]] = str(ref)
+                    elif kind == "relate":
+                        wb.relate(
+                            _resolve(op["from_ref"]),
+                            _resolve(op["to_ref"]),
+                            op["rel_type"],
+                        )
+                    elif kind == "assert_fact":
+                        wb.assert_fact(
+                            _resolve(op["subject"]),
+                            op["predicate"],
+                            _resolve(op["object"]),
+                        )
+                    elif kind == "scope":
+                        wb.scope(_resolve(op["cell_ref"]), _resolve(op["scope_ref"]))
+                    else:
+                        raise ValueError(f"unknown batch op: {kind}")
+                wb.commit()
+            return {"refs": token_map}
         raise ValueError(f"unknown tool: {tool}")
 
     class _Handler(BaseHTTPRequestHandler):
@@ -249,6 +301,93 @@ class GatewayClient:
                 _Fact(f["subject"], f["predicate"], f["object"]) for f in out["output"]
             ],
         )
+
+    def add_embedding(self, target_ref: str, vector: Any) -> str:
+        return self._call(
+            "add_embedding", {"target_ref": target_ref, "vector": list(vector)}
+        )["ref"]
+
+    def query_vector(
+        self, vector: Any, k: int, scope: str | None = None
+    ) -> list[tuple[str, float]]:
+        out = self._call(
+            "query_vector", {"vector": list(vector), "k": k, "scope": scope}
+        )
+        return [(ref, float(score)) for ref, score in out["results"]]
+
+    def write_batch(self) -> "GatewayWriteBatch":
+        """Open a :class:`GatewayWriteBatch` — one HTTP call = one atomic commit.
+
+        Mirrors :meth:`amplifier_data.store.AmplifierStore.write_batch`'s
+        surface (write_cell/relate/assert_fact/scope/commit) without
+        replicating the substrate's content-addressing client-side: staged
+        ``write_cell`` calls return opaque pending tokens, resolved to real
+        refs by the server as it executes the batch in order.
+        """
+        return GatewayWriteBatch(self)
+
+
+class GatewayWriteBatch:
+    """Client-side staging shim for the gateway's atomic ``batch`` tool.
+
+    Refs from staged ``write_cell`` calls are opaque pending tokens (NOT real
+    content-addressed hashes — computing those client-side would replicate
+    the substrate's addressing algorithm, which the design deliberately
+    avoids). Tokens are valid as ``relate``/``assert_fact``/``scope``
+    arguments within the SAME batch; :meth:`commit` resolves them to real
+    refs and returns ``{token: ref}``.
+    """
+
+    def __init__(self, client: "GatewayClient") -> None:
+        self._client = client
+        self._ops: list[dict[str, Any]] = []
+        self._next_token = 0
+
+    def write_cell(self, payload: bytes, interpreters: tuple[Any, ...] = ()) -> str:
+        token = f"$pending:{self._next_token}"
+        self._next_token += 1
+        self._ops.append(
+            {
+                "op": "write_cell",
+                "token": token,
+                "payload_b64": base64.b64encode(payload).decode(),
+            }
+        )
+        return token
+
+    def relate(self, from_ref: str, to_ref: str, rel_type: str) -> "GatewayWriteBatch":
+        self._ops.append(
+            {"op": "relate", "from_ref": from_ref, "to_ref": to_ref, "rel_type": rel_type}
+        )
+        return self
+
+    def assert_fact(self, subject: str, predicate: str, object: str) -> "GatewayWriteBatch":  # noqa: A002
+        self._ops.append(
+            {"op": "assert_fact", "subject": subject, "predicate": predicate, "object": object}
+        )
+        return self
+
+    def scope(self, cell_ref: str, scope_ref: str) -> "GatewayWriteBatch":
+        self._ops.append({"op": "scope", "cell_ref": cell_ref, "scope_ref": scope_ref})
+        return self
+
+    @property
+    def staged(self) -> list[dict[str, Any]]:
+        return list(self._ops)
+
+    def __len__(self) -> int:
+        return len(self._ops)
+
+    def commit(self) -> dict[str, str]:
+        """Commit every staged op in ONE atomic HTTP call; return ``{token: ref}``.
+
+        A no-op (returns ``{}``) when nothing was staged — mirrors
+        :meth:`amplifier_data.envelope.WriteBatch.commit`.
+        """
+        if not self._ops:
+            return {}
+        out = self._client._call("batch", {"ops": self._ops})
+        return out["refs"]
 
 
 # ---------------------------------------------------------------------------

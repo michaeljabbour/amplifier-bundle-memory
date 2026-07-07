@@ -34,6 +34,7 @@ def write_cells(cells: list[dict[str, Any]], store: MemoryStore) -> int:
             source=cell.get("source", ""),
             category=cell.get("category"),
             importance=cell.get("importance"),
+            embedding=cell.get("embedding"),
         )
         count += 1
     return count

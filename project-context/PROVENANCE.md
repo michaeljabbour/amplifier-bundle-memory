@@ -45,6 +45,62 @@ one-class change, with the gap explicit rather than silent.
 **Open fork for Michael:** commit to amplifier-data (fund persistence + vector
 lens) vs. stay on the palace and keep amplifier-data concept-only. Phase 3 gated
 on this.
+**(Superseded by D5, 2026-07-07 — the stub described here was completed.)**
+
+### D5 — Substrate seam completed (supersedes D4's "stub" status)
+**Date:** 2026-07-07. Implements
+`docs/plans/2026-07-07-substrate-adapter-completion-design.md`.
+
+**Fork resolution:** D4's "open fork" (commit to amplifier-data vs. stay
+palace-only) resolved toward **composition**: amplifier-data's persistence
+(durable `DurableKernel`/Rust) and vector lens (dim-agnostic `query_vector`/
+`add_embedding`) DID land upstream (verified against amplifier-data at HEAD
+`09482f1`). The seam is no longer a stub — it is a completed consumer
+adapter with three interchangeable backends (direct `AmplifierStore`,
+`RemoteStore` via the companion server, authed `GatewayClient`), a
+`DualWriteMemoryStore` fan-out, an opt-in capture-hook AND tool-op shadow, and
+a §8 migration/read-verify harness (`dualwrite_compare.py`).
+
+**Seam status (what now routes through amplifier-data):**
+- **Drawers** — `write_cell` + `wing:`/`room:` scope cells + source/category/
+  importance facts (unchanged from D4, now atomic — see below).
+- **Embeddings** — `file(..., embedding=v)` transports a caller-supplied
+  vector to `add_embedding`/the batch path; `search_vectors(v, k, wing=...)`
+  is the verify-only read. The seam NEVER computes embeddings itself (bundle
+  policy per COMPOSITION.md stays with the embedder, e.g. ChromaDB's
+  `text-embedding-3-small`); it is dim-agnostic by construction.
+- **KG facts** — anchor-cell encoding: a palace string entity (e.g.
+  `"svc-a"`) maps to a content-addressed `entity:{name}` cell so
+  `assert_kg`/`invalidate_kg`/`query_kg`/`kg_timeline` can carry palace-shaped
+  string triples onto substrate `(Hash, str, Hash)` facts. Serves both the
+  `tool-mempalace` `kg` op (shadowed best-effort via `_shadow_kg`) and
+  Phase-3 curator facts (`has_importance`/`has_category`/`duplicates`/
+  `related_to`) — no special-casing, same `assert_kg` surface.
+- **Diary** — `file_diary(agent_name, entry, topic)` introduces a NEW scope
+  axis, `agent:{agent_name}`, orthogonal to `wing:`/`room:`. Shadowed
+  best-effort from the palace `diary write` op via `_shadow_diary`.
+
+**The `write_batch` probe decision:** the old probe
+(`getattr(s, "update_fact")` / `getattr(s, "append_batch")`) never fired —
+amplifier-data shipped the real primitive under a different name,
+`AmplifierStore.write_batch() -> WriteBatch` (envelope.py). The probe is
+rewritten to `callable(getattr(self.store, "write_batch", None))`. On a
+capable backend (direct `AmplifierStore`, or `GatewayClient` via the new
+gateway `batch` tool), `file()`/`file_diary()`/`update_importance()` stage
+their writes on ONE `WriteBatch` and commit as ONE atomic `append_batch` — a
+crash mid-way leaves NO half-written state. `RemoteStore` has no batch
+endpoint and degrades honestly: sequential path, `MutationRecord.atomic=False`.
+
+**Deliberately deferred (recorded as decisions, not gaps):**
+- **`Transaction` adoption** — `MutationRecord` + `rollback()` already cover
+  multi-call recovery, and every multi-write flow in this repo fits in one
+  `WriteBatch`. Revisit only when a flow genuinely needs cross-commit
+  rollback.
+- **Read-path cutover** — the palace remains the ONLY production read
+  source. The new `dualwrite_compare.py` checks (vector self-retrieval, KG
+  assert/invalidate/timeline, scope-query consistency, diary round-trip) are
+  verification that the substrate COULD answer, not a migration. Cutover
+  policy is a future design decision.
 
 ### Process note — test placement
 Discovered that repo-root `tests/` is DTU-gated (skipped outside the

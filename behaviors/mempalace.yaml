@@ -122,6 +122,16 @@ tools:
     config:
       palace_path: "~/.mempalace"
       garden_max_drawers: 200         # NEW: budget cap for garden analysis
+      # NEW: running shadow -- best-effort dual-write of kg add/invalidate and
+      # diary write ops to amplifier-data through the authed gateway. OPT-IN,
+      # disabled by default. Same schema as hooks-mempalace-capture's
+      # shadow_gateway (one knob vocabulary across the bundle). Requires the
+      # gateway service running (mempalace-amplifier-data-gateway); the palace
+      # stays the source of truth, shadow failures never block the palace op.
+      # shadow_gateway:
+      #   enabled: true
+      #   base_url: "http://127.0.0.1:8799"
+      #   token_file: "~/.amplifier/amplifier-data-token"
 
   # SQLite fact store for explicit key-value memories the palace doesn't need.
   # Complementary to tool-mempalace — not duplicative (different retrieval model).
