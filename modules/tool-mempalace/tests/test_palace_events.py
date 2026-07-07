@@ -79,7 +79,7 @@ class TestEventsReturnsJson:
             )
 
         tool = PalaceTool()
-        result = _run(tool.execute(operation="events", session_id=sid))
+        result = _run(tool.execute({"operation": "events", "session_id": sid}))
 
         payload = _result_json(result)
 
@@ -113,7 +113,7 @@ class TestEventsReturnsJson:
             )
 
         tool = PalaceTool()
-        result = _run(tool.execute(operation="events", session_id=sid, limit=3))
+        result = _run(tool.execute({"operation": "events", "session_id": sid, "limit": 3}))
         payload = _result_json(result)
 
         assert payload["returned"] == 3
@@ -135,7 +135,9 @@ class TestEventsReturnsJson:
 
         tool = PalaceTool()
         result = _run(
-            tool.execute(operation="events", session_id=sid, limit=3, tail=False)
+            tool.execute(
+                {"operation": "events", "session_id": sid, "limit": 3, "tail": False}
+            )
         )
         payload = _result_json(result)
 
@@ -152,7 +154,7 @@ class TestEventsReturnsJson:
             emit_event("mempalace-capture", "drawer_filed", session_id=sid, data={})
 
         tool = PalaceTool()
-        result = _run(tool.execute(operation="events", session_id=sid, limit=9999))
+        result = _run(tool.execute({"operation": "events", "session_id": sid, "limit": 9999}))
         payload = _result_json(result)
 
         # Should not error; returns what's available (≤ 200)
@@ -181,9 +183,11 @@ class TestEventsWithFilters:
         # Filter by hook only
         result = _run(
             tool.execute(
-                operation="events",
-                session_id=sid,
-                hook_filter="mempalace-capture",
+                {
+                    "operation": "events",
+                    "session_id": sid,
+                    "hook_filter": "mempalace-capture",
+                }
             )
         )
         payload = _result_json(result)
@@ -193,9 +197,11 @@ class TestEventsWithFilters:
         # Filter by event_type only
         result2 = _run(
             tool.execute(
-                operation="events",
-                session_id=sid,
-                event_filter="drawer_filed",
+                {
+                    "operation": "events",
+                    "session_id": sid,
+                    "event_filter": "drawer_filed",
+                }
             )
         )
         payload2 = _result_json(result2)
@@ -205,10 +211,12 @@ class TestEventsWithFilters:
         # Filter by both hook + event
         result3 = _run(
             tool.execute(
-                operation="events",
-                session_id=sid,
-                hook_filter="mempalace-capture",
-                event_filter="capture_skipped",
+                {
+                    "operation": "events",
+                    "session_id": sid,
+                    "hook_filter": "mempalace-capture",
+                    "event_filter": "capture_skipped",
+                }
             )
         )
         payload3 = _result_json(result3)
@@ -221,7 +229,9 @@ class TestEventsEmptySession:
         """Unknown session_id → event_count: 0, returned: 0, events: [] — no error."""
         tool = PalaceTool()
         result = _run(
-            tool.execute(operation="events", session_id="nonexistent_session_xyz_abc")
+            tool.execute(
+                {"operation": "events", "session_id": "nonexistent_session_xyz_abc"}
+            )
         )
         payload = _result_json(result)
 
@@ -237,7 +247,7 @@ class TestEventsEmptySession:
         monkeypatch.setattr(ee, "_mempalace_base", lambda: None)
 
         tool = PalaceTool()
-        result = _run(tool.execute(operation="events", session_id="some_session"))
+        result = _run(tool.execute({"operation": "events", "session_id": "some_session"}))
         payload = _result_json(result)
 
         assert payload["event_count"] == 0
@@ -260,7 +270,7 @@ class TestEventsEmptySession:
         emit_event("mempalace-capture", "drawer_filed", session_id=sid, data={"n": 2})
 
         tool = PalaceTool()
-        result = _run(tool.execute(operation="events", session_id=sid))
+        result = _run(tool.execute({"operation": "events", "session_id": sid}))
         payload = _result_json(result)
 
         assert payload["event_count"] == 3, f"Expected 3 valid events, got {payload}"

@@ -178,10 +178,12 @@ class TestGardenBudgetCap:
             tool = PalaceTool()
             _run(
                 tool.execute(
-                    operation="garden",
-                    wing="wing_test",
-                    max_drawers=10,
-                    cluster_threshold=0.80,
+                    {
+                        "operation": "garden",
+                        "wing": "wing_test",
+                        "max_drawers": 10,
+                        "cluster_threshold": 0.80,
+                    }
                 )
             )
 
@@ -233,9 +235,11 @@ class TestGardenBudgetCap:
             tool = PalaceTool()
             _run(
                 tool.execute(
-                    operation="garden",
-                    wing="wing_test",
-                    max_drawers=9999,  # should be clamped to 500
+                    {
+                        "operation": "garden",
+                        "wing": "wing_test",
+                        "max_drawers": 9999,  # should be clamped to 500
+                    }
                 )
             )
 
@@ -382,9 +386,11 @@ class TestCrossRoomDetection:
             tool = PalaceTool()
             _run(
                 tool.execute(
-                    operation="garden",
-                    wing="wing_x",
-                    max_drawers=50,
+                    {
+                        "operation": "garden",
+                        "wing": "wing_x",
+                        "max_drawers": 50,
+                    }
                 )
             )
 
@@ -605,9 +611,11 @@ class TestGardenTotalTimeout:
         ):
             tool = PalaceTool()
             result = await tool.execute(
-                operation="garden",
-                wing="wing_test",
-                max_drawers=50,
+                {
+                    "operation": "garden",
+                    "wing": "wing_test",
+                    "max_drawers": 50,
+                }
             )
 
         # Should return a timeout error (not hang until all 50 × 0.2s = 10s complete)
@@ -655,7 +663,7 @@ class TestGardenTotalTimeout:
         ):
             tool = PalaceTool()
             result = await tool.execute(
-                operation="garden", wing="wing_t", max_drawers=20
+                {"operation": "garden", "wing": "wing_t", "max_drawers": 20}
             )
 
         assert not result.success
@@ -690,7 +698,7 @@ class TestGardenIntegration:
     def test_garden_operation_accepted(self) -> None:
         """Garden operation completes without error (real palace)."""
         tool = PalaceTool()
-        result = _run(tool.execute(operation="garden", wing="wing_test", max_drawers=5))
+        result = _run(tool.execute({"operation": "garden", "wing": "wing_test", "max_drawers": 5}))
         payload = _result_json(result)
         assert "drawers_analyzed" in payload
         assert "clusters" in payload

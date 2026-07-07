@@ -83,7 +83,7 @@ class TestSimplePassthroughOperations:
             tm, "_mcp_call", lambda name, args: {"ok": True, "tool": name}
         )
         tool = PalaceTool()
-        result = _run(tool.execute(operation=operation, **kwargs))
+        result = _run(tool.execute({"operation": operation, **kwargs}))
         _assert_contract_success(result)
         assert mcp_tool_name in result.output
 
@@ -101,7 +101,7 @@ class TestSimplePassthroughOperations:
             lambda name, args: {"error": "mempalace-mcp unavailable"},
         )
         tool = PalaceTool()
-        result = _run(tool.execute(operation=operation, **kwargs))
+        result = _run(tool.execute({"operation": operation, **kwargs}))
         _assert_contract_failure(result)
         assert "mempalace-mcp unavailable" in result.error["message"]
 
@@ -120,12 +120,14 @@ class TestKgOperation:
         tool = PalaceTool()
         result = _run(
             tool.execute(
-                operation="kg",
-                kg_action=kg_action,
-                entity="e",
-                subject="s",
-                predicate="p",
-                object="o",
+                {
+                    "operation": "kg",
+                    "kg_action": kg_action,
+                    "entity": "e",
+                    "subject": "s",
+                    "predicate": "p",
+                    "object": "o",
+                }
             )
         )
         _assert_contract_success(result)
@@ -137,12 +139,14 @@ class TestKgOperation:
         tool = PalaceTool()
         result = _run(
             tool.execute(
-                operation="kg",
-                kg_action=kg_action,
-                entity="e",
-                subject="s",
-                predicate="p",
-                object="o",
+                {
+                    "operation": "kg",
+                    "kg_action": kg_action,
+                    "entity": "e",
+                    "subject": "s",
+                    "predicate": "p",
+                    "object": "o",
+                }
             )
         )
         _assert_contract_failure(result)
@@ -163,10 +167,12 @@ class TestDiaryOperation:
         tool = PalaceTool()
         result = _run(
             tool.execute(
-                operation="diary",
-                diary_action=diary_action,
-                agent_name="curator",
-                entry="an entry",
+                {
+                    "operation": "diary",
+                    "diary_action": diary_action,
+                    "agent_name": "curator",
+                    "entry": "an entry",
+                }
             )
         )
         _assert_contract_success(result)
@@ -180,10 +186,12 @@ class TestDiaryOperation:
         tool = PalaceTool()
         result = _run(
             tool.execute(
-                operation="diary",
-                diary_action=diary_action,
-                agent_name="curator",
-                entry="an entry",
+                {
+                    "operation": "diary",
+                    "diary_action": diary_action,
+                    "agent_name": "curator",
+                    "entry": "an entry",
+                }
             )
         )
         _assert_contract_failure(result)
@@ -210,7 +218,7 @@ class TestMineOperation:
             lambda *a, **k: _FakeCompletedProcess(0, stdout="mined 3 files"),
         )
         tool = PalaceTool()
-        result = _run(tool.execute(operation="mine", path="."))
+        result = _run(tool.execute({"operation": "mine", "path": "."}))
         _assert_contract_success(result)
         assert "mined 3 files" in result.output
 
@@ -228,7 +236,7 @@ class TestMineOperation:
             ),
         )
         tool = PalaceTool()
-        result = _run(tool.execute(operation="mine", path="."))
+        result = _run(tool.execute({"operation": "mine", "path": "."}))
         _assert_contract_failure(result)
         assert "no palace initialized" in result.error["message"]
 
@@ -240,7 +248,7 @@ class TestMineOperation:
 
         monkeypatch.setattr(subprocess, "run", raise_timeout)
         tool = PalaceTool()
-        result = _run(tool.execute(operation="mine", path="."))
+        result = _run(tool.execute({"operation": "mine", "path": "."}))
         _assert_contract_failure(result)
         assert "timed out" in result.error["message"].lower()
 
@@ -252,7 +260,7 @@ class TestMineOperation:
 
         monkeypatch.setattr(subprocess, "run", raise_fnf)
         tool = PalaceTool()
-        result = _run(tool.execute(operation="mine", path="."))
+        result = _run(tool.execute({"operation": "mine", "path": "."}))
         _assert_contract_failure(result)
         assert "mempalace" in result.error["message"].lower()
 
@@ -264,7 +272,7 @@ class TestMineOperation:
 
         monkeypatch.setattr(subprocess, "run", raise_boom)
         tool = PalaceTool()
-        result = _run(tool.execute(operation="mine", path="."))
+        result = _run(tool.execute({"operation": "mine", "path": "."}))
         _assert_contract_failure(result)
         assert "boom" in result.error["message"]
 
@@ -276,6 +284,53 @@ class TestMineOperation:
 
 def test_unknown_operation_returns_success_false_with_error() -> None:
     tool = PalaceTool()
-    result = _run(tool.execute(operation="not_a_real_operation"))
+    result = _run(tool.execute({"operation": "not_a_real_operation"}))
     _assert_contract_failure(result)
     assert "not_a_real_operation" in result.error["message"]
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator calling convention (protocol shape) -- the regression this
+# module shipped in production: `Tool.execute` MUST accept a single
+# positional dict, matching amplifier_core.interfaces.Tool.execute(self,
+# input: dict[str, Any]). The real loop orchestrator calls
+# `await tool.execute(tool_call.arguments)` -- a raw dict, positional,
+# never kwargs-expanded. A signature of
+# `execute(self, operation: str, **kwargs)` silently binds the ENTIRE
+# arguments dict to `operation`, so every real call falls through to the
+# "Unknown operation" branch. Tests that call `execute(operation=..., **kw)`
+# never catch this because they bypass the orchestrator's calling
+# convention entirely.
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorCallingConvention:
+    def test_execute_matches_orchestrator_calling_convention(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pin the exact convention loop orchestrators use:
+        tool.execute(tool_call.arguments) -- one positional dict, no kwargs.
+        """
+        monkeypatch.setattr(
+            tm, "_mcp_call", lambda name, args: {"ok": True, "tool": name}
+        )
+        tool = PalaceTool()
+        result = _run(tool.execute({"operation": "status"}))
+        _assert_contract_success(result)
+        assert "mempalace_status" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Missing operation key -- must fail loudly, never crash
+# ---------------------------------------------------------------------------
+
+
+class TestMissingOperationEdgeCase:
+    def test_execute_with_empty_dict_returns_failure_not_crash(self) -> None:
+        """execute({}) -- no `operation` key at all -- must return
+        success=False with a clear error message, never raise."""
+        tool = PalaceTool()
+        result = _run(tool.execute({}))
+        _assert_contract_failure(result)
+        assert "Unknown operation" in result.error["message"]
+

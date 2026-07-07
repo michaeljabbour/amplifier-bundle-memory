@@ -342,7 +342,9 @@ class PalaceTool(Tool):
         "required": ["operation"],
     }
 
-    async def execute(self, operation: str, **kwargs: Any) -> ToolResult:  # type: ignore[override]
+    async def execute(self, input: dict[str, Any]) -> ToolResult:
+        operation = input.get("operation", "")
+        kwargs = {k: v for k, v in input.items() if k != "operation"}
         try:
             if operation == "search":
                 args: dict[str, Any] = {
