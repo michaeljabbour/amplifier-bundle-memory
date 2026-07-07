@@ -11,6 +11,13 @@ requires-python = ">=3.11"
 dependencies = [
     "amplifier-core",
     "amplifier-module-tool-memory>=1.0.0",
+    # Mirror of tool-memory's amplifier-data pin -- MUST move in lockstep
+    # with modules/tool-memory/pyproject.toml (same SHA). Module activation
+    # installs with `uv pip install --no-sources`, and uv rejects
+    # *transitive* URL dependencies ("URL dependencies must be expressed as
+    # direct requirements") -- so every module that depends on tool-memory
+    # must restate the pin directly.
+    "amplifier-data @ git+https://github.com/michaeljabbour/amplifier-data@09482f1fa569ba8407894cad3a32f8ab6aecbc3d",
 ]
 
 [project.entry-points."amplifier.modules"]
