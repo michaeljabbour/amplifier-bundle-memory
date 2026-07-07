@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sequence
 from typing import Any
 from unittest.mock import patch
 
@@ -410,7 +411,7 @@ from datetime import UTC, datetime, timedelta  # noqa: E402
 class TestLookbackFilter:
     """Verify that _get_drawers_in_scope applies the lookback_days filter."""
 
-    def _make_fake_mcp(self, drawers_with_ts: list[tuple[str, str | None]]) -> Any:
+    def _make_fake_mcp(self, drawers_with_ts: Sequence[tuple[str, str | None]]) -> Any:
         """Return a fake _mcp_call function that serves the given drawers.
 
         Each item is (drawer_id, iso_timestamp_or_None).

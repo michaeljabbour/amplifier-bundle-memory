@@ -1,6 +1,41 @@
 # Handoff
 
-*Last updated: 2026-07-07 — substrate adapter completed, MCP transport bug fixed, DTU-validated 5/5*
+*Last updated: 2026-07-07 — substrate adapter complete + DTU-validated; external user-report fixes: palace ToolResult contract, interject store alignment + privacy defaults*
+
+## TL;DR for Michael (2026-07-07, third pass — external user report fixes)
+
+A real external user (fresh install, isolated session, mempalace 3.5.0 from PyPI) reported four issues; all four addressed:
+
+1. **Palace tool swallowed ALL failures** — every branch of `PalaceTool.execute` built
+   `ToolResult(content=..., is_error=True)`, but amplifier-core's `ToolResult` is a pydantic
+   model (`success`/`output`/`error`) that silently DROPS unknown kwargs — so every call
+   returned `success=True, output=None`, even hard failures. Fixed every construction site
+   (search/remember/status/kg/traverse/diary/mine/unknown-op/exception paths) via a single
+   `_mcp_result_to_tool_result()` mapper; `mine` now checks `returncode`. All three pyright
+   suppressions in tool-mempalace's pyproject REMOVED (two were dead weight — pydantic's
+   `**data: Any` init defeats pyright structurally — one was hiding 8 unrelated pre-existing
+   type errors, all fixed). Contract pinned by 28 new tests (`test_palace_tool_contract.py`):
+   every op × success/failure. tool-mempalace now 218 passed.
+2. **`mempalace mcp --call` never existed** — fixed earlier this session (758b0fd); the user's
+   report independently confirms the diagnosis.
+3. **Interject read the WRONG store** — it read `~/.mempalace/chroma` / collection
+   `mempalace_default`; mempalace 3.5.0 actually writes `~/.mempalace/palace` /
+   `mempalace_drawers` (verified from mempalace source). Raw chromadb access DELETED;
+   interject now searches via the real `mempalace-mcp` JSON-RPC surface (`mempalace_search`)
+   — same store, same server-side local embedding space (all-MiniLM-L6-v2 ONNX), structurally
+   no path/collection to get wrong. `test_store_alignment.py` pins agreement against the
+   installed mempalace. Dependency floor `mempalace>=3.5.0` (3.3.x has no `mempalace-mcp`
+   script). Real e2e proof: drawer filed via mempalace-mcp → interject `_mcp_search` found it.
+4. **Privacy** — interject's OpenAI query-embedding call deleted (dead code once search went
+   server-side); the `gpt-4.1-nano` LLM judge is now explicit opt-in (`llm_judge_enabled`,
+   default false — uncertain-band candidates simply aren't promoted). "Nothing leaves your
+   machine" claims in README/context/skill reconciled with an explicit exception note.
+
+**User's feature ask (BACKLOG, not built):** stable memory ids across the JSONL event log +
+a `memory_outcome` event, so downstream systems (their "jilog") can measure week-over-week
+whether memory improves sessions. Good idea, deliberately not rushed tonight — invite them
+to file issues; design alongside the event-emitter schema (`v` field exists for additive
+evolution).
 
 ## TL;DR for Michael (2026-07-07, later same session — MCP fix + DTU validation)
 

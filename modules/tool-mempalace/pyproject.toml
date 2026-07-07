@@ -79,7 +79,3 @@ testpaths = ["tests"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
 reportMissingImports = false
-# Pre-existing issues in __init__.py with ToolResult keyword args and Tool class vars
-reportCallIssue = false
-reportArgumentType = false
-reportAssignmentType = false

@@ -15,22 +15,61 @@ Design (from Amplifier expert consultation):
   - Priority: 20 (runs early, after critical instrumentation at 50+)
   - Per-turn guard flag prevents infinite loops on orchestrator:complete
 
+Read lane (fixed 2026-07-07 -- was reading the wrong store entirely)
+---------------------------------------------------------------------
+Previously this hook opened a ChromaDB ``PersistentClient`` directly at a
+hardcoded ``~/.mempalace/chroma`` path / ``mempalace_default`` collection.
+Neither value is real: mempalace (verified against the installed 3.5.0
+package, ``mempalace/config.py``) actually writes to ``~/.mempalace/palace``
+with collection ``mempalace_drawers``. The write lane (mempalace CLI /
+hooks-mempalace-capture) and this hook's read lane never shared a store --
+interject could never see anything the palace actually held, even after the
+MCP transport bug in tool-mempalace was fixed separately.
+
+The fix: this hook no longer touches ChromaDB (or any path/collection name)
+directly. It reads exclusively through mempalace's own supported surface --
+the ``mempalace_search`` tool over the real ``mempalace-mcp`` JSON-RPC-over-
+stdio server (same ``_call_mcp_tool`` pattern as hooks-mempalace-capture and
+hooks-mempalace-briefing). mempalace resolves its OWN configured palace path
+and collection name server-side, so there is no path/collection value left
+for this hook to get wrong -- read and write lanes are structurally the same
+store by construction. It also means this hook never embeds the query
+itself: mempalace embeds it internally with whatever local model the palace
+was actually written with (see Privacy below), so retrieval is always in
+the same vector space the drawers were stored in.
+
+Privacy
+-------
+By default this hook makes ZERO external network calls. Retrieval goes
+through mempalace's local ``mempalace_search`` (mempalace's own configured
+embedding model -- ``all-MiniLM-L6-v2`` via ONNX Runtime by default, fully
+offline; see ``mempalace/embedding.py``). The ONLY external call this hook
+can ever make is the OPTIONAL LLM judge (OpenAI ``gpt-4.1-nano``), used to
+refine borderline-relevance ("uncertain band") matches. It is gated behind
+``llm_judge_enabled`` (default ``False``) -- nothing leaves the machine
+unless a user explicitly opts in. When enabled, it sends the current query
+text and candidate memory snippets to OpenAI using ``OPENAI_API_KEY``.
+
 Configuration keys (all optional):
-  cosine_threshold: float = 0.72   # minimum similarity to inject
-  uncertain_band:   float = 0.10   # band above threshold that triggers LLM judge
-  max_inject_chars: int   = 800    # max chars per injection
-  cooldown_turns:   int   = 3      # min turns between injections for same memory
-  tool_pre_enabled: bool  = True   # enable tool:pre handler
-  prompt_enabled:   bool  = True   # enable prompt:submit handler
-  orc_enabled:      bool  = True   # enable orchestrator:complete handler
-  palace_collection: str  = "mempalace_default"  # ChromaDB collection name
-  emit_events:      bool  = True   # emit JSONL events
+  cosine_threshold:  float = 0.72   # minimum similarity to inject
+  uncertain_band:    float = 0.10   # band above threshold that triggers LLM judge
+  max_inject_chars:  int   = 800    # max chars per injection
+  cooldown_turns:    int   = 3      # min turns between injections for same memory
+  tool_pre_enabled:  bool  = True   # enable tool:pre handler
+  prompt_enabled:    bool  = True   # enable prompt:submit handler
+  orc_enabled:       bool  = True   # enable orchestrator:complete handler
+  llm_judge_enabled: bool  = False  # OPT-IN: sends query + memory text to OpenAI
+                                    # (gpt-4.1-nano) for uncertain-band scoring.
+                                    # Off by default -- see Privacy above.
+  emit_events:       bool  = True   # emit JSONL events
 """
 
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+import hashlib
+import json
+import subprocess
 from typing import Any
 
 try:
@@ -81,48 +120,106 @@ except ImportError:
         pass
 
 
+try:
+    # Canonical MCP JSON-RPC-over-stdio helper. Declared as a real dependency
+    # in pyproject.toml (amplifier-module-tool-mempalace>=1.0.0), so this
+    # import succeeds in any properly installed environment; the fallback
+    # below only triggers in degraded/partial environments, matching the
+    # existing defensive-import convention used throughout this file and
+    # mirrored in hooks-mempalace-capture / hooks-mempalace-briefing.
+    from amplifier_module_tool_mempalace.scripts.memory_store import (
+        _call_mcp_tool as _call_mcp_tool_impl,
+    )
+except ImportError:
+    # Minimal private copy of the canonical helper in
+    # amplifier_module_tool_mempalace/scripts/memory_store.py::_call_mcp_tool.
+    # Keep in sync with that implementation if mempalace's MCP wire format
+    # changes; this is a fallback for degraded environments only, not a
+    # second source of truth.
+    def _call_mcp_tool_impl(  # type: ignore[misc]
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        timeout: float = 15.0,
+    ) -> dict[str, Any]:
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
+        }
+        call_req = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        }
+        stdin_payload = json.dumps(init_req) + "\n" + json.dumps(call_req) + "\n"
+        try:
+            proc = subprocess.run(
+                ["mempalace-mcp"],
+                input=stdin_payload,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        call_response: dict[str, Any] | None = None
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(msg, dict) and msg.get("id") == 2:
+                call_response = msg
+                break
+        if call_response is None:
+            return {
+                "error": (
+                    f"mempalace-mcp produced no tools/call response for "
+                    f"{tool_name!r} (rc={proc.returncode}). "
+                    f"stderr: {proc.stderr.strip()[:500]}"
+                )
+            }
+        if "error" in call_response:
+            rpc_error = call_response["error"]
+            message = (
+                rpc_error.get("message") if isinstance(rpc_error, dict) else rpc_error
+            )
+            return {"error": message or str(rpc_error)}
+        content_ = (call_response.get("result") or {}).get("content") or []
+        text_out = content_[0].get("text") if content_ else None
+        if text_out is None:
+            return {"error": "tools/call result missing content[0].text"}
+        try:
+            return json.loads(text_out)
+        except json.JSONDecodeError:
+            return {"raw": text_out}
+
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 DEFAULT_COSINE_THRESHOLD = 0.72
 DEFAULT_UNCERTAIN_BAND = 0.10
 DEFAULT_MAX_INJECT_CHARS = 800
 DEFAULT_COOLDOWN_TURNS = 3
-DEFAULT_COLLECTION = "mempalace_default"
 
-# ── Embedding helper ─────────────────────────────────────────────────────────
+# Documented for operator visibility ONLY -- NOT used to construct any path
+# or open any store at runtime. Retrieval routes exclusively through
+# mempalace's own mempalace_search MCP tool (see _mcp_search below), which
+# resolves its OWN configured palace path / collection name server-side.
+# Verified against the installed mempalace 3.5.0 package source
+# (mempalace/config.py: DEFAULT_PALACE_PATH, DEFAULT_COLLECTION_NAME).
+# Pinned by tests/test_store_alignment.py against the real package when
+# importable, so drift in a future mempalace release is caught here.
+DOCUMENTED_MEMPALACE_PALACE_PATH = "~/.mempalace/palace"
+DOCUMENTED_MEMPALACE_COLLECTION_NAME = "mempalace_drawers"
 
-
-def _embed(text: str) -> list[float]:
-    """Embed text using the OpenAI embeddings API (text-embedding-3-small).
-
-    Falls back to a zero vector on error so the hook never crashes the session.
-    """
-    try:
-        from openai import OpenAI  # type: ignore
-
-        client = OpenAI()
-        resp = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=text[:8000],  # truncate to avoid token limit
-        )
-        return resp.data[0].embedding
-    except Exception:
-        return []
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two embedding vectors."""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
-# ── LLM judge ────────────────────────────────────────────────────────────────
+# ── LLM judge ──────────────────────────────────────────────────────────────────
 
 
 async def _llm_judge(query: str, memory_text: str) -> float:
@@ -152,58 +249,85 @@ async def _llm_judge(query: str, memory_text: str) -> float:
         return 0.0
 
 
-# ── ChromaDB retrieval ────────────────────────────────────────────────────────
+# ── MCP-based retrieval ─────────────────────────────────────────────
 
 
-def _retrieve_memories(
-    query_embedding: list[float],
-    collection_name: str,
-    n_results: int = 3,
-) -> list[dict[str, Any]]:
-    """Query ChromaDB for the top-n most similar memories.
+def _derive_memory_id(hit: dict[str, Any], text: str) -> str:
+    """Stable surrogate id for a search hit lacking a real drawer id.
 
-    Returns a list of dicts with keys: id, text, score, metadata.
+    mempalace 3.5.0's ``mempalace_search`` does not return a drawer id in
+    its hit shape (verified against the installed package,
+    ``mempalace/searcher.py``'s hit-entry construction) -- only
+    ``source_path``/``source_file`` and content. Hash ``source_path`` +
+    a text prefix so the same drawer content produces the same id across
+    repeat retrievals; cooldown / already-briefed dedup only need
+    stability, not a real palace identifier.
     """
-    if not query_embedding:
-        return []
-    try:
-        import chromadb  # type: ignore
+    basis = f"{hit.get('source_path', '')}:{text[:200]}"
+    return hashlib.sha1(basis.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
-        palace_dir = Path.home() / ".mempalace" / "chroma"
-        client = chromadb.PersistentClient(path=str(palace_dir))
-        try:
-            collection = client.get_collection(collection_name)
-        except Exception:
-            return []  # collection doesn't exist yet
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=n_results,
-            include=["documents", "distances", "metadatas"],
+
+def _mcp_search(query: str, n_results: int = 5) -> list[dict[str, Any]]:
+    """Retrieve candidate memories via mempalace's own supported MCP surface.
+
+    Calls the real ``mempalace_search`` tool over the ``mempalace-mcp``
+    JSON-RPC-over-stdio server (see ``_call_mcp_tool_impl`` above -- the same
+    helper hooks-mempalace-capture and hooks-mempalace-briefing use). This is
+    the ONLY way this hook reads the palace: mempalace resolves its OWN
+    configured palace path and collection name server-side, so there is no
+    path or collection value left for this hook to get wrong. It also means
+    this hook never embeds the query itself -- mempalace embeds it
+    internally with whatever local model the palace was actually written
+    with, so retrieval always happens in the same vector space the drawers
+    were stored in.
+
+    (Previously this function opened a ChromaDB ``PersistentClient``
+    directly at a hardcoded ``~/.mempalace/chroma`` / ``mempalace_default``
+    -- neither value is real; mempalace actually writes to
+    ``~/.mempalace/palace`` / ``mempalace_drawers``, verified against the
+    installed mempalace 3.5.0 package. See ``DOCUMENTED_MEMPALACE_*``
+    constants above and ``tests/test_store_alignment.py``.)
+
+    Returns a list of dicts with keys: id, text, score, metadata. ``score``
+    is mempalace's own cosine similarity (``max(0, 1 - distance)``,
+    ``mempalace/searcher.py:_distance_to_similarity``) -- never crashes the
+    session; any transport or tool-level failure yields an empty list.
+    """
+    if not query:
+        return []
+    result = _call_mcp_tool_impl(
+        "mempalace_search",
+        # mempalace_search's query field is capped at 250 chars (its own
+        # input_schema maxLength) -- truncate before sending, not after.
+        {"query": query[:250], "limit": n_results},
+    )
+    if not isinstance(result, dict) or result.get("error"):
+        return []
+    hits = result.get("results")
+    if not isinstance(hits, list):
+        return []
+    memories: list[dict[str, Any]] = []
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        text = hit.get("text", "") or ""
+        mem_id = hit.get("id") or _derive_memory_id(hit, text)
+        memories.append(
+            {
+                "id": mem_id,
+                "text": text,
+                "score": float(hit.get("similarity", 0.0) or 0.0),
+                "metadata": {
+                    "wing": hit.get("wing"),
+                    "room": hit.get("room"),
+                    "source_file": hit.get("source_file"),
+                },
+            }
         )
-        memories = []
-        docs = results.get("documents", [[]])[0]
-        dists = results.get("distances", [[]])[0]
-        metas = results.get("metadatas", [[]])[0]
-        ids = results.get("ids", [[]])[0]
-        for i, doc in enumerate(docs):
-            # ChromaDB returns L2 distance; convert to cosine-like score
-            # For normalized embeddings: cosine_sim ≈ 1 - (dist² / 2)
-            dist = dists[i] if i < len(dists) else 1.0
-            score = max(0.0, 1.0 - dist / 2.0)
-            memories.append(
-                {
-                    "id": ids[i] if i < len(ids) else f"mem_{i}",
-                    "text": doc,
-                    "score": score,
-                    "metadata": metas[i] if i < len(metas) else {},
-                }
-            )
-        return memories
-    except Exception:
-        return []
+    return memories
 
 
-# ── Injection formatter ───────────────────────────────────────────────────────
+# ── Injection formatter ────────────────────────────────────────────# ── Injection formatter ───────────────────────────────────────────────────────
 
 
 def _format_injection(
@@ -264,10 +388,13 @@ class MempalaceInterjectHook:
         self.cooldown_turns: int = int(
             config.get("cooldown_turns", DEFAULT_COOLDOWN_TURNS)
         )
-        self.collection: str = config.get("palace_collection", DEFAULT_COLLECTION)
         self.prompt_enabled: bool = bool(config.get("prompt_enabled", True))
         self.tool_pre_enabled: bool = bool(config.get("tool_pre_enabled", True))
         self.orc_enabled: bool = bool(config.get("orc_enabled", True))
+        # OPT-IN, default False: gates the ONLY external network call this
+        # hook can make (OpenAI gpt-4.1-nano for uncertain-band scoring).
+        # See module docstring "Privacy" section.
+        self.llm_judge_enabled: bool = bool(config.get("llm_judge_enabled", False))
         self.emit_events: bool = bool(config.get("emit_events", True))
 
         # Per-turn guard flag: prevents re-injection in the same orchestrator run
@@ -299,17 +426,14 @@ class MempalaceInterjectHook:
         Returns (memories_to_inject, should_inject, skip_reason, judge_used).
         skip_reason is only meaningful when should_inject is False.
         """
-        # Embed the query
-        query_embedding = await asyncio.get_event_loop().run_in_executor(
-            None, _embed, query
+        # Retrieve top candidates via mempalace's own MCP surface. This is a
+        # blocking subprocess call (mempalace-mcp), so it runs off the event
+        # loop the same way the old OpenAI-embedding call did.
+        candidates = await asyncio.get_event_loop().run_in_executor(
+            None, _mcp_search, query, 5
         )
-        if not query_embedding:
-            return [], False, "no_embedding", False
-
-        # Retrieve top candidates
-        candidates = _retrieve_memories(query_embedding, self.collection, n_results=5)
         if not candidates:
-            return [], False, "below_threshold", False
+            return [], False, "retrieval_failed", False
 
         # Filter out already-briefed and on-cooldown memories
         candidates = [
@@ -331,8 +455,12 @@ class MempalaceInterjectHook:
         ]
 
         judge_used = False
-        # Secondary gate: LLM judge for uncertain-band memories
-        if uncertain:
+        # Secondary gate: LLM judge for uncertain-band memories -- OPT-IN
+        # only (self.llm_judge_enabled, default False). This is the ONLY
+        # external network call this hook can make; see module docstring
+        # "Privacy" section. When disabled, uncertain-band candidates are
+        # simply not promoted -- the primary cosine gate is the sole arbiter.
+        if uncertain and self.llm_judge_enabled:
             judge_tasks = [_llm_judge(query, m["text"]) for m in uncertain]
             judge_scores = await asyncio.gather(*judge_tasks)
             judge_used = True
@@ -852,10 +980,10 @@ async def mount(
             "uncertain_band": hook.uncertain_band,
             "max_inject_chars": hook.max_inject_chars,
             "cooldown_turns": hook.cooldown_turns,
-            "collection": hook.collection,
             "prompt_enabled": hook.prompt_enabled,
             "tool_pre_enabled": hook.tool_pre_enabled,
             "orc_enabled": hook.orc_enabled,
+            "llm_judge_enabled": hook.llm_judge_enabled,
             "emit_events": hook.emit_events,
         },
     }

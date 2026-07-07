@@ -224,7 +224,7 @@ def run_compare(
     for rec in shadow.filed:
         ref = rec["ref"]
         original = str(rec["content"]).encode("utf-8")
-        wing_expected[rec["wing"]] += 1
+        wing_expected[str(rec["wing"])] += 1
         if s.regenerate(ref).payload == original:
             e1_ok += 1
         else:
@@ -235,7 +235,7 @@ def run_compare(
         if f"wing:{rec['wing']}" in labels and f"room:{rec['room']}" in labels:
             scope_ok += 1
         if wing_ref in neighbors:
-            wing_actual[rec["wing"]] += 1
+            wing_actual[str(rec["wing"])] += 1
         if rec["category"] is not None:
             got = s.query_facts(subject=ref, predicate="has_category")
             if got.success and got.output:

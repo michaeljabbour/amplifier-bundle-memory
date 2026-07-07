@@ -91,6 +91,21 @@ hooks:
   # ephemeral=True keeps injections out of conversation history.
   # Per-turn guard flag prevents infinite loops on orchestrator:complete.
   # Designed from Amplifier expert consultation (priority 20, cooldown 3 turns).
+  #
+  # Read lane: reads exclusively through mempalace's own mempalace_search MCP
+  # tool -- never opens ChromaDB directly and never hardcodes a palace path
+  # or collection name, so it cannot drift from wherever mempalace itself is
+  # actually configured (fixed 2026-07-07; previously read a nonexistent
+  # ~/.mempalace/chroma / mempalace_default store while the palace actually
+  # writes to ~/.mempalace/palace / mempalace_drawers). There is no
+  # `palace_collection` config knob any more -- mempalace resolves its own
+  # store server-side.
+  #
+  # Privacy: zero external network calls by default. Retrieval uses
+  # mempalace's own local embedding model (all-MiniLM-L6-v2 / ONNX, offline).
+  # llm_judge_enabled (OFF by default) is the ONLY opt-in external call --
+  # when true, it sends the query text and candidate memory snippets to
+  # OpenAI (gpt-4.1-nano) using OPENAI_API_KEY for uncertain-band scoring.
   - module: hooks-mempalace-interject
     source: ../modules/hooks-mempalace-interject
     version: 1.1.0
@@ -102,7 +117,8 @@ hooks:
       prompt_enabled: true
       tool_pre_enabled: true
       orc_enabled: true
-      palace_collection: mempalace_default
+      llm_judge_enabled: false        # OPT-IN: sends query + memory text to
+                                      # OpenAI (gpt-4.1-nano). Off by default.
       emit_events: true               # NEW: false to disable JSONL event emission
 
   # Per-project session isolation — each project gets its own session history.

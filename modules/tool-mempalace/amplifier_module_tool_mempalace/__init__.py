@@ -134,6 +134,28 @@ def _shadow_diary(agent_name: str, entry: str, topic: str) -> None:
         )
 
 
+def _mcp_result_to_tool_result(result: dict[str, Any]) -> ToolResult:
+    """Convert an MCP call's result dict into a contract-correct ToolResult.
+
+    ``amplifier_core.ToolResult`` is a pydantic model with ``success`` /
+    ``output`` / ``error`` fields (core:docs/contracts/TOOL_CONTRACT.md), NOT
+    ``content`` / ``is_error``. Passing unknown kwargs is silently accepted
+    by pydantic's permissive ``BaseModel.__init__(**data)`` and dropped --
+    the caller ends up with the all-defaults ``ToolResult()`` (success=True,
+    output=None) even for a hard failure. This helper is the single place
+    that maps an MCP result (``{"error": ...}`` on failure, per
+    ``_mcp_call``'s docstring) onto the real contract so every operation
+    branch below reports failures loudly instead of silently.
+    """
+    error = result.get("error") if isinstance(result, dict) else None
+    serialized = json.dumps(result, indent=2)
+    if error:
+        return ToolResult(
+            success=False, output=serialized, error={"message": str(error)}
+        )
+    return ToolResult(success=True, output=serialized)
+
+
 def _mcp_call(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     """Call a MemPalace MCP tool and return the result.
 
@@ -332,7 +354,7 @@ class PalaceTool(Tool):
                 if kwargs.get("room"):
                     args["room"] = kwargs["room"]
                 result = _mcp_call("mempalace_search", args)
-                return ToolResult(content=json.dumps(result, indent=2))
+                return _mcp_result_to_tool_result(result)
 
             elif operation == "remember":
                 args = {
@@ -342,11 +364,11 @@ class PalaceTool(Tool):
                     "added_by": "amplifier",
                 }
                 result = _mcp_call("mempalace_add_drawer", args)
-                return ToolResult(content=json.dumps(result, indent=2))
+                return _mcp_result_to_tool_result(result)
 
             elif operation == "status":
                 result = _mcp_call("mempalace_status", {})
-                return ToolResult(content=json.dumps(result, indent=2))
+                return _mcp_result_to_tool_result(result)
 
             elif operation == "kg":
                 kg_action = kwargs.get("kg_action", "query")
@@ -380,7 +402,7 @@ class PalaceTool(Tool):
                     result = _mcp_call("mempalace_kg_timeline", args)
                 else:  # stats
                     result = _mcp_call("mempalace_kg_stats", {})
-                return ToolResult(content=json.dumps(result, indent=2))
+                return _mcp_result_to_tool_result(result)
 
             elif operation == "traverse":
                 args = {
@@ -388,7 +410,7 @@ class PalaceTool(Tool):
                     "max_hops": kwargs.get("max_hops", 2),
                 }
                 result = _mcp_call("mempalace_traverse", args)
-                return ToolResult(content=json.dumps(result, indent=2))
+                return _mcp_result_to_tool_result(result)
 
             elif operation == "diary":
                 diary_action = kwargs.get("diary_action", "read")
@@ -405,7 +427,7 @@ class PalaceTool(Tool):
                 else:
                     args = {"agent_name": agent_name, "last_n": kwargs.get("limit", 10)}
                     result = _mcp_call("mempalace_diary_read", args)
-                return ToolResult(content=json.dumps(result, indent=2))
+                return _mcp_result_to_tool_result(result)
 
             elif operation == "mine":
                 path = kwargs.get("path", ".")
@@ -416,8 +438,19 @@ class PalaceTool(Tool):
                     text=True,
                     timeout=120,
                 )
-                output = proc.stdout + proc.stderr
-                return ToolResult(content=output.strip())
+                output = (proc.stdout + proc.stderr).strip()
+                if proc.returncode != 0:
+                    return ToolResult(
+                        success=False,
+                        output=output,
+                        error={
+                            "message": (
+                                output
+                                or f"mempalace mine exited with code {proc.returncode}"
+                            )
+                        },
+                    )
+                return ToolResult(success=True, output=output)
 
             elif operation == "events":
                 # Read the per-session JSONL event log written by CP1's emitter.
@@ -613,21 +646,26 @@ class PalaceTool(Tool):
 
             else:
                 return ToolResult(
-                    content=f"Unknown operation: {operation}", is_error=True
+                    success=False,
+                    error={"message": f"Unknown operation: {operation}"},
                 )
 
         except subprocess.TimeoutExpired:
-            return ToolResult(content="MemPalace operation timed out.", is_error=True)
+            return ToolResult(
+                success=False, error={"message": "MemPalace operation timed out."}
+            )
         except FileNotFoundError:
             return ToolResult(
-                content=(
-                    "MemPalace CLI not found. Install with: pip install mempalace\n"
-                    "Then initialize a palace: mempalace init <path>"
-                ),
-                is_error=True,
+                success=False,
+                error={
+                    "message": (
+                        "MemPalace CLI not found. Install with: pip install mempalace\n"
+                        "Then initialize a palace: mempalace init <path>"
+                    )
+                },
             )
         except Exception as exc:
-            return ToolResult(content=f"Error: {exc}", is_error=True)
+            return ToolResult(success=False, error={"message": f"Error: {exc}"})
 
 
 async def mount(

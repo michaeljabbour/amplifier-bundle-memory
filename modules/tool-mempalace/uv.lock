@@ -30,12 +30,22 @@ wheels = [
 ]
 
 [[package]]
+name = "amplifier-data"
+version = "0.1.0"
+source = { git = "https://github.com/michaeljabbour/amplifier-data?rev=09482f1fa569ba8407894cad3a32f8ab6aecbc3d#09482f1fa569ba8407894cad3a32f8ab6aecbc3d" }
+
+[[package]]
 name = "amplifier-module-tool-mempalace"
 version = "1.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "amplifier-core" },
     { name = "mempalace" },
+]
+
+[package.optional-dependencies]
+substrate = [
+    { name = "amplifier-data" },
 ]
 
 [package.dev-dependencies]
@@ -49,8 +59,10 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "amplifier-core", specifier = ">=0.1.0" },
+    { name = "amplifier-data", marker = "extra == 'substrate'", git = "https://github.com/michaeljabbour/amplifier-data?rev=09482f1fa569ba8407894cad3a32f8ab6aecbc3d" },
     { name = "mempalace", specifier = ">=3.3.0" },
 ]
+provides-extras = ["substrate"]
 
 [package.metadata.requires-dev]
 dev = [

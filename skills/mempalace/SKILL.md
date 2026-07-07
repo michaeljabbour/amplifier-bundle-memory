@@ -2,7 +2,7 @@
 
 ## Overview
 
-This skill guides agents on how to use the MemPalace memory system effectively within Amplifier. MemPalace provides local-first, verbatim AI memory with 96.6% R@5 retrieval accuracy on LongMemEval — no API key required, nothing leaves your machine.
+This skill guides agents on how to use the MemPalace memory system effectively within Amplifier. MemPalace provides local-first, verbatim AI memory with 96.6% R@5 retrieval accuracy on LongMemEval — no API key required, nothing leaves your machine by default. Exception: hooks-mempalace-interject's optional `llm_judge_enabled` config (off by default) sends query + memory text to OpenAI when explicitly enabled.
 
 ## Quick Reference
 

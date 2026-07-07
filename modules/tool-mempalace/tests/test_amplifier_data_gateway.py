@@ -17,12 +17,14 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 pytest.importorskip("amplifier_data")
 
-from amplifier_data import AmplifierStore  # noqa: E402
+from amplifier_data import AmplifierStore
+from amplifier_data.models import Event  # noqa: E402
 
 from amplifier_module_tool_mempalace.scripts.amplifier_data_gateway import (  # noqa: E402
     GatewayClient,
@@ -258,7 +260,7 @@ class TestGatewayVectorAndBatchParity:
         calls = {"n": 0}
         orig = store.kernel.append_batch
 
-        def counting(events: object) -> object:
+        def counting(events: list[Event]) -> list[Any]:
             calls["n"] += 1
             return orig(events)
 

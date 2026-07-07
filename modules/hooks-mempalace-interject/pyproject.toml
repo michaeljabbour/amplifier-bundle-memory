@@ -10,7 +10,25 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "amplifier-core",
-    "chromadb>=0.4.0",
+    # Direct dependency (not just transitive via amplifier-module-tool-mempalace)
+    # so the `mempalace-mcp` console script this hook shells out to
+    # (_call_mcp_tool_impl) is guaranteed on PATH. NOTE: retrieval no longer
+    # opens ChromaDB directly (see module docstring) -- chromadb was removed
+    # as a direct dependency; mempalace_search resolves mempalace's own
+    # store server-side.
+    #
+    # Floor is >=3.5.0, NOT the >=3.3.0 used by hooks-mempalace-capture /
+    # hooks-mempalace-briefing: verified by installing mempalace==3.3.0 in a
+    # scratch venv that its entry_points.txt has NO `mempalace-mcp` console
+    # script at all (only `mempalace = mempalace.cli:main`) -- that script
+    # (`mempalace-mcp = mempalace.mcp_server:main`) only exists from 3.5.0
+    # onward (the version this fix was verified against end-to-end). A
+    # >=3.3.0 floor would let a resolver legitimately pick a version where
+    # _call_mcp_tool_impl has nothing to exec.
+    "mempalace>=3.5.0",
+    # Only used by the OPT-IN llm_judge_enabled path (default False -- see
+    # module docstring "Privacy"). Never invoked unless a user explicitly
+    # sets llm_judge_enabled: true in config.
     "openai>=1.0.0",
     "amplifier-module-tool-mempalace>=1.0.0",
 ]
@@ -23,9 +41,15 @@ amplifier-module-tool-mempalace = { path = "../tool-mempalace", editable = true 
 
 [dependency-groups]
 dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
     "ruff>=0.1",
     "pyright>=1.1",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [tool.pyright]
 pythonVersion = "3.11"

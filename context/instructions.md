@@ -2,7 +2,7 @@
 
 This bundle provides a **local-first, two-layer AI memory system**:
 
-1. **MemPalace** — semantic palace storage with 96.6% R@5 retrieval on LongMemEval, knowledge graph, agent diaries, and cross-wing graph traversal. Nothing leaves your machine.
+1. **MemPalace** — semantic palace storage with 96.6% R@5 retrieval on LongMemEval, knowledge graph, agent diaries, and cross-wing graph traversal. Nothing leaves your machine by default (local embedding model; the one opt-in exception is hooks-mempalace-interject's `llm_judge_enabled`, off by default -- see that module's README for details).
 2. **project-context** — structured coordination files (`PROJECT_CONTEXT.md`, `HANDOFF.md`, `GLOSSARY.md`, etc.) that persist in the repo, survive clones, and are read by every AI coding tool.
 
 ## Session Lifecycle

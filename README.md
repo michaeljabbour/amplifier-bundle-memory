@@ -2,7 +2,7 @@
 
 A local-first, two-layer memory system for [Amplifier](https://github.com/microsoft/amplifier).
 
-**Layer 1 — Semantic palace** ([MemPalace](https://github.com/MemPalace/mempalace)): verbatim storage with 96.6% R@5 retrieval on LongMemEval, knowledge graph, agent diaries, and cross-wing graph traversal. Nothing leaves your machine.
+**Layer 1 — Semantic palace** ([MemPalace](https://github.com/MemPalace/mempalace)): verbatim storage with 96.6% R@5 retrieval on LongMemEval, knowledge graph, agent diaries, and cross-wing graph traversal. Nothing leaves your machine by default (local embedding model). The one opt-in exception: hooks-mempalace-interject's `llm_judge_enabled` (off by default) sends query + memory text to OpenAI for borderline-relevance scoring -- see modules/hooks-mempalace-interject/README.md.
 
 **Layer 2 — Coordination files** ([project-context](https://github.com/michaeljabbour/project-context)): structured Markdown files (`PROJECT_CONTEXT.md`, `HANDOFF.md`, `GLOSSARY.md`, etc.) that persist in the repo, survive clones, and are read natively by every AI coding tool.
 

@@ -15,6 +15,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from amplifier_data.models import Event
+
 import pytest
 
 pytest.importorskip("amplifier_data")
@@ -202,7 +204,7 @@ def test_update_importance_atomic_success_and_crash_injection() -> None:
     calls = {"n": 0}
     orig = backing.kernel.append_batch
 
-    def counting(events: object) -> object:
+    def counting(events: list[Event]) -> list[Any]:
         calls["n"] += 1
         return orig(events)
 
@@ -283,7 +285,7 @@ def test_file_atomic_single_append_batch_with_embedding() -> None:
     calls = {"n": 0}
     orig = backing.kernel.append_batch
 
-    def counting(events: object) -> object:
+    def counting(events: list[Event]) -> list[Any]:
         calls["n"] += 1
         return orig(events)
 
