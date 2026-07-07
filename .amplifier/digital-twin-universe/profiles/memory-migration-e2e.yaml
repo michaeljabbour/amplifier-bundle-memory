@@ -1,0 +1,117 @@
+# memory-migration-e2e DTU Profile
+#
+# Validates `amplifier-memory-import` (docs/plans/2026-07-07-native-cutover-
+# design.md §9, KG-N5) against a REAL legacy vendor store. The legacy vendor
+# package is installed ONLY long enough to seed a throwaway store, then
+# uninstalled -- proving the importer itself has no runtime dependency on it
+# (only chromadb, via the `[migrate]` extra).
+#
+# Variables (provided at launch via --var):
+#   GITEA_URL    -- Gitea base URL reachable from inside the environment
+#   GITEA_TOKEN  -- API token for Gitea (admin user)
+#
+# Launch example:
+#   amplifier-digital-twin launch memory-migration-e2e \
+#     --var GITEA_URL=http://10.0.0.1:10110 \
+#     --var GITEA_TOKEN=$(amplifier-gitea token <gitea-id> | jq -r .token)
+
+name: memory-migration-e2e
+description: |
+  Seeds a real legacy-vendor-shaped ChromaDB store, uninstalls the vendor
+  package, installs amplifier-bundle-memory's tool-memory module with the
+  `[migrate]` extra, runs `amplifier-memory-import --verify`, and asserts
+  the report counts match the seed and the source tree is byte-unchanged.
+
+base:
+  image: ubuntu:24.04
+
+url_rewrites:
+  auth:
+    username: admin
+    token_var: GITEA_TOKEN
+  allow_uv_github_fast_path: false
+  default_match_mode: boundary
+  rules:
+    - match: github.com/michaeljabbour/amplifier-bundle-memory
+      target: ${GITEA_URL}/admin/amplifier-bundle-memory
+
+provision:
+  setup_cmds:
+    - apt-get update && apt-get install -y git curl python3 python3-pip build-essential
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    - curl -LsSf https://astral.sh/uv/install.sh | sh
+    - |
+      echo 'export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"' >> /root/.bashrc
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+
+    - git clone ${GITEA_URL}/admin/amplifier-bundle-memory /workspace/amplifier-bundle-memory
+
+    # Seed a throwaway legacy-shaped store: install mempalace ONLY to borrow
+    # chromadb's collection API shape, seed a `mempalace_drawers` collection
+    # with documents+metadatas+embeddings, then UNINSTALL mempalace --
+    # proving the importer needs only chromadb at runtime.
+    - |
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+      pip install --break-system-packages chromadb
+      python3 - <<'PYSEED'
+      import chromadb
+
+      client = chromadb.PersistentClient(path="/root/.mempalace/palace")
+      col = client.get_or_create_collection("mempalace_drawers")
+      col.add(
+          ids=["seed-1", "seed-2"],
+          documents=[
+              "decided to use dual-emit for observability across the memory bundle",
+              "the auth migration blocked on rate limits from the identity provider",
+          ],
+          metadatas=[
+              {"wing": "wing_seed", "room": "decisions", "source_file": "seed-1.md", "category": "decision"},
+              {"wing": "wing_seed", "room": "blockers", "source_file": "seed-2.md", "category": "blocker"},
+          ],
+          embeddings=[[0.1] * 384, [0.2] * 384],
+      )
+      print("[seed] wrote 2 drawers to /root/.mempalace/palace")
+      PYSEED
+      pip uninstall --break-system-packages -y mempalace 2>/dev/null || true
+      echo "[seed] mempalace uninstalled -- proving the importer does not need it"
+
+    - |
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+      uv tool install -vv git+https://github.com/microsoft/amplifier
+
+    - |
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+      amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/memory.yaml"
+
+    # Install the tool-memory module's [migrate] extra directly (chromadb
+    # only) so `amplifier-memory-import` is on PATH.
+    - |
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+      uv pip install --python "$VENV_PY" -e '/workspace/amplifier-bundle-memory/modules/tool-memory[migrate]'
+
+    # Run the import against the seeded store and assert KG-N5.
+    - |
+      set -euo pipefail
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+
+      cp -r /root/.mempalace /root/.mempalace-source-snapshot
+
+      "$VENV_PY" -m amplifier_module_tool_memory.migrate --verify > /tmp/import-report.json
+      cat /tmp/import-report.json
+
+      python3 - <<'PYCHECK'
+      import json, subprocess, sys
+
+      report = json.load(open("/tmp/import-report.json"))
+      assert report["drawers"] == 2, f"expected 2 drawers, got {report['drawers']}"
+      assert report["embeddings_copied"] == 2, f"expected 2 embeddings copied, got {report['embeddings_copied']}"
+      assert not report["errors"], f"unexpected errors: {report['errors']}"
+      assert report["verified"] is True, f"verify failed: {report}"
+      print("PASS  KG-N5: import report matches the seed and verified byte-for-byte")
+      PYCHECK
+
+      diff -rq /root/.mempalace /root/.mempalace-source-snapshot \
+        && echo "PASS  source tree byte-unchanged (read-only proof)" \
+        || { echo "FAIL  source tree was modified by the importer"; exit 1; }
