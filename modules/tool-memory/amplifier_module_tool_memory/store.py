@@ -236,7 +236,18 @@ class NativeMemoryStore:
         category: str | None = None,
         importance: float | None = None,
         embedding: Sequence[float] | None = None,
-    ) -> None:
+    ) -> Any:
+        """Persist one drawer; returns the content-addressed cell ref.
+
+        Pre-existing annotation bug fixed in the cold-start data-loss pass:
+        this override always returns `ref` (every caller -- daemon.py's
+        `remember` dispatch, the KG-N7 sweep tests -- relies on it), but was
+        annotated `-> None` (copied from the `MemoryStore` Protocol, which
+        genuinely is a fire-and-forget sink). `Any` because `ref`'s concrete
+        type varies by backend (str for GatewayClient/RemoteStore, a `Hash`
+        for the direct AmplifierStore path) -- the same reason `Any` is used
+        for `self.store` itself on this class.
+        """
         s = self.store
         if self._supports_atomic_update():
             # Batch path: cell + 2 scope edges + facts + optional embedding,
@@ -628,6 +639,7 @@ class NativeMemoryStore:
             scope_ref = self._scope_ref("wing", wing)
 
         scored: list[tuple[Any, float]] = []
+        seen_refs: set[Any] = set()
         if query_vector is not None:
             candidates = s.query_vector(  # type: ignore[attr-defined]
                 list(query_vector), max(1, k * 3), scope=scope_ref
@@ -638,6 +650,30 @@ class NativeMemoryStore:
                 )
                 lex = lexical_score(lexical_query or "", content)
                 scored.append((ref, 0.85 * cosine + 0.15 * lex))
+                seen_refs.add(ref)
+
+            # Search hardening (cold-start data-loss fix, §6 addendum): a drawer
+            # filed while the embedder was not ready carries a `needs_embedding`
+            # marker and has NO vector -- query_vector alone can never surface it,
+            # even after the embedder warms, until the daemon's catch-up sweep
+            # (daemon.py's _sweep_needs_embedding) actually runs. Union in a
+            # lexical full-scan ONLY when such markers exist, so the write-to-
+            # sweep window stays searchable. Vector-scored hits keep priority
+            # (skipped via seen_refs); once the sweep converges, query_facts
+            # returns empty and this whole block is one cheap query with no
+            # scan -- the steady-state hot path is unchanged.
+            pending = s.query_facts(predicate="needs_embedding")  # type: ignore[attr-defined]
+            if pending.success and pending.output:
+                for drawer in self.list_drawers(
+                    wing=wing, room=room, limit=self._DEGRADED_SEARCH_SCAN_LIMIT
+                ):
+                    ref = drawer["ref"]
+                    if ref in seen_refs:
+                        continue
+                    scored.append(
+                        (ref, lexical_score(lexical_query or "", drawer["content"]))
+                    )
+                    seen_refs.add(ref)
         else:
             for drawer in self.list_drawers(
                 wing=wing, room=room, limit=self._DEGRADED_SEARCH_SCAN_LIMIT

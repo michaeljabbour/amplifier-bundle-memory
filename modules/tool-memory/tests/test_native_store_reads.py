@@ -105,6 +105,53 @@ class TestSearch:
         store = NativeMemoryStore(record_access=False)
         assert store.search(None, 5, wing="no-such-wing", lexical_query="x") == []
 
+    def test_needs_embedding_drawer_surfaced_via_lexical_union(self) -> None:
+        """Cold-start data-loss fix: a drawer with a `needs_embedding` marker
+        (filed while the embedder was not ready) and NO vector must still be
+        found by a non-degraded (query_vector is not None) search, via the
+        lexical-union hardening -- not just left unreachable until the sweep
+        runs. Vector-scored hits still take priority in ranking."""
+        store = NativeMemoryStore(record_access=False)
+        s = store.store
+        vectored_ref = _file(
+            store, wing="w8", room="r", content="an embedded drawer about widgets"
+        )
+        s.add_embedding(vectored_ref, [1.0, 0.0, 0.0])
+
+        pending_ref = _file(
+            store, wing="w8", room="r", content="a pending widgets drawer no vector"
+        )
+        s.assert_fact(pending_ref, "needs_embedding", s.write_cell(b"true"))
+
+        results = store.search(
+            [1.0, 0.0, 0.0], 5, wing="w8", room="r", lexical_query="widgets"
+        )
+        refs = {r["ref"] for r in results}
+        assert vectored_ref in refs
+        assert pending_ref in refs
+        # vector-scored candidate keeps priority in the ranking
+        assert results[0]["ref"] == vectored_ref
+
+    def test_no_needs_embedding_facts_skips_lexical_union(self) -> None:
+        """Steady-state (no pending facts): search must not silently pick up
+        an un-embedded, out-of-scope drawer via a full scan -- the hardening
+        path is gated behind an actual `needs_embedding` fact existing."""
+        store = NativeMemoryStore(record_access=False)
+        s = store.store
+        vectored_ref = _file(store, wing="w9", room="r", content="embedded only")
+        s.add_embedding(vectored_ref, [1.0, 0.0, 0.0])
+        # A second, un-embedded drawer with NO needs_embedding marker at all
+        # (simulates content filed some other way, not via remember's
+        # pre-ready path) must NOT appear -- there is nothing to converge.
+        unmarked_ref = _file(store, wing="w9", room="r", content="embedded only too")
+
+        results = store.search(
+            [1.0, 0.0, 0.0], 5, wing="w9", room="r", lexical_query="embedded"
+        )
+        refs = {r["ref"] for r in results}
+        assert refs == {vectored_ref}
+        assert unmarked_ref not in refs
+
 
 class TestReadDiary:
     def test_seq_pos_ordered_newest_last(self) -> None:

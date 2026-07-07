@@ -30,6 +30,7 @@ import secrets
 import signal
 import sys
 import threading
+import time
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -299,6 +300,127 @@ def default_memory_home() -> Path:
     return Path.home() / ".amplifier" / "memory"
 
 
+#: KG fact predicate marking a drawer filed while the embedder was not ready
+#: (§4.3, KG-N3/KG-N7). A drawer carrying this predicate has NO vector --
+#: query_vector alone will never surface it. The catch-up sweep below is the
+#: ONLY consumer that clears it; without a sweep it queues forever and the
+#: drawer is permanently unreachable once the embedder warms (the cold-start
+#: data-loss bug this module exists to close).
+_NEEDS_EMBEDDING_PREDICATE = "needs_embedding"
+
+
+def _sweep_needs_embedding(
+    mem_store: NativeMemoryStore,
+    embedder: FastEmbedEmbedder,
+    lock: threading.Lock,
+) -> dict[str, int]:
+    """Catch-up sweep (§4.3, KG-N7): embed every drawer still marked
+    ``needs_embedding`` and invalidate the marker.
+
+    Called from two places: the background watcher thread once the embedder
+    transitions ready (:func:`_watch_embedder_and_sweep`), and cheaply at the
+    top of ``remember``/``diary_write`` via :func:`_maybe_sweep` so a daemon
+    that warmed while idle converges on its very next mutating op instead of
+    waiting on the watcher's poll interval.
+
+    Idempotent: once a marker fact is invalidated it no longer appears in
+    ``query_facts``' currently-valid output, so re-running (from either
+    caller, possibly racing) after full convergence is a single cheap query
+    with zero work. Per-item failures (corrupt cell, transient embed error)
+    are skipped and reported to stderr -- one bad drawer must never abort the
+    sweep or crash the daemon (loud-but-graceful, same contract ``remember``
+    itself uses for embedder failures).
+    """
+    s = mem_store.store
+    pending = s.query_facts(predicate=_NEEDS_EMBEDDING_PREDICATE)  # type: ignore[attr-defined]
+    swept = 0
+    failed = 0
+    if not pending.success:
+        return {"swept": swept, "failed": failed}
+    for fact in pending.output:
+        ref = fact.subject
+        try:
+            content = s.regenerate(ref, record_access=False).payload.decode(  # type: ignore[attr-defined]
+                "utf-8", errors="replace"
+            )
+            vector = embedder.embed(content)
+            with lock:
+                s.add_embedding(ref, vector)  # type: ignore[attr-defined]
+                s.invalidate_fact(fact.subject, fact.predicate, fact.object)  # type: ignore[attr-defined]
+            swept += 1
+        except Exception as exc:  # loud but never crash the daemon (KG-N7)
+            failed += 1
+            sys.stderr.write(
+                f"memory-daemon: needs_embedding sweep failed for {ref!r}: "
+                f"{type(exc).__name__}: {exc}\n"
+            )
+    return {"swept": swept, "failed": failed}
+
+
+def _maybe_sweep(
+    mem_store: NativeMemoryStore,
+    embedder: FastEmbedEmbedder | None,
+    lock: threading.Lock,
+) -> None:
+    """Cheap opportunistic catch-up (KG-N7): if the embedder is ready and any
+    ``needs_embedding`` facts remain, sweep them now.
+
+    Costs exactly one ``query_facts`` call in the (common, steady-state) case
+    where nothing is pending -- cheap enough to run unconditionally at the
+    top of every ``remember``/``diary_write`` call rather than gating it
+    behind a flag. This is what lets a daemon that warmed while idle converge
+    on the very next mutating request instead of depending on the background
+    watcher's poll timing.
+    """
+    if embedder is None or not embedder.ready:
+        return
+    s = mem_store.store
+    pending = s.query_facts(predicate=_NEEDS_EMBEDDING_PREDICATE)  # type: ignore[attr-defined]
+    if pending.success and pending.output:
+        _sweep_needs_embedding(mem_store, embedder, lock)
+
+
+def _watch_embedder_and_sweep(
+    mem_store: NativeMemoryStore,
+    embedder: FastEmbedEmbedder,
+    lock: threading.Lock,
+    *,
+    poll_interval: float = 0.05,
+) -> None:
+    """Background thread target (§4.3, KG-N7): wait for the embedder's
+    ready/failed transition, then run ONE catch-up sweep.
+
+    Started by :func:`make_daemon` (daemon=True -- dies with the process,
+    consistent with every other background thread in this module) whenever a
+    non-``None`` embedder is configured. Three terminating conditions, all
+    reached in bounded time:
+
+    * ``embedder.ready`` is already True at construction (fast path, e.g. a
+      warm cache or a test's always-ready fake) -- sweeps immediately (a
+      no-op when nothing is pending) and returns.
+    * ``embedder.failed`` is set (load failed, or never going to succeed) --
+      nothing will ever become ready without a process restart, so there is
+      nothing to wait for; returns without sweeping.
+    * The embedder transitions ready mid-flight (the real first-run model
+      download case this fix targets) -- sweeps once and returns.
+
+    Deliberately does NOT loop forever polling for *new* needs_embedding
+    facts after that: an embedder cannot un-ready itself, so one post-ready
+    sweep converges everything pending at that moment. Anything filed after
+    convergence lands with a real vector (the embedder is ready), and the
+    rare filed-in-the-race-window case is covered by :func:`_maybe_sweep` on
+    the next mutating op plus the search-hardening lexical union in
+    :meth:`NativeMemoryStore.search`.
+    """
+    while True:
+        if embedder.ready:
+            _sweep_needs_embedding(mem_store, embedder, lock)
+            return
+        if embedder.failed:
+            return
+        time.sleep(poll_interval)
+
+
 def _dispatch_domain(
     mem_store: NativeMemoryStore,
     embedder: FastEmbedEmbedder | None,
@@ -317,6 +439,7 @@ def _dispatch_domain(
     truly-unknown tools fall through correctly.
     """
     if tool == "remember":
+        _maybe_sweep(mem_store, embedder, lock)
         content = str(args.get("content", ""))
         vector: list[float] | None = None
         if embedder is not None and embedder.ready:
@@ -407,6 +530,7 @@ def _dispatch_domain(
         return {"refs": list(result.output)}
 
     if tool == "diary_write":
+        _maybe_sweep(mem_store, embedder, lock)
         with lock:
             ref = mem_store.file_diary(
                 agent_name=str(args.get("agent_name", "")),
@@ -457,6 +581,16 @@ def make_daemon(
     """
     lock = threading.Lock()
     mem_store = NativeMemoryStore(store=store)
+    if embedder is not None:
+        # Catch-up sweep watcher (§4.3, KG-N7): started at daemon build time
+        # so it is exercised whenever tests call make_daemon() directly (the
+        # same pattern the existing KG-N3 tests already use), not just via
+        # run_daemon's production path.
+        threading.Thread(
+            target=_watch_embedder_and_sweep,
+            args=(mem_store, embedder, lock),
+            daemon=True,
+        ).start()
     resolved_version = version if version is not None else daemon_version()
     httpd_holder: dict[str, ThreadingHTTPServer] = {}
 

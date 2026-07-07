@@ -52,6 +52,25 @@ class _FakeEmbedder:
         h = sum(text.encode("utf-8")) % 997
         return [float(h % 7), float(h % 5), float(h % 3)]
 
+    def mark_ready(self) -> None:
+        """Test-only mutator (KG-N7): flip a not-ready-and-not-failed fake to
+        ready, simulating the real embedder's warm-load completing mid-flight
+        (e.g. the first-run HF model download finishing)."""
+        self._ready = True
+        self.failed = None
+
+
+class _NotYetWarmedEmbedder(_FakeEmbedder):
+    """KG-N7: models a controllable in-flight embedder -- not ready, not
+    failed (unlike ``_FakeEmbedder(ready=False)``, which is permanently
+    failed). Distinct class so the two "not ready" shapes are never confused:
+    KG-N3 tests want permanent failure; KG-N7 wants a live transition."""
+
+    def __init__(self, *, dim: int = 3) -> None:
+        super().__init__(ready=True, dim=dim)  # borrow embed()'s vector logic
+        self._ready = False
+        self.failed = None
+
 
 def _serve(store: Any, embedder: Any, *, durable: bool = False) -> Iterator[str]:
     httpd = make_daemon(
@@ -306,6 +325,141 @@ class TestEmbedderDegradedMode:
             assert st["embedder"]["ready"] is False
             hc = _health(url)
             assert hc["embedder"]["ready"] is False
+        finally:
+            next(gen, None)
+
+
+class TestNeedsEmbeddingSweep:
+    """KG-N7 (cold-start data-loss fix, docs/plans/2026-07-07-native-cutover-
+    design.md \u00a74.3/\u00a76): a drawer filed while the embedder is not ready must
+    converge to fully (vector-)searchable once the embedder becomes ready --
+    via the background watcher, the cheap next-op check, or both -- and the
+    needs_embedding marker must be invalidated exactly once, never silently
+    dropped."""
+
+    def test_sweep_on_ready_transition_makes_drawer_searchable(self) -> None:
+        store = AmplifierStore(record_access=False)
+        embedder = _NotYetWarmedEmbedder()
+        url = next(gen := _serve(store, embedder))
+        try:
+            out = _call(
+                url,
+                "remember",
+                {
+                    "wing": "sweep",
+                    "room": "r",
+                    "content": "the quarterly roadmap notes",
+                },
+            )
+            ref = out["ref"]
+            fact = store.query_facts(subject=ref, predicate="needs_embedding")
+            assert fact.success and len(fact.output) == 1
+
+            # Before the embedder is ready: fully degraded, lexical-only --
+            # still finds it by keyword (KG-N3's existing contract, unaffected
+            # by this fix).
+            pre = _call(url, "search", {"query": "roadmap", "k": 5, "wing": "sweep"})
+            assert pre["degraded"] == "lexical_only"
+            assert any(r["ref"] == ref for r in pre["results"])
+
+            # Simulate the model finishing its (first-run) download mid-flight.
+            embedder.mark_ready()
+
+            # Deterministic convergence check: either the background watcher
+            # catches the transition, or a later op's cheap check does --
+            # poll with a bounded deadline (mirrors
+            # test_shutdown_stops_the_server's convention above) rather than
+            # assume a fixed thread-timing race.
+            import time as _time
+
+            deadline = _time.monotonic() + 5.0
+            swept = False
+            while _time.monotonic() < deadline:
+                fact = store.query_facts(subject=ref, predicate="needs_embedding")
+                if fact.success and len(fact.output) == 0:
+                    swept = True
+                    break
+                _time.sleep(0.05)
+            assert swept, "needs_embedding fact was never invalidated by the sweep"
+
+            # A real (non-degraded) vector search must now find it semantically.
+            post = _call(url, "search", {"query": "roadmap", "k": 5, "wing": "sweep"})
+            assert post["degraded"] is None
+            assert any(r["ref"] == ref for r in post["results"])
+        finally:
+            next(gen, None)
+
+    def test_next_op_sweeps_when_daemon_warmed_while_idle(self) -> None:
+        """Deterministic backstop, independent of watcher timing: flip ready,
+        then drive convergence explicitly via an unrelated next mutating op
+        (`diary_write`) -- \u00a74.3's requirement that a daemon which warmed
+        while idle converges on its very next call."""
+        store = AmplifierStore(record_access=False)
+        embedder = _NotYetWarmedEmbedder()
+        url = next(gen := _serve(store, embedder))
+        try:
+            out = _call(
+                url,
+                "remember",
+                {"wing": "idle", "room": "r", "content": "idle warm drawer content"},
+            )
+            ref = out["ref"]
+            embedder.mark_ready()
+            _call(
+                url,
+                "diary_write",
+                {"agent_name": "sweeper", "entry": "unrelated", "topic": "t"},
+            )
+            fact = store.query_facts(subject=ref, predicate="needs_embedding")
+            assert fact.success and len(fact.output) == 0, (
+                "needs_embedding fact should have been invalidated by the "
+                "cheap per-op sweep check triggered by diary_write"
+            )
+        finally:
+            next(gen, None)
+
+    def test_sweep_skips_failed_item_without_crashing_daemon(self) -> None:
+        """Per-item sweep failures must be loud (stderr) but never crash the
+        daemon, never falsely invalidate the marker, and never block other
+        daemon operations. Driven entirely through the HTTP dispatch layer
+        (like every other test in this file) so the sweep's exception
+        handling is proven at the same boundary a real embed failure would
+        cross, not just at the private function's own signature."""
+
+        class _RaisingEmbedder(_NotYetWarmedEmbedder):
+            def embed(self, text: str) -> list[float]:
+                if not self.ready:
+                    raise EmbedderUnavailable("not ready")
+                raise RuntimeError("boom")
+
+        store = AmplifierStore(record_access=False)
+        embedder = _RaisingEmbedder()
+        url = next(gen := _serve(store, embedder))
+        try:
+            out = _call(
+                url,
+                "remember",
+                {"wing": "fail", "room": "r", "content": "will fail to embed"},
+            )
+            ref = out["ref"]
+            fact = store.query_facts(subject=ref, predicate="needs_embedding")
+            assert fact.success and len(fact.output) == 1
+
+            embedder.mark_ready()  # now .ready=True, but .embed() always raises
+
+            # The cheap per-op sweep check (triggered by this unrelated
+            # diary_write) must swallow the embed failure -- the daemon must
+            # stay up and keep answering requests.
+            _call(
+                url,
+                "diary_write",
+                {"agent_name": "sweeper", "entry": "unrelated", "topic": "t"},
+            )
+            assert _health(url)["ok"] is True
+
+            # The failed item's marker must NOT be falsely invalidated.
+            fact = store.query_facts(subject=ref, predicate="needs_embedding")
+            assert fact.success and len(fact.output) == 1
         finally:
             next(gen, None)
 
