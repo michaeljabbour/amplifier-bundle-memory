@@ -1,6 +1,6 @@
 [project]
 name = "amplifier-module-hooks-behavioral-write"
-version = "0.1.0"
+version = "2.0.0"
 description = "Amplifier hook module — T1-HOOK-1: salience-gated, post-session behavioral write that recomputes drawer importance from session outcome and applies a reversible update through the amplifier-data seam"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,7 +9,7 @@ authors = [
 ]
 dependencies = [
     "amplifier-core>=0.1.0",
-    "amplifier-module-tool-mempalace>=1.0.0",
+    "amplifier-module-tool-memory>=2.0.0",
 ]
 
 [project.entry-points."amplifier.modules"]
@@ -23,7 +23,7 @@ build-backend = "hatchling.build"
 packages = ["amplifier_module_hooks_behavioral_write"]
 
 [tool.uv.sources]
-amplifier-module-tool-mempalace = { path = "../tool-mempalace", editable = true }
+amplifier-module-tool-memory = { path = "../tool-memory", editable = true }
 
 [dependency-groups]
 dev = [

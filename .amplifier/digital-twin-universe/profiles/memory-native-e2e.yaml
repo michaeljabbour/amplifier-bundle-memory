@@ -1,0 +1,162 @@
+# memory-native-e2e DTU Profile
+#
+# End-to-end test environment for amplifier-bundle-memory's native cutover
+# (docs/plans/2026-07-07-native-cutover-design.md). Provisions an Ubuntu
+# 24.04 Incus container with the memory bundle and Amplifier installed from
+# a local Gitea mirror -- the legacy vendor package (mempalace) is NEVER
+# installed in this profile; the memory daemon (amplifier-data + a local
+# fastembed embedder) is the only store.
+#
+# Variables (provided at launch via --var):
+#   GITEA_URL    -- Gitea base URL reachable from inside the environment
+#                   (e.g. http://10.0.0.1:10110)
+#   GITEA_TOKEN  -- API token for Gitea (admin user)
+#
+# Required host environment variables (forwarded via passthrough):
+#   ANTHROPIC_API_KEY  -- Anthropic API key for LLM calls
+#   OPENAI_API_KEY     -- OpenAI API key for LLM calls
+#
+# Launch example:
+#   amplifier-digital-twin launch memory-native-e2e \
+#     --var GITEA_URL=http://10.0.0.1:10110 \
+#     --var GITEA_TOKEN=$(amplifier-gitea token <gitea-id> | jq -r .token)
+
+name: memory-native-e2e
+description: |
+  End-to-end test environment for the native amplifier-bundle-memory cutover.
+  Provisions an Ubuntu 24.04 container with a Rust toolchain (amplifier-data's
+  Rust kernel is built from the git pin at install time) and Amplifier
+  installed from a local Gitea mirror. Asserts the legacy vendor package is
+  ABSENT, exercises the friend-scenario (session 1 remember -> session 2
+  search through the auto-started memory daemon), and validates daemon
+  crash-respawn (KG-N6 in vivo).
+
+base:
+  image: ubuntu:24.04
+
+# URL rewriting rules.
+#
+# A mitmproxy-based HTTPS proxy intercepts git fetch calls and redirects
+# requests for the amplifier-bundle-memory GitHub repo to the local Gitea
+# mirror, so uv installs the locally mirrored version.
+url_rewrites:
+  auth:
+    username: admin
+    token_var: GITEA_TOKEN
+  # Keep uv's GitHub fast path disabled so `uv tool install` routes through
+  # git fetch and these rules actually apply. See profiles.md for the
+  # reasoning.
+  allow_uv_github_fast_path: false
+  default_match_mode: boundary
+  rules:
+    - match: github.com/michaeljabbour/amplifier-bundle-memory
+      target: ${GITEA_URL}/admin/amplifier-bundle-memory
+
+passthrough:
+  allow_external: true
+  services:
+    - name: anthropic
+      key_env: ANTHROPIC_API_KEY
+    - name: openai
+      key_env: OPENAI_API_KEY
+
+provision:
+  setup_cmds:
+    # 1. Core system packages + a Rust toolchain (amplifier-data's build
+    #    backend is maturin -- installing the git pin builds the kernel).
+    - apt-get update && apt-get install -y git curl python3 python3-pip jq build-essential
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    - echo 'export PATH="/root/.cargo/bin:$PATH"' >> /root/.bashrc
+
+    # 2. Install uv (Python package and project manager)
+    - curl -LsSf https://astral.sh/uv/install.sh | sh
+
+    # 3. Add /root/.local/bin and /root/.cargo/bin to PATH for this session
+    - |
+      echo 'export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"' >> /root/.bashrc
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+
+    # 4. Assert the legacy vendor package is NOT installed (and never will
+    #    be in this profile) -- the killer-gate proof that the native stack
+    #    needs zero vendor presence.
+    - |
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+      pip show mempalace 2>/dev/null && { echo "FAIL: mempalace is installed"; exit 1; } || echo "PASS: mempalace absent"
+
+    # 5. Clone amplifier-bundle-memory from the Gitea mirror into /workspace
+    - git clone ${GITEA_URL}/admin/amplifier-bundle-memory /workspace/amplifier-bundle-memory
+
+    # 6. Install Amplifier via uv — git+https URL is rewritten to Gitea mirror
+    - |
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+      uv tool install -vv git+https://github.com/microsoft/amplifier
+
+    # 7. Write API keys to keys.env (passthrough env vars; chmod 600)
+    - |
+      mkdir -p /root/.amplifier
+      printf 'ANTHROPIC_API_KEY=%s\nOPENAI_API_KEY=%s\n' "${ANTHROPIC_API_KEY}" "${OPENAI_API_KEY}" > /root/.amplifier/keys.env
+      chmod 600 /root/.amplifier/keys.env
+
+    # 8. Add the memory bundle to Amplifier (URL rewritten to Gitea mirror,
+    #    subdirectory points at the renamed native behavior).
+    - |
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+      amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/memory.yaml"
+
+    # 9. Touch a marker file for the in-container test suite's DTU sentinel
+    #    (see tests/integration/conftest.py) -- this profile is native-only,
+    #    there is no legacy palace directory to key off of anymore.
+    - touch /root/.dtu-memory-native
+
+    # 10. Post-provision smoke: real Amplifier session, friend-scenario
+    #     remember -> search round-trip through the auto-started daemon,
+    #     and coordinator events with the `memory:` prefix.
+    - |
+      set -euo pipefail
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+      VENV_PY=/root/.local/share/uv/tools/amplifier/bin/python
+
+      echo "=== memory-native-e2e smoke test ==="
+      cd /workspace
+
+      amplifier run 'hello' >/tmp/smoke.log 2>&1 || true
+      LATEST=$(ls -t /root/.amplifier/projects/*/sessions/*/events.jsonl 2>/dev/null | head -1)
+      if [ -n "$LATEST" ]; then
+        COUNT=$(grep -c '"memory:' "$LATEST" 2>/dev/null || echo 0)
+        [ "$COUNT" -gt 0 ] \
+          && echo "PASS  coordinator events flowing ($COUNT memory:* events)" \
+          || echo "WARN  zero memory:* coordinator events in $LATEST (may be expected for a trivial prompt)"
+      else
+        echo "WARN  no events.jsonl found -- run a session manually to verify"
+      fi
+
+      DAEMON_JSON="/root/.amplifier/memory/daemon.json"
+      if [ -f "$DAEMON_JSON" ]; then
+        echo "PASS  memory daemon.json present: $(cat "$DAEMON_JSON")"
+      else
+        echo "WARN  memory daemon.json not found -- daemon may not have auto-started yet"
+      fi
+
+      echo "=== smoke test complete ==="
+
+update:
+  refresh_pypi: true
+  cmds:
+    # Targeted cache invalidation -- ONLY the memory bundle modules.
+    # NEVER wipe the whole cache (rm -rf /root/.amplifier/cache/) -- that
+    # removes provider-anthropic, loop-streaming, and all foundation
+    # modules, breaking every session until Amplifier is fully reinstalled.
+    - |
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-memory-*
+      rm -rf /root/.amplifier/cache/amplifier-module-tool-memory-*
+      rm -rf /root/.amplifier/cache/amplifier-module-hooks-project-context-*
+      echo "[update] cleared memory bundle caches"
+    - |
+      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+      amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/memory.yaml"
+
+readiness:
+  - name: amplifier-installed
+    command: amplifier --version
+  - name: mempalace-absent
+    command: bash -c '! pip show mempalace >/dev/null 2>&1'

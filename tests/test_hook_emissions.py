@@ -12,14 +12,13 @@ Capture-hook latency model
 --------------------------
 The capture hook intentionally does no slow work in __call__.  It enqueues
 a job and returns; a daemon drain thread does the slow work (git wing
-detection, mempalace mcp drawer write).  Tests that need to assert the
+detection, the memory daemon call for the drawer write).  Tests that need to assert the
 drained behaviour call ``m._QUEUE.join()`` to wait for the worker.
 """
 
 from __future__ import annotations
 
 import asyncio
-import subprocess
 import threading
 import time
 from typing import Any
@@ -42,7 +41,7 @@ def _patch_capture_emitter(
     module attribute is sufficient because both the sync handler and the
     drain worker reference it by name (``emit_event``) at call time.
     """
-    import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+    import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
     lock = threading.Lock()
 
@@ -55,7 +54,7 @@ def _patch_capture_emitter(
 
 def _drain(timeout: float = 5.0) -> None:
     """Wait for the capture queue to fully drain. Test-only helper."""
-    import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+    import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
     if m._QUEUE is None:
         return
@@ -77,7 +76,7 @@ def _drain_capture_queue_between_tests() -> Any:
     """
     yield
     try:
-        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
         if m._QUEUE is not None:
             deadline = time.monotonic() + 5.0
@@ -93,18 +92,18 @@ class TestCaptureHookEmissions:
     ) -> None:
         """tool:post with worthy content → capture_queued is emitted by the
         time __call__ returns. drawer_filed arrives only after the drain."""
-        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         _patch_capture_emitter(monkeypatch, emitted)
-        monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+        monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
-        # Redirect the spool dir into tmp_path so we don't touch ~/.mempalace
+        # Redirect the spool dir into tmp_path so we don't touch the real memory home
         monkeypatch.setattr(
             m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
         )
 
-        hook = m.MempalaceCaptureHook()
+        hook = m.MemoryCaptureHook()
         asyncio.run(
             hook(
                 "tool:post",
@@ -120,7 +119,7 @@ class TestCaptureHookEmissions:
         queued = [e for e in emitted if e[0][1] == "capture_queued"]
         assert len(queued) == 1, f"Expected capture_queued in {emitted}"
         _args, kwargs = queued[0]
-        assert _args[0] == "mempalace-capture"
+        assert _args[0] == "memory-capture"
         assert kwargs.get("ok") is True
         assert "capture_id" in kwargs.get("data", {})
 
@@ -137,12 +136,12 @@ class TestCaptureHookEmissions:
     def test_capture_returns_fast_under_slow_drawer_write(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
-        """The hot-path __call__ must not block on the slow mempalace subprocess.
+        """The hot-path __call__ must not block on the slow memory daemon call.
 
         Simulate a 2-second drawer write and assert __call__ completes well
         under that.  This is the explicit latency contract.
         """
-        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         _patch_capture_emitter(monkeypatch, emitted)
@@ -153,13 +152,13 @@ class TestCaptureHookEmissions:
         def slow_write(*a: Any, **kw: Any) -> None:
             time.sleep(0.2)
 
-        monkeypatch.setattr(m, "_mcp_add_drawer", slow_write)
+        monkeypatch.setattr(m, "_file_drawer", slow_write)
         monkeypatch.setattr(m, "_detect_wing", lambda: (slow_write(), "wing_test")[1])
         monkeypatch.setattr(
             m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
         )
 
-        hook = m.MempalaceCaptureHook()
+        hook = m.MemoryCaptureHook()
 
         start = time.monotonic()
         asyncio.run(
@@ -184,12 +183,12 @@ class TestCaptureHookEmissions:
 
     def test_capture_emits_on_skip(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """tool:post with too-short output → capture_skipped event (sync path)."""
-        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         _patch_capture_emitter(monkeypatch, emitted)
 
-        hook = m.MempalaceCaptureHook()
+        hook = m.MemoryCaptureHook()
         asyncio.run(
             hook(
                 "tool:post",
@@ -200,7 +199,7 @@ class TestCaptureHookEmissions:
         skipped = [e for e in emitted if e[0][1] == "capture_skipped"]
         assert len(skipped) == 1, f"Expected capture_skipped in {emitted}"
         _args, kwargs = skipped[0]
-        assert _args[0] == "mempalace-capture"
+        assert _args[0] == "memory-capture"
         assert kwargs.get("ok") is False
         assert kwargs["data"]["reason"] == "too_short"
 
@@ -208,17 +207,17 @@ class TestCaptureHookEmissions:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
         """emit_events=False → no calls to emit_event at all (sync or drained)."""
-        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         _patch_capture_emitter(monkeypatch, emitted)
-        monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+        monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
         monkeypatch.setattr(
             m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
         )
 
-        hook = m.MempalaceCaptureHook(config={"emit_events": False})
+        hook = m.MemoryCaptureHook(config={"emit_events": False})
         asyncio.run(
             hook(
                 "tool:post",
@@ -236,13 +235,13 @@ class TestCaptureHookEmissions:
         """
         import json
 
-        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         _patch_capture_emitter(monkeypatch, emitted)
-        monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+        monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
-        # Pretend mempalace is initialised: spool dir lives under tmp_path.
+        # Point the spool dir at tmp_path (unconditional lazy creation).
         spool_dir = tmp_path / "spool" / "test_session"
         spool_dir.mkdir(parents=True)
         monkeypatch.setattr(m, "_spool_dir_for", lambda sid: spool_dir)
@@ -291,15 +290,11 @@ class TestCaptureHookEmissions:
 class TestBriefingHookEmissions:
     def test_briefing_emits_on_assemble(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """session:start with results → briefing_assembled event emitted."""
-        import amplifier_module_hooks_mempalace_briefing as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_briefing as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
-
-        def fake_run(cmd: Any, *a: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: object())
         monkeypatch.setattr(
             m,
             "_build_briefing",
@@ -307,14 +302,14 @@ class TestBriefingHookEmissions:
         )
         monkeypatch.setattr(m, "_detect_project_name", lambda: "testproject")
 
-        hook = m.MempalaceBriefingHook()
+        hook = m.MemoryBriefingHook()
         result = asyncio.run(hook("session:start", {"opening_prompt": "start working"}))
 
         assert result.action == "inject_context"
         assembled = [e for e in emitted if e[0][1] == "briefing_assembled"]
         assert len(assembled) == 1, f"Expected briefing_assembled in {emitted}"
         _args, kwargs = assembled[0]
-        assert _args[0] == "mempalace-briefing"
+        assert _args[0] == "memory-briefing"
         assert kwargs.get("ok") is True
         data = kwargs.get("data", {})
         assert "project" in data
@@ -327,41 +322,34 @@ class TestBriefingHookEmissions:
     def test_briefing_emits_skip_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When mempalace CLI is not found → briefing_skipped with mempalace_unavailable."""
-        import amplifier_module_hooks_mempalace_briefing as m  # type: ignore[import]
+        """When the memory daemon is unavailable → briefing_skipped with daemon_unavailable."""
+        import amplifier_module_hooks_memory_briefing as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
-        def raise_not_found(*a: Any, **kw: Any) -> None:
-            raise FileNotFoundError("mempalace not found")
-
-        monkeypatch.setattr(m.subprocess, "run", raise_not_found)
+        monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
 
-        hook = m.MempalaceBriefingHook()
+        hook = m.MemoryBriefingHook()
         asyncio.run(hook("session:start", {}))
 
         skipped = [e for e in emitted if e[0][1] == "briefing_skipped"]
         assert len(skipped) == 1
-        assert skipped[0][1]["data"]["reason"] == "mempalace_unavailable"
+        assert skipped[0][1]["data"]["reason"] == "daemon_unavailable"
 
     def test_briefing_no_emit_when_disabled(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """emit_events=False → no calls to emit_event."""
-        import amplifier_module_hooks_mempalace_briefing as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_briefing as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
-
-        def raise_not_found(*a: Any, **kw: Any) -> None:
-            raise FileNotFoundError
-
-        monkeypatch.setattr(m.subprocess, "run", raise_not_found)
+        monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
 
-        hook = m.MempalaceBriefingHook(config={"emit_events": False})
+        hook = m.MemoryBriefingHook(config={"emit_events": False})
         asyncio.run(hook("session:start", {}))
         assert emitted == []
 
@@ -377,12 +365,12 @@ class TestInterjectHookEmissions:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """prompt:submit with matching memory → memory_surfaced event."""
-        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_interject as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
-        hook = m.MempalaceInterjectHook({})
+        hook = m.MemoryInterjectHook({})
         memories = [
             {
                 "id": "mem_1",
@@ -407,7 +395,7 @@ class TestInterjectHookEmissions:
         surfaced = [e for e in emitted if e[0][1] == "memory_surfaced"]
         assert len(surfaced) == 1, f"Expected memory_surfaced in {emitted}"
         _args, kwargs = surfaced[0]
-        assert _args[0] == "mempalace-interject"
+        assert _args[0] == "memory-interject"
         assert kwargs.get("ok") is True
         data = kwargs.get("data", {})
         assert data["trigger"] == "prompt_submit"
@@ -419,12 +407,12 @@ class TestInterjectHookEmissions:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """prompt_enabled=False → interject_skipped with reason=disabled."""
-        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_interject as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
-        hook = m.MempalaceInterjectHook({"prompt_enabled": False})
+        hook = m.MemoryInterjectHook({"prompt_enabled": False})
         await hook.on_prompt_submit(
             "prompt:submit", {"prompt": "a long enough prompt here", "session_id": "t"}
         )
@@ -439,12 +427,12 @@ class TestInterjectHookEmissions:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Short prompt → interject_skipped with reason=too_short."""
-        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_interject as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
-        hook = m.MempalaceInterjectHook({})
+        hook = m.MemoryInterjectHook({})
         await hook.on_prompt_submit("prompt:submit", {"prompt": "hi"})
 
         skipped = [e for e in emitted if e[0][1] == "interject_skipped"]
@@ -456,12 +444,12 @@ class TestInterjectHookEmissions:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """emit_events=False → no emit calls."""
-        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_interject as m  # type: ignore[import]
 
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
-        hook = m.MempalaceInterjectHook({"emit_events": False, "prompt_enabled": False})
+        hook = m.MemoryInterjectHook({"emit_events": False, "prompt_enabled": False})
         await hook.on_prompt_submit("prompt:submit", {"prompt": "hi"})
         assert emitted == []
 
@@ -572,16 +560,16 @@ class TestProjectContextHookEmissions:
 
 def _run_capture(monkeypatch: pytest.MonkeyPatch, tmp_path: Any, data: dict) -> list:
     """File one capture through the drain thread and return emitted events."""
-    import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+    import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
     emitted: list[tuple[Any, ...]] = []
     _patch_capture_emitter(monkeypatch, emitted)
-    monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+    monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
     monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
     monkeypatch.setattr(
         m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
     )
-    hook = m.MempalaceCaptureHook()
+    hook = m.MemoryCaptureHook()
     asyncio.run(hook("tool:post", data))
     _drain()
     return emitted

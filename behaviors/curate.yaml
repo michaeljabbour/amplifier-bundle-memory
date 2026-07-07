@@ -4,7 +4,7 @@ bundle:
   description: |
     OPT-IN cold-path memory consolidation.
 
-    This behavior is intentionally NOT included by behaviors/mempalace.yaml,
+    This behavior is intentionally NOT included by behaviors/memory.yaml,
     because it depends on amplifier-bundle-attractor (the loop-pipeline engine).
     Add this behavior to your bundle only if attractor is available; the base
     memory bundle must never hard-depend on it.
@@ -21,8 +21,8 @@ bundle:
         the optionality MUST be a Python capability check, never a hard YAML
         dependency (foundation-expert guidance, 2026-06-05).
 
-    Script path resolution: curate.dot calls the `mempalace-load-captures` and
-    `mempalace-write-cells` entry points (declared in tool-mempalace's
+    Script path resolution: curate.dot calls the `memory-load-captures` and
+    `memory-write-cells` entry points (declared in tool-memory's
     pyproject.toml [project.scripts]), so they resolve on PATH regardless of cwd.
 
 # ── Tools ───────────────────────────────────────────────────────────────────

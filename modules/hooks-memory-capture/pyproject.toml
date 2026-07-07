@@ -1,0 +1,42 @@
+[project]
+name = "amplifier-module-hooks-memory-capture"
+version = "2.0.0"
+description = "Amplifier hook module — automatically files verbatim tool outputs as memory drawers with auto-detected wing and room"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Michael Jabbour" },
+]
+dependencies = [
+    "amplifier-core>=0.1.0",
+    # amplifier-module-tool-memory already hard-depends on amplifier-data
+    # + fastembed (native cutover) -- there is no vendor dependency
+    # anymore -- this hook's write path is client.remember() via
+    # ensure_daemon(), no vendor subprocess.
+    "amplifier-module-tool-memory>=2.0.0",
+]
+
+[project.entry-points."amplifier.modules"]
+hooks-memory-capture = "amplifier_module_hooks_memory_capture:mount"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["amplifier_module_hooks_memory_capture"]
+
+[tool.uv.sources]
+amplifier-module-tool-memory = { path = "../tool-memory", editable = true }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.1",
+    "pyright>=1.1",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = false
+reportGeneralTypeIssues = false

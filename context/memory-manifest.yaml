@@ -5,7 +5,7 @@
 # to steer what gets captured and how important each kind of knowledge is.
 #
 # Resolution order (first found wins):
-#   1. manifest_path set in behaviors/mempalace.yaml (hooks-mempalace-capture config)
+#   1. manifest_path set in behaviors/memory.yaml (hooks-memory-capture config)
 #   2. <project>/project-context/memory-manifest.yaml   (per-project override)
 #   3. ~/.amplifier/memory-manifest.yaml                 (per-user default)
 #   4. the built-in default baked into the module (mirrors this file)

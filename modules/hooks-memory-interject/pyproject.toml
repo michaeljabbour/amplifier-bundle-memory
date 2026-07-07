@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amplifier-module-hooks-memory-interject"
+version = "2.0.0"
+description = "Amplifier hook that surfaces relevant memories mid-session at the right moment"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "amplifier-core",
+    # amplifier-module-tool-memory already hard-depends on amplifier-data
+    # + fastembed (native cutover, docs/plans/2026-07-07-native-cutover-
+    # design.md) -- there is no vendor dependency anymore -- retrieval goes
+    # exclusively through MemoryClient.search() via ensure_daemon(), no
+    # vendor subprocess, no ChromaDB.
+    #
+    # Only used by the OPT-IN llm_judge_enabled path (default False -- see
+    # module docstring "Privacy"). Never invoked unless a user explicitly
+    # sets llm_judge_enabled: true in config.
+    "openai>=1.0.0",
+    "amplifier-module-tool-memory>=2.0.0",
+]
+
+[project.entry-points."amplifier.modules"]
+hooks-memory-interject = "amplifier_module_hooks_memory_interject:mount"
+
+[tool.uv.sources]
+amplifier-module-tool-memory = { path = "../tool-memory", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+    "pyright>=1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = false
+reportGeneralTypeIssues = false
+# Pre-existing: chromadb QueryResult fields can be None; guarded by try/except in code
+reportOptionalSubscript = false

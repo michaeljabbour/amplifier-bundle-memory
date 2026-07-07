@@ -10,14 +10,14 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "amplifier-core",
-    "amplifier-module-tool-mempalace>=1.0.0",
+    "amplifier-module-tool-memory>=1.0.0",
 ]
 
 [project.entry-points."amplifier.modules"]
 hooks-project-context = "amplifier_module_hooks_project_context:mount"
 
 [tool.uv.sources]
-amplifier-module-tool-mempalace = { path = "../tool-mempalace", editable = true }
+amplifier-module-tool-memory = { path = "../tool-memory", editable = true }
 
 [dependency-groups]
 dev = [

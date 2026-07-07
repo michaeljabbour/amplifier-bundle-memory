@@ -7,8 +7,6 @@ Run modes:
   Default suite  — test_zero_regression_guarantee, test_max_boost_does_not_dominate_semantic
                    (fast math checks, always run)
   Benchmark run  — pytest -m benchmark  (includes the full R@5 simulation)
-  Integration    — requires mempalace CLI (auto-skipped when unavailable)
-
 GATE: R@5_reranked >= R@5_baseline. Regression → block CP4 release.
 
 Scale: 200 drawers × 30 queries (per spec Section 9.2).
@@ -16,40 +14,20 @@ Scale: 200 drawers × 30 queries (per spec Section 9.2).
 
 from __future__ import annotations
 
-import os
 import random
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from amplifier_module_hooks_mempalace_briefing import _rerank_by_importance
-from amplifier_module_tool_mempalace.phase3 import compute_importance
-from amplifier_module_tool_mempalace.scripts.memory_store import (
-    _call_mcp_tool as _call_mcp_tool_impl,
-)
+from amplifier_module_hooks_memory_briefing import _rerank_by_importance
+from amplifier_module_tool_memory.phase3 import compute_importance
 
 # ---------------------------------------------------------------------------
 # CLI availability guard
 # ---------------------------------------------------------------------------
 
-
-def _mempalace_available() -> bool:
-    try:
-        result = subprocess.run(
-            ["mempalace", "--version"], capture_output=True, timeout=5
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
-MEMPALACE_AVAILABLE = _mempalace_available()
-skip_no_mempalace = pytest.mark.skipif(
-    not MEMPALACE_AVAILABLE, reason="mempalace CLI not available"
-)
 
 # NOTE: pytestmark NOT set at module level — only specific tests are marked
 # benchmark. test_zero_regression_guarantee and test_max_boost_does_not_dominate_semantic
@@ -59,6 +37,7 @@ skip_no_mempalace = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 # Synthetic fixture: 200 drawers × 30 queries
 # ---------------------------------------------------------------------------
+
 
 def _make_drawer(id_: str, category: str, wing: str, room: str, text: str) -> dict:
     return {
@@ -1220,7 +1199,7 @@ class TestBenchmarkRecallPurePython:
             r5_baseline=r5_baseline,
             r5_reranked=r5_reranked,
             fixture_desc="200 drawers × 30 queries (pure-Python simulation)",
-            run_mode="pure-Python (no real palace; simulated semantic scores)",
+            run_mode="pure-Python (no real store; simulated semantic scores)",
             per_difficulty=per_difficulty,
         )
 
@@ -1228,120 +1207,3 @@ class TestBenchmarkRecallPurePython:
             f"BENCHMARK REGRESSION: R@5 dropped from {r5_baseline:.3f} to {r5_reranked:.3f}.\n"
             "Block CP4. See spec Section 9.4 for mitigations."
         )
-
-
-# ---------------------------------------------------------------------------
-# Full integration benchmark (requires mempalace CLI)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.benchmark
-@skip_no_mempalace
-class TestBenchmarkRecallIntegration:
-    """
-    Full integration benchmark using a real MemPalace instance.
-    SKIPPED unless mempalace CLI is installed.
-    """
-
-    @pytest.fixture(scope="class")
-    def palace_dir(self, tmp_path_factory: Any) -> Path:
-        palace = tmp_path_factory.mktemp("benchmark_palace")
-        result = subprocess.run(
-            ["mempalace", "init", str(palace)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            pytest.skip(f"mempalace init failed: {result.stderr}")
-        return palace
-
-    def _mcp(self, palace_dir: Path, tool: str, args: dict) -> dict:
-        """Call a real MemPalace MCP tool via ``mempalace-mcp``'s JSON-RPC stdio surface.
-
-        Was ``subprocess.run(["mempalace", "mcp", "--call", payload], ...)`` --
-        a CLI invocation that never existed in any published mempalace (see
-        ``amplifier_module_tool_mempalace.scripts.memory_store._call_mcp_tool``'s
-        docstring). Delegates to that canonical helper, passing ``MEMPALACE_DIR``
-        via ``env`` so each benchmark run is scoped to its own temp palace
-        exactly as the previous (broken) invocation intended.
-        """
-        env = {**os.environ, "MEMPALACE_DIR": str(palace_dir)}
-        result = _call_mcp_tool_impl(tool, args, timeout=30.0, env=env)
-        if result.get("error"):
-            return {"error": result["error"]}
-        return result
-
-    def test_benchmark_recall_r5_no_regression(self, palace_dir: Path) -> None:
-        """Full integration benchmark: seed real palace, run semantic search, verify R@5."""
-        from typing import Any  # noqa: F401 (used in fixture type hint)
-
-        # Seed palace with all 200 drawers
-        for d in ALL_DRAWERS:
-            self._mcp(
-                palace_dir,
-                "mempalace_add_drawer",
-                {
-                    "wing": d["wing"],
-                    "room": d["room"],
-                    "content": d["content"],
-                    "added_by": "benchmark",
-                },
-            )
-
-        # Run queries — no importance backfill for baseline
-        baseline_scores: list[float] = []
-        treatment_scores: list[float] = []
-
-        for query in RECALL_QUERIES:
-            raw = self._mcp(
-                palace_dir,
-                "mempalace_search",
-                {
-                    "query": query["query"],
-                    "wing": "wing_myapp",
-                    "limit": 8,
-                },
-            ).get("results", [])
-            if not raw:
-                baseline_scores.append(0.0)
-                treatment_scores.append(0.0)
-                continue
-
-            top5_b = [r.get("id", "") for r in raw[:5]]
-
-            imp_lookup: dict[str, float] = {}
-            for r in raw:
-                rid = r.get("id", "")
-                if rid:
-                    kg = self._mcp(
-                        palace_dir, "mempalace_kg_query", {"entity": f"drawer:{rid}"}
-                    )
-                    for fact in kg.get("facts", []):
-                        if fact.get("predicate") == "has_importance":
-                            try:
-                                imp_lookup[rid] = float(fact["object"])
-                            except (ValueError, KeyError):
-                                pass
-
-            reranked = _rerank_by_importance(raw, imp_lookup, weight=1.0)
-            top5_t = [r.get("id", "") for r in reranked[:5]]
-
-            baseline_scores.append(recall_at_5(top5_b, query["expected_ids"]))
-            treatment_scores.append(recall_at_5(top5_t, query["expected_ids"]))
-
-        r5_b = sum(baseline_scores) / max(len(baseline_scores), 1)
-        r5_t = sum(treatment_scores) / max(len(treatment_scores), 1)
-
-        _write_eval_doc(
-            r5_baseline=r5_b,
-            r5_reranked=r5_t,
-            fixture_desc="200 drawers × 30 queries (real MemPalace integration)",
-            run_mode="integration (real palace + real embeddings)",
-            per_difficulty={"all": (r5_b, r5_t)},
-        )
-
-        print(
-            f"\nIntegration benchmark: R@5_baseline={r5_b:.3f}, R@5_reranked={r5_t:.3f}"
-        )
-        assert r5_t >= r5_b, f"REGRESSION: {r5_b:.3f} → {r5_t:.3f}"

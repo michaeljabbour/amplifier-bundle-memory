@@ -20,7 +20,6 @@ Test coverage:
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 from typing import Any
 
@@ -76,9 +75,7 @@ class _FakeCoordinator:
         if providers:
             self._mounted["providers"] = providers
 
-    async def mount(
-        self, mount_point: str, obj: Any, *, name: str = "unnamed"
-    ) -> None:
+    async def mount(self, mount_point: str, obj: Any, *, name: str = "unnamed") -> None:
         """Register obj at mount_point under name."""
         if mount_point not in self._mounted:
             self._mounted[mount_point] = {}
@@ -88,15 +85,14 @@ class _FakeCoordinator:
         """Return the dict of modules at mount_point (or None)."""
         return self._mounted.get(mount_point)
 
-    def register_contributor(
-        self, channel: str, name: str, callback: Any
-    ) -> None:
+    def register_contributor(self, channel: str, name: str, callback: Any) -> None:
         self._contributors.setdefault(channel, {})[name] = callback
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_msg(i: int, extra: str = "") -> dict[str, Any]:
     return {"role": "user", "content": f"Message {i}: {extra}"}
@@ -188,9 +184,7 @@ class TestOnSessionReady:
 
         session = coord.get("session") or {}
         ctx = session.get("context")
-        assert ctx._hooks is coord.hooks, (
-            "on_session_ready must wire coordinator.hooks"
-        )
+        assert ctx._hooks is coord.hooks, "on_session_ready must wire coordinator.hooks"
 
     async def test_no_provider_is_safe(self) -> None:
         """on_session_ready() with no providers must not raise."""
@@ -227,10 +221,12 @@ class TestOnSessionReady:
 class TestBelowThreshold:
     async def test_no_compact_below_threshold(self) -> None:
         """With an impossibly high threshold, add_message must never compact."""
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1_000_000,
-            "keep_recent_messages": 20,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1_000_000,
+                "keep_recent_messages": 20,
+            }
+        )
         msgs = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "World"},
@@ -259,10 +255,12 @@ class TestBelowThreshold:
 class TestDirectCompact:
     async def test_compact_shrinks_working(self) -> None:
         """compact() must reduce _working when len(verbatim) > keep_recent."""
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1_000_000,  # disable auto
-            "keep_recent_messages": 2,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1_000_000,  # disable auto
+                "keep_recent_messages": 2,
+            }
+        )
         ctx._provider = _FakeProvider()
 
         msgs = [_make_msg(i, "content detail here") for i in range(6)]
@@ -279,10 +277,12 @@ class TestDirectCompact:
 
     async def test_compact_preserves_raw_invariant(self) -> None:
         """get_messages() MUST return all original messages after compact()."""
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1_000_000,
-            "keep_recent_messages": 2,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1_000_000,
+                "keep_recent_messages": 2,
+            }
+        )
         ctx._provider = _FakeProvider()
 
         msgs = [_make_msg(i) for i in range(6)]
@@ -294,14 +294,18 @@ class TestDirectCompact:
         raw = await ctx.get_messages()
         assert len(raw) == 6, "Raw must preserve ALL 6 original messages"
         for orig, got in zip(msgs, raw):
-            assert orig == got, "Raw messages must be byte-for-byte identical to originals"
+            assert orig == got, (
+                "Raw messages must be byte-for-byte identical to originals"
+            )
 
     async def test_compact_creates_memory_message(self) -> None:
         """compact() must create a [Consolidated memory] system message at pos 0."""
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1_000_000,
-            "keep_recent_messages": 2,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1_000_000,
+                "keep_recent_messages": 2,
+            }
+        )
         ctx._provider = _FakeProvider()
 
         for i in range(5):
@@ -317,10 +321,12 @@ class TestDirectCompact:
 
     async def test_compact_verbatim_tail_intact(self) -> None:
         """The last keep_recent messages must be verbatim in _working after compact."""
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1_000_000,
-            "keep_recent_messages": 2,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1_000_000,
+                "keep_recent_messages": 2,
+            }
+        )
         ctx._provider = _FakeProvider()
 
         msgs = [_make_msg(i) for i in range(5)]
@@ -343,10 +349,12 @@ class TestDirectCompact:
 class TestProviderNote:
     async def test_fake_provider_note_in_memory_msg(self) -> None:
         """When a provider is available, its returned note must appear in _working[0]."""
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1_000_000,
-            "keep_recent_messages": 1,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1_000_000,
+                "keep_recent_messages": 1,
+            }
+        )
         ctx._provider = _FakeProvider()
 
         for i in range(4):
@@ -372,10 +380,12 @@ class TestAutoCompact:
     async def test_auto_compact_triggered(self) -> None:
         """Crossing the token threshold via add_message() must trigger compact()."""
         # Very low threshold; each long message far exceeds it.
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 10,
-            "keep_recent_messages": 1,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 10,
+                "keep_recent_messages": 1,
+            }
+        )
         ctx._provider = _FakeProvider()
 
         # Each message: ~400 chars → ~100 tokens (char/4) or ~80 (tiktoken).
@@ -396,11 +406,13 @@ class TestAutoCompact:
 
     async def test_auto_compact_disabled(self) -> None:
         """enabled=False must prevent auto-compact regardless of token count."""
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1,  # immediately triggering if enabled
-            "keep_recent_messages": 1,
-            "enabled": False,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1,  # immediately triggering if enabled
+                "keep_recent_messages": 1,
+                "enabled": False,
+            }
+        )
         for i in range(5):
             await ctx.add_message(_long_msg(i))
 
@@ -419,16 +431,15 @@ class TestAutoCompact:
 class TestNoProviderFallback:
     async def test_fallback_retains_evicted_content(self) -> None:
         """Verbatim fallback must embed evicted message content in memory msg."""
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1_000_000,
-            "keep_recent_messages": 2,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1_000_000,
+                "keep_recent_messages": 2,
+            }
+        )
         assert ctx._provider is None, "No provider should be set in this test"
 
-        facts = [
-            f"Unique fact {i}: the answer is {i * 7}"
-            for i in range(6)
-        ]
+        facts = [f"Unique fact {i}: the answer is {i * 7}" for i in range(6)]
         for fact in facts:
             await ctx.add_message({"role": "user", "content": fact})
 
@@ -456,10 +467,12 @@ class TestNoProviderFallback:
             async def complete(self, request: Any, **kwargs: Any) -> Any:
                 raise RuntimeError("simulated provider failure")
 
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1_000_000,
-            "keep_recent_messages": 1,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1_000_000,
+                "keep_recent_messages": 1,
+            }
+        )
         ctx._provider = _BrokenProvider()
 
         msgs = [{"role": "user", "content": f"critical data {i}"} for i in range(4)]
@@ -520,9 +533,11 @@ class TestSetMessagesAndClear:
         assert await ctx.get_messages_for_request() == []
 
     async def test_add_after_clear(self) -> None:
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1_000_000,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1_000_000,
+            }
+        )
         for i in range(3):
             await ctx.add_message(_make_msg(i))
 
@@ -541,10 +556,12 @@ class TestSetMessagesAndClear:
 
 class TestShouldCompact:
     async def test_should_compact_true_when_above_threshold(self) -> None:
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 10,
-            "enabled": True,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 10,
+                "enabled": True,
+            }
+        )
         # Add a message with ~100 chars → ~25 tokens (char/4) > threshold=10
         await ctx.add_message({"role": "user", "content": "x" * 100})
         # Note: add_message may have already compacted (keep_recent default=20,
@@ -556,9 +573,11 @@ class TestShouldCompact:
         )
 
     async def test_should_compact_false_when_below_threshold(self) -> None:
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 1_000_000,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 1_000_000,
+            }
+        )
         await ctx.add_message({"role": "user", "content": "tiny"})
         assert not await ctx.should_compact()
 
@@ -571,10 +590,12 @@ class TestShouldCompact:
 class TestMultipleCompactions:
     async def test_multiple_compactions_raw_invariant(self) -> None:
         """After several compaction cycles, raw must still hold every message."""
-        ctx = m.SleepConsolidatingContext({
-            "consolidation_threshold_tokens": 10,
-            "keep_recent_messages": 1,
-        })
+        ctx = m.SleepConsolidatingContext(
+            {
+                "consolidation_threshold_tokens": 10,
+                "keep_recent_messages": 1,
+            }
+        )
         ctx._provider = _FakeProvider()
 
         all_msgs = []
@@ -584,6 +605,8 @@ class TestMultipleCompactions:
             await ctx.add_message(msg)
 
         raw = await ctx.get_messages()
-        assert len(raw) == 10, "All 10 messages must be in raw after repeated compaction"
+        assert len(raw) == 10, (
+            "All 10 messages must be in raw after repeated compaction"
+        )
         for orig, got in zip(all_msgs, raw):
             assert orig == got, f"Message at index {all_msgs.index(orig)} was mutated"

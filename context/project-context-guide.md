@@ -43,7 +43,7 @@ The coordination files are organized by how often they change and how critical t
 
 ## Setup
 
-Auto-scaffolding is **disabled by default** (`setup_if_missing: false` in `behaviors/mempalace.yaml`): the hook reads and updates an existing `project-context/` directory but will not create one in projects that lack it. To scaffold a project deliberately, use the manual command below, or set `setup_if_missing: true` to restore automatic scaffolding everywhere.
+Auto-scaffolding is **disabled by default** (`setup_if_missing: false` in `behaviors/memory.yaml`): the hook reads and updates an existing `project-context/` directory but will not create one in projects that lack it. To scaffold a project deliberately, use the manual command below, or set `setup_if_missing: true` to restore automatic scaffolding everywhere.
 
 ```bash
 # Manual setup (if needed)
@@ -54,4 +54,4 @@ amplifier run "set up project-context coordination files for this project"
 
 `AGENTS.md` at the project root is the cross-platform entry point. It is read natively by Amplifier, OpenAI Codex, GitHub Copilot, Cursor, and Windsurf. Claude Code users should symlink: `ln -s AGENTS.md CLAUDE.md`.
 
-The coordination files in `project-context/` complement the MemPalace semantic index — the files are human-readable and repo-portable; the palace provides fast semantic retrieval. Both layers work together.
+The coordination files in `project-context/` complement the native semantic memory index — the files are human-readable and repo-portable; the memory store provides fast semantic retrieval. Both layers work together.

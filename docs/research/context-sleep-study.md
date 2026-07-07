@@ -7,7 +7,7 @@ fills, run an offline consolidation pass" — to Amplifier agent context managem
 **Bottom line:** the module is a correct, opt-in reference implementation. The
 research does **not** support promoting it to a default or marketing it as a
 reasoning improver. Its honest value is lossless compression of *redundant/verbose*
-context plus a future MemPalace bridge — not "metabolizing context into a
+context plus a future memory-store bridge — not "metabolizing context into a
 reasoning-ready state."
 
 ---
@@ -55,13 +55,13 @@ The module encodes the findings as hard defaults (see `modules/context-sleep/REA
 ## Integration recommendation
 
 - **Keep opt-in.** Committed under `modules/context-sleep/` (27/27 tests), **not**
-  wired into `behaviors/mempalace.yaml`. Leave it that way until there's a workload
+  wired into `behaviors/memory.yaml`. Leave it that way until there's a workload
   it demonstrably helps. Replacing `context-simple` expecting better reasoning is
   not supported by evidence.
 - **Correct use case:** compressing repetitive/verbose context (e.g. long tool-output
   transcripts) where there is genuine redundancy to remove — not already-atomic facts.
 - **The genuinely complementary win (future, 1-file):** a hook on the module's
-  `context:sleep_complete` event that writes consolidated facts to MemPalace —
+  `context:sleep_complete` event that writes consolidated facts to memory —
   coupling working-memory compaction (the module) to long-term semantic memory
   (this bundle's existing strength).
 
@@ -70,5 +70,5 @@ The module encodes the findings as hard defaults (see `modules/context-sleep/REA
 `amplifier-module-context-simple` (truncation/ephemeral compaction, no LLM) and
 `amplifier-bundle-context-managed` (LLM rolling summarization) already occupy the
 LLM-summarization niche. `context-sleep` is distinguished only by faithful
-two-buffer consolidation + the MemPalace bridge — both memory-bundle concerns,
+two-buffer consolidation + the memory-store bridge — both memory-bundle concerns,
 which is why it lives here rather than as a standalone bundle.

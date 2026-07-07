@@ -6,7 +6,7 @@ clears the configured bar. It must be pure (no I/O, no mutation).
 
 from __future__ import annotations
 
-from amplifier_module_tool_mempalace.salience import (
+from amplifier_module_tool_memory.salience import (
     SalienceConfig,
     SalienceInput,
     evaluate_salience,

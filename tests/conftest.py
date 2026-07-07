@@ -5,6 +5,7 @@ Adds all module directories to sys.path so hook modules can be imported
 without full package installation. The try/except imports in each hook handle
 the missing amplifier_core Hook/HookContext gracefully.
 """
+
 from __future__ import annotations
 
 import sys

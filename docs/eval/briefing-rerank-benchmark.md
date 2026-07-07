@@ -4,7 +4,7 @@ R@5 recall gate for CP4 importance re-ranking.
 
 ## Run: 2026-04-17T20:04:55.168444+00:00
 
-**Mode**: pure-Python (no real palace; simulated semantic scores)  
+**Mode**: pure-Python (no real store; simulated semantic scores)  
 **Fixture**: 200 drawers × 30 queries (pure-Python simulation)  
 
 | Metric | Value |
@@ -24,7 +24,7 @@ R@5 recall gate for CP4 importance re-ranking.
 
 ## Run: 2026-04-17T20:05:53.572923+00:00
 
-**Mode**: pure-Python (no real palace; simulated semantic scores)  
+**Mode**: pure-Python (no real store; simulated semantic scores)  
 **Fixture**: 200 drawers × 30 queries (pure-Python simulation)  
 
 | Metric | Value |
@@ -44,7 +44,7 @@ R@5 recall gate for CP4 importance re-ranking.
 
 ## Run: 2026-04-17T20:07:09.627906+00:00
 
-**Mode**: pure-Python (no real palace; simulated semantic scores)  
+**Mode**: pure-Python (no real store; simulated semantic scores)  
 **Fixture**: 200 drawers × 30 queries (pure-Python simulation)  
 
 | Metric | Value |
@@ -64,7 +64,7 @@ R@5 recall gate for CP4 importance re-ranking.
 
 ## Run: 2026-04-17T21:28:27.200771+00:00
 
-**Mode**: pure-Python (no real palace; simulated semantic scores)  
+**Mode**: pure-Python (no real store; simulated semantic scores)  
 **Fixture**: 200 drawers × 30 queries (pure-Python simulation)  
 
 | Metric | Value |

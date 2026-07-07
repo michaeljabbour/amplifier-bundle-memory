@@ -1,0 +1,77 @@
+[project]
+name = "amplifier-module-tool-memory"
+version = "2.0.0"
+description = "High-level Amplifier tool module for the native memory daemon (amplifier-data) — search, remember, knowledge graph, traverse, diary, mine, and events operations"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Michael Jabbour" },
+]
+dependencies = [
+    "amplifier-core>=0.1.0",
+    # THE store now (native cutover, D8 of
+    # docs/plans/2026-07-07-native-cutover-design.md) -- was the [substrate]
+    # extra; promoted to a hard dependency once the tool and hooks are
+    # rewired onto the native daemon. Full SHA (not @main), never bumped
+    # without moving the conductor's mirrored pin in lockstep (see HANDOFF.md).
+    "amplifier-data @ git+https://github.com/michaeljabbour/amplifier-data@09482f1fa569ba8407894cad3a32f8ab6aecbc3d",
+    # Local daemon-side embedder (fastembed, ONNX, no torch; §4 of the design
+    # doc). Only the memory daemon process actually loads a model
+    # (daemon.run_daemon / embedder.FastEmbedEmbedder); session/hook/tool
+    # processes stay stdlib-only via client.MemoryClient -- a hard dependency
+    # here just means fastembed is importable in the venv, not that every
+    # process pays the model-load cost.
+    "fastembed>=0.3",
+]
+# NOTE: the legacy vendor package is NOT a dependency anymore -- there is no
+# vendor subprocess left in this package. [substrate] extra: DELETED
+# (D8, folded into the hard dependencies above).
+
+[project.optional-dependencies]
+# Read-only import of a legacy vendor store (§9 of the design doc). ONLY
+# chromadb -- never the vendor package itself, which is not installed by
+# this migration path. Used exclusively by migrate.py.
+migrate = ["chromadb>=0.5"]
+
+[project.entry-points."amplifier.modules"]
+tool-memory = "amplifier_module_tool_memory:mount"
+
+[project.scripts]
+# Cold-path consolidation pipeline nodes (invoked by pipelines/curate.dot).
+memory-load-captures = "amplifier_module_tool_memory.scripts.load_captures:main"
+memory-write-cells = "amplifier_module_tool_memory.scripts.write_cells:main"
+# Multi-process single-writer companion-server concurrency check.
+memory-daemon-concurrency-check = "amplifier_module_tool_memory.scripts.server_concurrency_check:main"
+# Authenticated MCP-shaped gateway / native memory daemon over amplifier-data.
+memory-daemon = "amplifier_module_tool_memory.daemon:main"
+# One-shot, read-only import of a legacy vendor store (§9; D7).
+amplifier-memory-import = "amplifier_module_tool_memory.migrate:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Required because the optional `substrate` extra declares a direct URL
+# (git+) reference; hatchling refuses to build metadata otherwise.
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["amplifier_module_tool_memory"]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+    "pyright>=1.1",
+    "chromadb>=0.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = false

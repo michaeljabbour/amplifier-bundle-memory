@@ -5,7 +5,7 @@ These tests use FakeCoordinator — a pure-Python stub that replaces the real
 Amplifier kernel (RustCoordinator / RustHookRegistry).  No real Amplifier
 kernel, filesystem, MCP server, ChromaDB instance, or subprocess is involved.
 
-The suite verifies four properties of the memory-mempalace coordinator bridge:
+The suite verifies four properties of the memory coordinator bridge:
 
 1. **mount() registration** — register_contributor() is called at mount() time
    with the expected channel and event list so the hook wires itself into the
@@ -21,7 +21,7 @@ The suite verifies four properties of the memory-mempalace coordinator bridge:
 
 4. **_briefed_ids cross-hook population** — the interject hook's ``_briefed_ids``
    set is populated when a sibling hook emits the
-   ``memory-mempalace:briefing_assembled`` coordinator event, confirming that
+   ``memory:briefing_assembled`` coordinator event, confirming that
    the bridge correctly wires sibling hooks through the coordinator.
 """
 
@@ -130,23 +130,23 @@ class TestCaptureCoordinatorBridge:
 
     Expected failing reasons (RED phase):
     - mount() does not call register_contributor() → test 1 fails
-    - MempalaceCaptureHook has no _sync_bridge_emit attribute → test 2 fails
+    - MemoryCaptureHook has no _sync_bridge_emit attribute → test 2 fails
     """
 
     def test_register_contributor_called_at_mount(self) -> None:
         """mount() must call register_contributor on the coordinator with
-        channel='observability.events' and name='memory-mempalace-capture'.
+        channel='observability.events' and name='memory-capture'.
 
         The contributor callback must return a list of events that includes:
-        - 'memory-mempalace:drawer_filed'
-        - 'memory-mempalace:capture_failed'
+        - 'memory:drawer_filed'
+        - 'memory:capture_failed'
 
         And must NOT include:
-        - 'memory-mempalace:capture_queued'  (private-JSONL-only; intentionally hidden)
+        - 'memory:capture_queued'  (private-JSONL-only; intentionally hidden)
         """
         import asyncio
 
-        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
         coordinator = FakeCoordinator()
         asyncio.run(m.mount(coordinator))
@@ -155,19 +155,19 @@ class TestCaptureCoordinatorBridge:
             "mount() must call register_contributor with channel 'observability.events'"
         )
         contribs = coordinator._contributors["observability.events"]
-        assert "memory-mempalace-capture" in contribs, (
-            "mount() must register contributor with name 'memory-mempalace-capture'"
+        assert "memory-capture" in contribs, (
+            "mount() must register contributor with name 'memory-capture'"
         )
 
-        callback = contribs["memory-mempalace-capture"]
+        callback = contribs["memory-capture"]
         events = callback()
-        assert "memory-mempalace:drawer_filed" in events, (
-            "contributor callback must include 'memory-mempalace:drawer_filed'"
+        assert "memory:drawer_filed" in events, (
+            "contributor callback must include 'memory:drawer_filed'"
         )
-        assert "memory-mempalace:capture_failed" in events, (
-            "contributor callback must include 'memory-mempalace:capture_failed'"
+        assert "memory:capture_failed" in events, (
+            "contributor callback must include 'memory:capture_failed'"
         )
-        assert "memory-mempalace:capture_queued" not in events, (
+        assert "memory:capture_queued" not in events, (
             "capture_queued is private-JSONL-only and must NOT be in coordinator events"
         )
 
@@ -175,7 +175,7 @@ class TestCaptureCoordinatorBridge:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
         """After a worthy tool:post event, the drain thread must emit
-        'memory-mempalace:drawer_filed' to the coordinator via _bridge_emit.
+        'memory:drawer_filed' to the coordinator via _bridge_emit.
 
         The hook must expose a _bridge_emit attribute confirming bridge wiring.
         drawer_filed must also appear in the private-JSONL emit log.
@@ -183,12 +183,12 @@ class TestCaptureCoordinatorBridge:
         import asyncio
         import time
 
-        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
         coordinator = FakeCoordinator()
         asyncio.run(m.mount(coordinator))
 
-        monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+        monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
         monkeypatch.setattr(
             m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
@@ -203,7 +203,7 @@ class TestCaptureCoordinatorBridge:
 
         monkeypatch.setattr(m, "emit_event", _capture)
 
-        hook = m.MempalaceCaptureHook()
+        hook = m.MemoryCaptureHook()
         asyncio.run(
             hook(
                 "tool:post",
@@ -223,7 +223,7 @@ class TestCaptureCoordinatorBridge:
 
         # The hook must have a _bridge_emit attribute (coordinator bridge wiring)
         assert hasattr(hook, "_bridge_emit"), (
-            "MempalaceCaptureHook must have a _bridge_emit attribute "
+            "MemoryCaptureHook must have a _bridge_emit attribute "
             "to wire the drain thread into the coordinator bridge"
         )
 
@@ -245,12 +245,12 @@ class TestCaptureCoordinatorBridge:
         import asyncio
         import time
 
-        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
         coordinator = FakeCoordinator()
         asyncio.run(m.mount(coordinator))
 
-        monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+        monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
         monkeypatch.setattr(
             m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
@@ -265,7 +265,7 @@ class TestCaptureCoordinatorBridge:
 
         monkeypatch.setattr(m, "emit_event", _capture)
 
-        hook = m.MempalaceCaptureHook()
+        hook = m.MemoryCaptureHook()
         asyncio.run(
             hook(
                 "tool:post",
@@ -285,7 +285,7 @@ class TestCaptureCoordinatorBridge:
 
         # capture_queued must never appear in coordinator.hooks._emit_log
         coordinator_event_names = [ev[0] for ev in coordinator.hooks._emit_log]
-        assert "memory-mempalace:capture_queued" not in coordinator_event_names, (
+        assert "memory:capture_queued" not in coordinator_event_names, (
             "capture_queued is private-JSONL-only and must never appear in "
             "coordinator.hooks._emit_log"
         )
@@ -299,12 +299,12 @@ class TestCaptureCoordinatorBridge:
         import asyncio
         import time
 
-        import amplifier_module_hooks_mempalace_capture as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_capture as m  # type: ignore[import]
 
         coordinator = FakeCoordinator()
         asyncio.run(m.mount(coordinator, config={"emit_events": False}))
 
-        monkeypatch.setattr(m, "_mcp_add_drawer", lambda *a, **kw: None)
+        monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
         monkeypatch.setattr(
             m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
@@ -313,7 +313,7 @@ class TestCaptureCoordinatorBridge:
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
-        hook = m.MempalaceCaptureHook(config={"emit_events": False})
+        hook = m.MemoryCaptureHook(config={"emit_events": False})
         asyncio.run(
             hook(
                 "tool:post",
@@ -336,11 +336,9 @@ class TestCaptureCoordinatorBridge:
             f"emit_events=False must suppress all private-JSONL emits, got: {emitted}"
         )
 
-        # Coordinator channel: no events starting with 'memory-mempalace:'
+        # Coordinator channel: no events starting with 'memory:'
         coordinator_events = [
-            ev[0]
-            for ev in coordinator.hooks._emit_log
-            if ev[0].startswith("memory-mempalace:")
+            ev[0] for ev in coordinator.hooks._emit_log if ev[0].startswith("memory:")
         ]
         assert coordinator_events == [], (
             f"emit_events=False must suppress coordinator bridge emits, "
@@ -363,15 +361,15 @@ class TestBriefingCoordinatorBridge:
 
     def test_register_contributor_called_at_mount(self) -> None:
         """mount() must call register_contributor on the coordinator with
-        channel='observability.events' and name='memory-mempalace-briefing'.
+        channel='observability.events' and name='memory-briefing'.
 
         The contributor callback must return a list of events that includes:
-        - 'memory-mempalace:briefing_assembled'
-        - 'memory-mempalace:briefing_skipped'
+        - 'memory:briefing_assembled'
+        - 'memory:briefing_skipped'
         """
         import asyncio
 
-        import amplifier_module_hooks_mempalace_briefing as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_briefing as m  # type: ignore[import]
 
         coordinator = FakeCoordinator()
         asyncio.run(m.mount(coordinator))
@@ -380,17 +378,17 @@ class TestBriefingCoordinatorBridge:
             "mount() must call register_contributor with channel 'observability.events'"
         )
         contribs = coordinator._contributors["observability.events"]
-        assert "memory-mempalace-briefing" in contribs, (
-            "mount() must register contributor with name 'memory-mempalace-briefing'"
+        assert "memory-briefing" in contribs, (
+            "mount() must register contributor with name 'memory-briefing'"
         )
 
-        callback = contribs["memory-mempalace-briefing"]
+        callback = contribs["memory-briefing"]
         events = callback()
-        assert "memory-mempalace:briefing_assembled" in events, (
-            "contributor callback must include 'memory-mempalace:briefing_assembled'"
+        assert "memory:briefing_assembled" in events, (
+            "contributor callback must include 'memory:briefing_assembled'"
         )
-        assert "memory-mempalace:briefing_skipped" in events, (
-            "contributor callback must include 'memory-mempalace:briefing_skipped'"
+        assert "memory:briefing_skipped" in events, (
+            "contributor callback must include 'memory:briefing_skipped'"
         )
 
     def test_briefing_assembled_emits_with_drawer_ids(
@@ -398,14 +396,8 @@ class TestBriefingCoordinatorBridge:
     ) -> None:
         """After briefing_assembled, bridge emits with drawer_ids from results_after_rerank."""
         import asyncio
-        import subprocess
 
-        import amplifier_module_hooks_mempalace_briefing as m  # type: ignore[import]
-
-        def fake_run(cmd: Any, *a: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        import amplifier_module_hooks_memory_briefing as m  # type: ignore[import]
 
         results_with_ids = [
             {"id": "drawer-1", "room": "r", "text": "t1", "score": 0.9},
@@ -430,16 +422,16 @@ class TestBriefingCoordinatorBridge:
         async def fake_bridge(event_name: str, payload: Any) -> None:
             bridge_calls.append((event_name, payload))
 
-        hook = m.MempalaceBriefingHook(bridge_emit=fake_bridge)
+        hook = m.MemoryBriefingHook(bridge_emit=fake_bridge)
         asyncio.run(hook("session:start", {"opening_prompt": "test"}))
 
         assembled_calls = [
             (name, payload)
             for name, payload in bridge_calls
-            if name == "memory-mempalace:briefing_assembled"
+            if name == "memory:briefing_assembled"
         ]
         assert len(assembled_calls) == 1, (
-            f"Expected exactly one 'memory-mempalace:briefing_assembled' bridge call, "
+            f"Expected exactly one 'memory:briefing_assembled' bridge call, "
             f"got: {bridge_calls}"
         )
         _, payload = assembled_calls[0]
@@ -456,12 +448,9 @@ class TestBriefingCoordinatorBridge:
         """
         import asyncio
 
-        import amplifier_module_hooks_mempalace_briefing as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_briefing as m  # type: ignore[import]
 
-        def raise_not_found(*a: Any, **kw: Any) -> None:
-            raise FileNotFoundError("mempalace not found")
-
-        monkeypatch.setattr(m.subprocess, "run", raise_not_found)
+        monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
 
         emitted: list[tuple[Any, ...]] = []
@@ -472,7 +461,7 @@ class TestBriefingCoordinatorBridge:
         async def fake_bridge(event_name: str, payload: Any) -> None:
             bridge_calls.append((event_name, payload))
 
-        hook = m.MempalaceBriefingHook(
+        hook = m.MemoryBriefingHook(
             config={"emit_events": False}, bridge_emit=fake_bridge
         )
         asyncio.run(hook("session:start", {}))
@@ -482,9 +471,9 @@ class TestBriefingCoordinatorBridge:
             f"emit_events=False must suppress all private-JSONL emits, got: {emitted}"
         )
 
-        # Coordinator channel: no events starting with 'memory-mempalace:'
+        # Coordinator channel: no events starting with 'memory:'
         coordinator_events = [
-            name for name, _ in bridge_calls if name.startswith("memory-mempalace:")
+            name for name, _ in bridge_calls if name.startswith("memory:")
         ]
         assert coordinator_events == [], (
             f"emit_events=False must suppress coordinator bridge emits, "
@@ -507,13 +496,13 @@ class TestInterjectCoordinatorBridge:
 
     def test_register_contributor_called_at_mount(self) -> None:
         """mount() must call register_contributor with contributor name
-        'memory-mempalace-interject'. The callback must return a list that
-        includes 'memory-mempalace:memory_surfaced' and
-        'memory-mempalace:interject_skipped'.
+        'memory-interject'. The callback must return a list that
+        includes 'memory:memory_surfaced' and
+        'memory:interject_skipped'.
         """
         import asyncio
 
-        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_interject as m  # type: ignore[import]
 
         coordinator = FakeCoordinator()
         asyncio.run(m.mount(coordinator))
@@ -522,38 +511,38 @@ class TestInterjectCoordinatorBridge:
             "mount() must call register_contributor with channel 'observability.events'"
         )
         contribs = coordinator._contributors["observability.events"]
-        assert "memory-mempalace-interject" in contribs, (
-            "mount() must register contributor with name 'memory-mempalace-interject'"
+        assert "memory-interject" in contribs, (
+            "mount() must register contributor with name 'memory-interject'"
         )
 
-        callback = contribs["memory-mempalace-interject"]
+        callback = contribs["memory-interject"]
         events = callback()
-        assert "memory-mempalace:memory_surfaced" in events, (
-            "contributor callback must include 'memory-mempalace:memory_surfaced'"
+        assert "memory:memory_surfaced" in events, (
+            "contributor callback must include 'memory:memory_surfaced'"
         )
-        assert "memory-mempalace:interject_skipped" in events, (
-            "contributor callback must include 'memory-mempalace:interject_skipped'"
+        assert "memory:interject_skipped" in events, (
+            "contributor callback must include 'memory:interject_skipped'"
         )
 
     def test_briefing_assembled_listener_registered_in_mount(self) -> None:
-        """mount() must register a handler for 'memory-mempalace:briefing_assembled'
+        """mount() must register a handler for 'memory:briefing_assembled'
         in coordinator.hooks._registered so that when the briefing hook emits
         briefing_assembled, the interject hook's _briefed_ids is updated.
         """
         import asyncio
 
-        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_interject as m  # type: ignore[import]
 
         coordinator = FakeCoordinator()
         asyncio.run(m.mount(coordinator))
 
-        assert "memory-mempalace:briefing_assembled" in coordinator.hooks._registered, (
-            "mount() must register a handler for 'memory-mempalace:briefing_assembled' "
+        assert "memory:briefing_assembled" in coordinator.hooks._registered, (
+            "mount() must register a handler for 'memory:briefing_assembled' "
             "so that briefing events update _briefed_ids"
         )
 
     async def test_briefed_ids_populated_from_briefing_event(self) -> None:
-        """After mount(), emitting 'memory-mempalace:briefing_assembled' with
+        """After mount(), emitting 'memory:briefing_assembled' with
         drawer_ids must populate the interject hook's _briefed_ids set.
 
         1. Find hook via prompt:submit registered handler (bound method).
@@ -561,7 +550,7 @@ class TestInterjectCoordinatorBridge:
         3. Emit briefing_assembled with drawer_ids=['d-1', 'd-2'].
         4. Assert _briefed_ids == {'d-1', 'd-2'}.
         """
-        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_interject as m  # type: ignore[import]
 
         coordinator = FakeCoordinator()
         await m.mount(coordinator)
@@ -580,7 +569,7 @@ class TestInterjectCoordinatorBridge:
 
         # Emit briefing_assembled — the registered listener must update _briefed_ids
         await coordinator.hooks.emit(
-            "memory-mempalace:briefing_assembled",
+            "memory:briefing_assembled",
             {"drawer_ids": ["d-1", "d-2"]},
         )
 
@@ -591,10 +580,10 @@ class TestInterjectCoordinatorBridge:
 
     async def test_memory_surfaced_emits_to_coordinator(self) -> None:
         """After mount(), calling on_prompt_submit with a matching memory must
-        emit exactly one 'memory-mempalace:memory_surfaced' event to the
+        emit exactly one 'memory:memory_surfaced' event to the
         coordinator with ok=True, trigger='prompt_submit', memory_ids=['m1'].
         """
-        import amplifier_module_hooks_mempalace_interject as m  # type: ignore[import]
+        import amplifier_module_hooks_memory_interject as m  # type: ignore[import]
 
         coordinator = FakeCoordinator()
         await m.mount(coordinator)
@@ -617,14 +606,14 @@ class TestInterjectCoordinatorBridge:
             {"prompt": "this is a long enough prompt to pass the length check"},
         )
 
-        # Assert exactly one 'memory-mempalace:memory_surfaced' bridge call
+        # Assert exactly one 'memory:memory_surfaced' bridge call
         surfaced = [
             (name, data)
             for name, data in coordinator.hooks._emit_log
-            if name == "memory-mempalace:memory_surfaced"
+            if name == "memory:memory_surfaced"
         ]
         assert len(surfaced) == 1, (
-            f"Expected exactly one 'memory-mempalace:memory_surfaced' bridge call, "
+            f"Expected exactly one 'memory:memory_surfaced' bridge call, "
             f"got: {coordinator.hooks._emit_log}"
         )
         _, payload = surfaced[0]
@@ -652,12 +641,12 @@ class TestProjectContextCoordinatorBridge:
 
     def test_register_contributor_called_at_mount(self) -> None:
         """mount() must call register_contributor on the coordinator with
-        channel='observability.events' and name='memory-mempalace-project-context'.
+        channel='observability.events' and name='memory-project-context'.
 
         The contributor callback must return a list of events that is a superset of:
-        - 'memory-mempalace:coordination_read'
-        - 'memory-mempalace:coordination_scaffolded'
-        - 'memory-mempalace:curator_handoff_requested'
+        - 'memory:coordination_read'
+        - 'memory:coordination_scaffolded'
+        - 'memory:curator_handoff_requested'
         """
         import asyncio
 
@@ -670,16 +659,16 @@ class TestProjectContextCoordinatorBridge:
             "mount() must call register_contributor with channel 'observability.events'"
         )
         contribs = coordinator._contributors["observability.events"]
-        assert "memory-mempalace-project-context" in contribs, (
-            "mount() must register contributor with name 'memory-mempalace-project-context'"
+        assert "memory-project-context" in contribs, (
+            "mount() must register contributor with name 'memory-project-context'"
         )
 
-        callback = contribs["memory-mempalace-project-context"]
+        callback = contribs["memory-project-context"]
         events = set(callback())
         required_events = {
-            "memory-mempalace:coordination_read",
-            "memory-mempalace:coordination_scaffolded",
-            "memory-mempalace:curator_handoff_requested",
+            "memory:coordination_read",
+            "memory:coordination_scaffolded",
+            "memory:curator_handoff_requested",
         }
         assert required_events <= events, (
             f"contributor callback must include all of {required_events}, got: {events}"
@@ -689,7 +678,7 @@ class TestProjectContextCoordinatorBridge:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
         """After a session:end event, the hook must emit exactly one
-        'memory-mempalace:curator_handoff_requested' bridge call when
+        'memory:curator_handoff_requested' bridge call when
         project-context dir exists.
         """
         import asyncio
@@ -713,21 +702,21 @@ class TestProjectContextCoordinatorBridge:
         handoff_calls = [
             (name, payload)
             for name, payload in bridge_calls
-            if name == "memory-mempalace:curator_handoff_requested"
+            if name == "memory:curator_handoff_requested"
         ]
         assert len(handoff_calls) == 1, (
-            f"Expected exactly one 'memory-mempalace:curator_handoff_requested' bridge call, "
+            f"Expected exactly one 'memory:curator_handoff_requested' bridge call, "
             f"got: {bridge_calls}"
         )
 
 
 # ---------------------------------------------------------------------------
-# Tool-mempalace — coordinator bridge tests
+# Tool-memory — coordinator bridge tests
 # ---------------------------------------------------------------------------
 
 
-class TestToolMempalaceCoordinatorBridge:
-    """Tests for coordinator bridge wiring in the palace tool.
+class TestToolMemoryCoordinatorBridge:
+    """Tests for coordinator bridge wiring in the memory tool.
 
     These tests verify that mount() registers a contributor and that garden
     operations forward events to the coordinator via the combined_emit /
@@ -736,15 +725,15 @@ class TestToolMempalaceCoordinatorBridge:
 
     def test_register_contributor_called_at_mount(self) -> None:
         """mount() must call register_contributor on the coordinator with
-        channel='observability.events' and name='memory-mempalace-tool'.
+        channel='observability.events' and name='memory-tool'.
 
         The contributor callback must return a list of events that includes:
-        - 'memory-mempalace:garden_completed'
-        - 'memory-mempalace:garden_progress'
+        - 'memory:garden_completed'
+        - 'memory:garden_progress'
         """
         import asyncio
 
-        import amplifier_module_tool_mempalace as m  # type: ignore[import]
+        import amplifier_module_tool_memory as m  # type: ignore[import]
 
         coordinator = FakeCoordinator()
 
@@ -754,15 +743,15 @@ class TestToolMempalaceCoordinatorBridge:
             "mount() must call register_contributor with channel 'observability.events'"
         )
         contribs = coordinator._contributors["observability.events"]
-        assert "memory-mempalace-tool" in contribs, (
-            "mount() must register contributor with name 'memory-mempalace-tool'"
+        assert "memory-tool" in contribs, (
+            "mount() must register contributor with name 'memory-tool'"
         )
 
-        callback = contribs["memory-mempalace-tool"]
+        callback = contribs["memory-tool"]
         events = callback()
-        assert "memory-mempalace:garden_completed" in events, (
-            "contributor callback must include 'memory-mempalace:garden_completed'"
+        assert "memory:garden_completed" in events, (
+            "contributor callback must include 'memory:garden_completed'"
         )
-        assert "memory-mempalace:garden_progress" in events, (
-            "contributor callback must include 'memory-mempalace:garden_progress'"
+        assert "memory:garden_progress" in events, (
+            "contributor callback must include 'memory:garden_progress'"
         )

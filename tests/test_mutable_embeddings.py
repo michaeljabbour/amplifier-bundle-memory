@@ -8,7 +8,7 @@ gated on recall_overlap staying at/above the recall floor.
 
 from __future__ import annotations
 
-from amplifier_module_tool_mempalace.embeddings import (
+from amplifier_module_tool_memory.embeddings import (
     MutableEmbeddingConfig,
     cosine_distance,
     l2_normalize,

@@ -1,10 +1,16 @@
 # Digital Twin Universe (DTU) — End-to-End Test Environment
 
 This guide explains how to provision, use, and maintain the DTU environment for
-`amplifier-bundle-memory`. The DTU profile is at:
+`amplifier-bundle-memory`. The primary DTU profile is at:
 
 ```
-.amplifier/digital-twin-universe/profiles/memory-bundle-e2e.yaml
+.amplifier/digital-twin-universe/profiles/memory-native-e2e.yaml
+```
+
+A second profile validates the migration path from a legacy vendor store:
+
+```
+.amplifier/digital-twin-universe/profiles/memory-migration-e2e.yaml
 ```
 
 ---
@@ -13,27 +19,28 @@ This guide explains how to provision, use, and maintain the DTU environment for
 
 Unit tests for this bundle mock their dependencies to run fast and in isolation:
 
-- `subprocess.run` is patched so the mempalace CLI is never invoked.
+- `ensure_daemon` is patched so no real daemon subprocess is spawned.
 - `emit_event` is replaced by an in-process spy.
-- MemPalace storage is shadowed by a temp directory or a stub object.
+- The memory store is shadowed by a temp directory or a stub object.
 
 These stubs are valuable for regression safety, but they do not prove the bundle
-works in a real Amplifier session. The DTU closes that gap.
+works in a real Amplifier session against a real amplifier-data-backed daemon.
+The DTU closes that gap.
 
 Inside a DTU environment the following all run against real infrastructure:
 
 - **Real bundle-install path.** `amplifier bundle add` fetches the bundle from a
   local Gitea mirror using the subdirectory syntax
-  (`git+https://...@main#subdirectory=behaviors/mempalace.yaml`). Any packaging
+  (`git+https://...@main#subdirectory=behaviors/memory.yaml`). Any packaging
   or manifest error that the mocks hide will surface here.
-- **Live MemPalace with semantic search.** The palace is seeded from fixture
-  content, and actual OpenAI embedding calls are made during mine and recall
-  operations.
+- **A real auto-started memory daemon with semantic search.** The daemon opens
+  a durable amplifier-data store (Rust kernel, built at install time) and a
+  real local fastembed embedder — no vendor dependency, no mocks.
 - **Real Anthropic / OpenAI calls.** The LLM provider is not stubbed. Prompt
   regressions that do not break unit tests become visible.
-- **Full event flow.** Every hook—briefing, post-tool, post-assistant—fires in
-  sequence inside a genuine Amplifier session. Ordering bugs and missing awaits
-  show up here.
+- **Full event flow.** Every hook — briefing, post-tool, post-assistant — fires
+  in sequence inside a genuine Amplifier session. Ordering bugs and missing
+  awaits show up here.
 
 Run unit tests first (they are fast), then run the DTU suite before opening a
 pull request or shipping a release.
@@ -153,10 +160,10 @@ Run the following from the **bundle root** (the directory that contains
 this `docs/` folder and `.amplifier/digital-twin-universe/profiles/`):
 
 ```bash
-DTU_ID=memory-bundle-e2e
+DTU_ID=memory-native-e2e
 
 amplifier-digital-twin launch \
-  .amplifier/digital-twin-universe/profiles/memory-bundle-e2e.yaml \
+  .amplifier/digital-twin-universe/profiles/memory-native-e2e.yaml \
   --name "$DTU_ID" \
   --var GITEA_URL="$GITEA_URL" \
   --var GITEA_TOKEN="$GITEA_TOKEN"
@@ -173,14 +180,17 @@ is auto-generated and printed as the final JSON line of launch output
 > `amplifier-gitea create` (e.g. `http://localhost:10110`) works as-is —
 > you do not need to substitute a bridge IP yourself.
 
-> **First launch takes 5–10 minutes.** The profile has 15 `setup_cmds` that
-> install system packages, compile Python wheels, initialise MemPalace, mine
-> fixture content, freeze a reset snapshot, install Amplifier, and add the
-> bundle. Subsequent launches reuse the cached base image and are faster.
+> **First launch takes 5–10 minutes.** The profile installs system packages,
+> a Rust toolchain (amplifier-data's kernel is built from source at install
+> time), compiles Python wheels, installs Amplifier, and adds the bundle.
+> Subsequent launches reuse the cached base image and are faster.
+
+To validate the migration path from a legacy vendor store instead, launch
+`memory-migration-e2e.yaml` the same way.
 
 ---
 
-## Three Usage Modes
+## Two Usage Modes
 
 ### Mode 1 — Pytest Integration Tests
 
@@ -191,26 +201,22 @@ amplifier-digital-twin exec ${DTU_ID} -- \
   pytest tests/integration/ -v
 ```
 
-The test suite uses an `autouse` fixture named `reset_palace` that runs
-`reset-palace` before each test. This restores the palace to its seeded state
-so tests are independent and repeatable.
-
 #### Inspecting failures
 
 If a test fails, connect to the container to investigate:
 
 ```bash
-# Tail the palace event log
+# Tail the memory event log
 amplifier-digital-twin exec ${DTU_ID} -- \
-  cat /root/.mempalace/events/*.jsonl | jq .
+  cat /root/.amplifier/memory/events/*.jsonl | jq .
 
-# Check palace status
+# Check the memory daemon's discovery file and health
 amplifier-digital-twin exec ${DTU_ID} -- \
-  mempalace status
+  bash -c \'cat /root/.amplifier/memory/daemon.json && curl -s $(jq -r .url /root/.amplifier/memory/daemon.json)/health\'
 
 # Run a single failing test with verbose output and log capture
 amplifier-digital-twin exec ${DTU_ID} -- \
-  pytest tests/integration/test_recall.py::test_semantic_search -v -s --tb=long
+  pytest tests/integration/test_native_memory_e2e.py -v -s --tb=long
 ```
 
 ### Mode 2 — Interactive Amplifier Session
@@ -224,40 +230,22 @@ amplifier-digital-twin exec ${DTU_ID} -- amplifier run
 
 Once inside, the memory bundle is active. Example queries to try:
 
-- `Search my palace for architecture decisions about the dual-palace pattern.`
+- `Search memory for architecture decisions about the daemon lifecycle.`
 - `What notes do I have about semantic search configuration?`
-- `Store a new memory: the DTU reset-palace script restores the seed snapshot.`
+- `Store a new memory: the memory daemon auto-starts on first use.`
 
 This mode is useful for exploratory testing, prompt tuning, and verifying that
 the briefing hook surfaces the correct project context in the system prompt.
 
-### Mode 3 — Palace Inspection
-
-Inspect the live palace contents without running tests or a full session.
-
-**From an Amplifier session inside the DTU:**
+Inspect the live memory store from within an Amplifier session:
 
 ```python
 # Tail the last 20 events
-palace(operation="events", limit=20, tail=True)
+memory(operation="events", limit=20, tail=True)
 
-# Check palace metadata and drawer counts
-palace(operation="status")
+# Check memory metadata and drawer counts
+memory(operation="status")
 ```
-
-**From a shell inside the DTU:**
-
-```bash
-# Inspect all events as JSON
-amplifier-digital-twin exec ${DTU_ID} -- \
-  bash -c 'cat /root/.mempalace/events/*.jsonl | jq .'
-
-# Reset the palace to its seed state for a clean slate
-amplifier-digital-twin exec ${DTU_ID} -- reset-palace
-```
-
-Use `reset-palace` whenever you want to start from a known-good state without
-re-provisioning the entire environment.
 
 ---
 
@@ -285,8 +273,8 @@ cycle:
    amplifier-digital-twin update ${DTU_ID}
    ```
    This clears the Amplifier module cache and re-runs `amplifier bundle add`,
-   fetching the latest commit from Gitea. The palace is **not** reset during
-   an update — accumulated memories survive.
+   fetching the latest commit from Gitea. The memory store is **not** reset
+   during an update — accumulated memories survive.
 
 5. **Test** — run the integration suite or an interactive session:
    ```bash
@@ -326,8 +314,8 @@ entire point of the mirror is defeated.
 
 ### `amplifier bundle add` fails with 401 from Gitea
 
-**Symptom:** Setup step 14 (`amplifier bundle add ...`) exits with a 401
-Unauthorized error during provisioning.
+**Symptom:** A provisioning step running `amplifier bundle add ...` exits with
+a 401 Unauthorized error.
 
 **Cause:** The Gitea token passed via `--var GITEA_TOKEN=` is expired, revoked,
 or was generated for a user that does not have read access to the
@@ -337,7 +325,7 @@ or was generated for a user that does not have read access to the
 
 ```bash
 NEW_TOKEN=$(amplifier-gitea token <gitea-id> | jq -r .token)
-amplifier-digital-twin launch memory-bundle-e2e \
+amplifier-digital-twin launch memory-native-e2e \
   --var GITEA_URL="${GITEA_URL}" \
   --var GITEA_TOKEN="${NEW_TOKEN}" \
   | tail -n1
@@ -345,31 +333,28 @@ amplifier-digital-twin launch memory-bundle-e2e \
 
 ---
 
-### Palace has zero drawers after launch
+### Memory daemon never auto-starts / daemon.json missing
 
-**Symptom:** `palace(operation="status")` reports 0 drawers, or integration
-tests fail because no seed content is found.
+**Symptom:** `memory(operation="status")` fails or `/root/.amplifier/memory/daemon.json`
+never appears after running a session.
 
-**Cause:** Setup step 6 clones the bundle into `/workspace/amplifier-bundle-memory`
-and step 7 mines content from
-`tests/fixtures/seed-palace/content/`. If the clone path is wrong — for
-example because the repo was mirrored under a different name in Gitea — step 7
-runs but mines from an empty or non-existent directory.
+**Cause:** Most commonly a missing Rust toolchain — durable storage requires
+the amplifier-data Rust kernel (D10 of the native-cutover design), and
+`run_daemon` refuses to start a non-ephemeral store without it.
 
-**Resolution:** Re-launch with `--verbose` to capture the full setup output:
+**Resolution:** Re-launch with `--verbose` and check for a maturin/cargo
+build failure during the amplifier-data install step:
 
 ```bash
-amplifier-digital-twin launch memory-bundle-e2e \
+amplifier-digital-twin launch memory-native-e2e \
   --var GITEA_URL="${GITEA_URL}" \
   --var GITEA_TOKEN="${GITEA_TOKEN}" \
   --verbose \
   | tail -n50
 ```
 
-Confirm that step 6 clones to `/workspace/amplifier-bundle-memory` and step 7
-prints a non-zero mine count. If the Gitea repo name is different from
-`amplifier-bundle-memory`, update the `clone_addr` destination path in setup
-step 6 of the profile YAML.
+Confirm `rustc --version` and `cargo --version` succeed inside the container,
+and that the amplifier-data git pin's build step completed without error.
 
 ---
 
@@ -385,20 +370,11 @@ will not reach `/workspace/project-context` and the hook returns no content.
 
 **Resolution:**
 
-1. Verify the fixture was copied during provisioning:
+1. Verify a `project-context/` directory exists under `/workspace`:
    ```bash
    amplifier-digital-twin exec ${DTU_ID} -- ls /workspace/project-context/
    ```
-   You should see at least one `.md` file.
-
-2. If missing, copy it manually:
-   ```bash
-   amplifier-digital-twin exec ${DTU_ID} -- \
-     cp -r /workspace/amplifier-bundle-memory/tests/fixtures/seed-palace/project-context \
-           /workspace/project-context
-   ```
-
-3. Ensure integration tests `cd` to `/workspace` or a subdirectory of it before
+2. Ensure integration tests `cd` to `/workspace` or a subdirectory of it before
    starting an Amplifier session, so `_find_project_context_dir` can locate the
    directory.
 
@@ -437,57 +413,48 @@ connecting to `api.anthropic.com` or `api.openai.com`.
    ```
 
 3. If the keys were missing at launch time, destroy the environment and
-   relaunch after exporting them:
-   ```bash
-   export ANTHROPIC_API_KEY=<your-key>
-   export OPENAI_API_KEY=<your-key>
-   amplifier-digital-twin launch memory-bundle-e2e \
-     --var GITEA_URL="${GITEA_URL}" \
-     --var GITEA_TOKEN="${GITEA_TOKEN}" \
-     | tail -n1
-   ```
+   relaunch after exporting them.
 
 ---
 
-### Zero `memory-mempalace:*` events in events.jsonl
+### Zero `memory:*` events in events.jsonl
 
 **Symptom:** An Amplifier session runs successfully but
-`grep 'memory-mempalace:' ~/.amplifier/projects/*/sessions/*/events.jsonl`
+`grep 'memory:' ~/.amplifier/projects/*/sessions/*/events.jsonl`
 returns nothing, even though the memory bundle is active.
 
 **Root cause — Amplifier module cache shadowing**
 
 The Amplifier loader prepends `~/.amplifier/cache/amplifier-module-hooks-logging-*/` to
-`sys.path` before site-packages. If that cache copy lacks `on_session_ready`, B2 detection
-in `_load_entry_point` sets `has_osr=False` and never enqueues the callback. Result:
+`sys.path` before site-packages. If that cache copy lacks `on_session_ready`, module
+detection sets `has_osr=False` and never enqueues the callback. Result:
 `register_contributor("observability.events", ...)` is never called, no handlers register
-for `memory-mempalace:*` events, and events.jsonl stays empty.
+for `memory:*` events, and events.jsonl stays empty.
 
-This also means `uv pip install --force-reinstall <fork>` alone is insufficient — the old
-cache wins over the freshly installed version in site-packages.
+This also means force-reinstalling the fork package alone is insufficient — the old
+cache copy wins over the freshly installed version in site-packages.
 
 **Quick diagnosis:**
 ```bash
 amplifier-digital-twin exec ${DTU_ID} -- \
   /root/.local/share/uv/tools/amplifier/bin/python -c "
 import amplifier_module_hooks_logging as m
-print('file:', m.__file__)
-print('has on_session_ready:', hasattr(m, 'on_session_ready'))
+print(\'file:\', m.__file__)
+print(\'has on_session_ready:\', hasattr(m, \'on_session_ready\'))
 "
 ```
 
 If `has on_session_ready: False` — the cache is shadowing the fork.
 
-**Fix:**
+**Fix:** delete the stale cache directory so Python falls through to
+site-packages on the next session start:
+
 ```bash
-amplifier-digital-twin exec ${DTU_ID} -- bash -c "
-  rm -rf /root/.amplifier/cache/amplifier-module-hooks-logging-*
-  echo 'Cleared shadowing cache — next session will use site-packages fork'
-"
+amplifier-digital-twin exec ${DTU_ID} -- bash -c \'
+find /root/.amplifier/cache -maxdepth 1 -name "amplifier-module-hooks-logging-*" -exec rm -rf {} + \'
 ```
 
-Deleting the cache dir lets Python fall through to site-packages on the next session
-start. No reinstall or primer session required.
+No reinstall or primer session required.
 
 ---
 
@@ -495,70 +462,48 @@ start. No reinstall or primer session required.
 
 **Symptom:** After running `update`, Amplifier sessions fail immediately with
 `Error: No providers available`. The provider (Anthropic) is configured in
-`~/.amplifier/settings.yaml` but the module isn't loading.
+`~/.amplifier/settings.yaml` but the module isn\'t loading.
 
-**Root cause:** An earlier version of this profile used `rm -rf /root/.amplifier/cache/`
-in the update section, which wiped **all** module caches — including provider-anthropic,
+**Root cause:** An earlier version of profiles wiped the ENTIRE module cache
+directory in the update section, which removed provider-anthropic,
 loop-streaming, context-simple, and every other foundation module. Amplifier
 cannot start a session until those modules are re-downloaded and cached.
 
-This was fixed in the profile. If you are seeing this on a DTU provisioned from
-an older profile version:
+The current profiles do targeted cache invalidation — deleting only the
+memory-bundle-specific module cache directories — rather than a full wipe.
+Never wipe the entire `/root/.amplifier/cache/` directory in a profile.
 
-**Fix:**
+**Fix (if you hit this on an old profile version):**
 ```bash
-# Reinstall Amplifier to repopulate the module cache (~2-3 min)
 amplifier-digital-twin exec ${DTU_ID} -- bash -c "
   export PATH=/root/.local/bin:\$PATH
   uv tool install -vv git+https://github.com/microsoft/amplifier
   amplifier --version
 "
-```
-
-After this completes, re-apply the memory bundle:
-```bash
 amplifier-digital-twin exec ${DTU_ID} -- bash -c "
   export PATH=/root/.local/bin:\$PATH
-  amplifier bundle add --app 'git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/mempalace.yaml'
+  amplifier bundle add --app \'git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/memory.yaml\'
 "
 ```
-
-**Prevention:** the `update` section in the current profile does targeted cache
-invalidation (`rm -rf ...amplifier-module-hooks-mempalace-*` etc.) rather than a
-full wipe. Do not add `rm -rf /root/.amplifier/cache/` to this profile.
 
 ---
 
 ### Debug patches in `amplifier_core/loader.py` break module loading
 
 **Symptom:** All module loads fail with
-`UnboundLocalError: cannot access local variable 'sys' where it is not associated
+`UnboundLocalError: cannot access local variable \'sys\' where it is not associated
 with a value` at `loader.py, in _load_entry_point, mod = sys.modules.get(module_name)`.
 
 **Root cause:** A debug patch added `import pathlib, sys` inside an `if` block
-within `_load_entry_point()`. Python's scoping treats any assignment to a name
+within `_load_entry_point()`. Python\'s scoping treats any assignment to a name
 inside a function (including `import x`) as making that name *local to the entire
 function*. When the `if` block is not entered, `sys` is never assigned but Python
 still looks for it as a local — causing `UnboundLocalError` every time `sys` is
 referenced anywhere else in the function.
 
-**Fix:** Remove the offending lines from `loader.py`:
-```bash
-amplifier-digital-twin exec ${DTU_ID} -- \
-  /root/.local/share/uv/tools/amplifier/bin/python -c "
-import pathlib, re
-LOADER = pathlib.Path('/root/.local/share/uv/tools/amplifier/lib/python3.12/site-packages/amplifier_core/loader.py')
-src = LOADER.read_text()
-lines = [l for l in src.split('\n')
-         if not ('import pathlib' in l and 'pathlib.Path(' in l and l.strip().startswith('import'))]
-LOADER.write_text('\n'.join(lines))
-import py_compile; py_compile.compile(str(LOADER), doraise=True)
-print('loader.py cleaned and syntax OK')
-"
-# Clear the stale .pyc
-amplifier-digital-twin exec ${DTU_ID} -- \
-  rm -f '/root/.local/share/uv/tools/amplifier/lib/python3.12/site-packages/amplifier_core/__pycache__/loader.cpython-312.pyc'
-```
+**Fix:** locate and remove the offending debug-added import line from the
+installed `amplifier_core/loader.py`, then recompile it in place and clear
+the stale bytecode cache so the fix takes effect immediately.
 
 **Prevention:** never add `import <name>` inside an `if` block within a function
 that also references `<name>` outside the block. Use `import <name> as _<name>`

@@ -1,0 +1,149 @@
+bundle:
+  name: memory-behavior
+  version: 2.0.0
+  description: |
+    Wires the full memory stack: native semantic storage (amplifier-data +
+    local embedder, via the auto-started memory daemon), project-context
+    coordination files, knowledge graph, session briefing, automatic
+    capture hooks, and mid-session memory interjection. Deduplication notes:
+      - context/instructions.md is injected here only (not again in bundle.md body)
+      - tool-skills is inherited from foundation; not re-declared here
+      - session briefing is handled by hooks-memory-briefing only;
+        the Archivist agent is invoked on-demand, not at session:start
+      - the standalone SQLite fact-store module formerly named tool-memory
+        is DROPPED here (D6, 2.0.0 breaking change): the name now belongs
+        to the native semantic tool below, and the `kg` operation on that
+        tool covers explicit facts natively. See CHANGELOG.md.
+
+# ── Context ──────────────────────────────────────────────────────────────
+context:
+  include:
+    - memory:context/instructions.md
+    - memory:context/project-context-guide.md
+
+# ── Hooks ────────────────────────────────────────────────────────────────
+hooks:
+  # Verbatim capture on tool:post — auto-detects wing (git remote) and room
+  # (tool/file context), deduplicates, and files directly via the native
+  # memory daemon (client.remember(), no vendor subprocess).
+  - module: hooks-memory-capture
+    source: ../modules/hooks-memory-capture
+    version: 2.0.0
+    config:
+      auto_wing: true
+      auto_room: true
+      silent: true
+      emit_events: true           # false to disable JSONL event emission
+      # The capture manifest is the "knowable list" of what memory captures.
+      # Leave manifest_path unset to use the resolution order:
+      #   <project>/project-context/memory-manifest.yaml  (per-project)
+      #   ~/.amplifier/memory-manifest.yaml                (per-user)
+      #   built-in default (mirrors context/memory-manifest.yaml)
+      # Set it to pin an explicit manifest file:
+      # manifest_path: "context/memory-manifest.yaml"
+      categories:
+        - decision
+        - architecture
+        - blocker
+        - resolved_blocker
+        - dependency
+        - pattern
+        - lesson_learned
+
+  # Session start: injects ephemeral wake-up briefing (memory search + KG + diary).
+  # Session end: Curator agent handles HANDOFF.md update and memory curation.
+  - module: hooks-memory-briefing
+    source: ../modules/hooks-memory-briefing
+    version: 2.0.0
+    config:
+      token_budget: 1500
+      include_kg: true
+      include_diary: true
+      include_project_context: true   # also reads HANDOFF.md + PROJECT_CONTEXT.md
+      ephemeral: true
+      emit_events: true               # false to disable JSONL event emission
+      briefing_importance_weight: 1.0 # 0.0 = pure semantic ranking
+
+  # Reads project-context coordination files at session:start and updates
+  # HANDOFF.md at session:end. Integrates the project-context system natively.
+  - module: hooks-project-context
+    source: ../modules/hooks-project-context
+    version: 1.1.0
+    config:
+      tier1_always: true              # always read PROJECT_CONTEXT.md + GLOSSARY.md
+      handoff_on_end: true            # update HANDOFF.md at session:end
+      setup_if_missing: false         # SUSPENDED (2026-07-07): no auto-scaffold of
+                                      # project-context/ into every repo. Existing
+                                      # project-context/ dirs are still read/updated.
+                                      # Set true to re-enable scaffolding.
+      emit_events: true               # false to disable JSONL event emission
+
+  # Mid-session OR-firing hook: surfaces relevant memories at the right moment.
+  # Fires on prompt:submit, tool:pre, and orchestrator:complete.
+  # Uses cosine similarity (primary) + LLM judge (uncertain band) for relevance.
+  # ephemeral=True keeps injections out of conversation history.
+  # Per-turn guard flag prevents infinite loops on orchestrator:complete.
+  #
+  # Read lane: reads exclusively through MemoryClient.search() against the
+  # auto-started memory daemon -- never opens a vector store directly and
+  # never hardcodes a store path or collection name, so it cannot drift
+  # from wherever the daemon itself is actually configured.
+  #
+  # Privacy: zero external network calls by default. Retrieval uses the
+  # daemon's own local embedding model (all-MiniLM-L6-v2 / ONNX, offline).
+  # llm_judge_enabled (OFF by default) is the ONLY opt-in external call --
+  # when true, it sends the query text and candidate memory snippets to
+  # OpenAI (gpt-4.1-nano) using OPENAI_API_KEY for uncertain-band scoring.
+  - module: hooks-memory-interject
+    source: ../modules/hooks-memory-interject
+    version: 2.0.0
+    config:
+      cosine_threshold: 0.72
+      uncertain_band: 0.10
+      max_inject_chars: 800
+      cooldown_turns: 3
+      prompt_enabled: true
+      tool_pre_enabled: true
+      orc_enabled: true
+      llm_judge_enabled: false        # OPT-IN: sends query + memory text to
+                                      # OpenAI (gpt-4.1-nano). Off by default.
+      emit_events: true               # false to disable JSONL event emission
+
+  # Per-project session isolation — each project gets its own session history.
+  - module: hooks-project-isolation
+    source: git+https://github.com/michaeljabbour/amplifier-module-hooks-project-isolation@main
+    config:
+      enabled: true
+
+# ── Tools ────────────────────────────────────────────────────────────────
+tools:
+  # High-level memory tool: search, remember, kg, traverse, diary, mine,
+  # events (query JSONL event log), garden (on-demand cluster analysis).
+  # Backed entirely by the native amplifier-data store via the auto-started
+  # memory daemon -- no vendor dependency, no subprocess.
+  - module: tool-memory
+    source: ../modules/tool-memory
+    version: 2.0.0
+    config:
+      home: "~/.amplifier/memory"     # override: AMPLIFIER_MEMORY_HOME
+      garden_max_drawers: 200         # budget cap for garden analysis
+      daemon:                         # first spawner's config wins (documented)
+        auto_start: true
+        embedder_model: "sentence-transformers/all-MiniLM-L6-v2"
+        # embedder_model: "none"  ->  lexical-only by policy
+
+  # NOTE (D6, 2.0.0 breaking change): the standalone SQLite fact-store
+  # module formerly registered here under the name `tool-memory`
+  # (git+.../amplifier-module-tool-memory) is REMOVED -- it name-collides
+  # with the native semantic tool above, and the `kg` operation on that
+  # tool now covers explicit facts natively. See CHANGELOG.md for the
+  # migration note.
+
+  # NOTE: tool-skills is inherited from foundation. Not re-declared here.
+  # The memory skill is registered via the skills/ directory in this bundle.
+
+# ── Agents ───────────────────────────────────────────────────────────────
+agents:
+  include:
+    - memory:archivist    # on-demand read path: search, KG, graph traversal
+    - memory:curator      # on-demand write path: curation, dedup, KG updates

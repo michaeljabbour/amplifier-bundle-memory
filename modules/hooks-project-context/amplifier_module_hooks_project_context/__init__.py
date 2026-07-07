@@ -37,7 +37,7 @@ except ImportError:
 
 
 try:
-    from amplifier_module_tool_mempalace.event_emitter import emit_event
+    from amplifier_module_tool_memory.event_emitter import emit_event
 except ImportError:
 
     def emit_event(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
@@ -45,7 +45,7 @@ except ImportError:
 
 
 try:
-    from amplifier_module_tool_mempalace.coordinator_bridge import (
+    from amplifier_module_tool_memory.coordinator_bridge import (
         NOOP_ASYNC_BRIDGE,
         AsyncBridge,
         make_async_bridge,
@@ -301,7 +301,7 @@ class ProjectContextStartHook:
                     )
                     try:
                         await self._bridge_emit(
-                            "memory-mempalace:coordination_scaffolded",
+                            "memory:coordination_scaffolded",
                             {
                                 "ok": True,
                                 "pc_dir": str(pc_dir),
@@ -330,7 +330,7 @@ class ProjectContextStartHook:
                     )
                     try:
                         await self._bridge_emit(
-                            "memory-mempalace:coordination_read",
+                            "memory:coordination_read",
                             {
                                 "ok": True,
                                 "files_read": files_read,
@@ -395,7 +395,7 @@ class ProjectContextEndHook:
             )
             try:
                 await self._bridge_emit(
-                    "memory-mempalace:curator_handoff_requested",
+                    "memory:curator_handoff_requested",
                     {
                         "ok": True,
                         "prompt_preview": prompt[:200],
@@ -413,11 +413,11 @@ async def mount(
 
     register_events(
         coordinator,
-        "memory-mempalace-project-context",
+        "memory-project-context",
         [
-            "memory-mempalace:coordination_read",
-            "memory-mempalace:coordination_scaffolded",
-            "memory-mempalace:curator_handoff_requested",
+            "memory:coordination_read",
+            "memory:coordination_scaffolded",
+            "memory:curator_handoff_requested",
         ],
     )
 

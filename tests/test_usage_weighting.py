@@ -7,7 +7,7 @@ and can never let usage dominate semantic similarity when enabled.
 
 from __future__ import annotations
 
-from amplifier_module_tool_mempalace.usage import (
+from amplifier_module_tool_memory.usage import (
     USAGE_SCALE,
     decay_factor,
     decay_importance,
@@ -53,7 +53,7 @@ def test_decay_relaxes_toward_neutral_never_inverts() -> None:
 
 
 def test_rerank_usage_off_by_default_is_unchanged() -> None:
-    from amplifier_module_hooks_mempalace_briefing import _rerank_by_importance
+    from amplifier_module_hooks_memory_briefing import _rerank_by_importance
 
     results = [
         {"id": "a", "score": 0.90},
@@ -69,7 +69,7 @@ def test_rerank_usage_off_by_default_is_unchanged() -> None:
 def test_rerank_usage_cannot_dominate_semantic() -> None:
     """A heavily-used low-semantic result must NOT overtake a clearly better
     semantic result. Usage is a tie-breaker-scale nudge, not a lever."""
-    from amplifier_module_hooks_mempalace_briefing import _rerank_by_importance
+    from amplifier_module_hooks_memory_briefing import _rerank_by_importance
 
     results = [
         {"id": "strong", "score": 0.90},
@@ -85,7 +85,7 @@ def test_rerank_usage_cannot_dominate_semantic() -> None:
 
 
 def test_rerank_usage_breaks_ties_when_enabled() -> None:
-    from amplifier_module_hooks_mempalace_briefing import _rerank_by_importance
+    from amplifier_module_hooks_memory_briefing import _rerank_by_importance
 
     results = [
         {"id": "x", "score": 0.80},

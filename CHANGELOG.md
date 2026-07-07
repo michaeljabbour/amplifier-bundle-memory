@@ -1,5 +1,111 @@
 # Changelog
 
+## [2.0.0] — 2026-07-07
+
+### BREAKING — Native cutover (docs/plans/2026-07-07-native-cutover-design.md)
+
+The prior vendor-backed (ChromaDB) store is gone. Memory is now backed
+entirely by the amplifier-data substrate through an auto-started local
+memory daemon (a local ONNX embedder via fastembed; no torch, no external
+network calls by default). This release lands the B3 phase of the cutover:
+the mechanical rename sweep, the migration path, and the doc/DTU updates.
+B1 (native daemon/client/embedder, additive) and B2 (tool + hooks rewired,
+vendor code deleted) landed in this same release cycle.
+
+#### Renamed (breaking)
+
+| Old | New |
+| --- | --- |
+| `modules/tool-mempalace/` | `modules/tool-memory/` |
+| `modules/hooks-mempalace-capture/` | `modules/hooks-memory-capture/` |
+| `modules/hooks-mempalace-briefing/` | `modules/hooks-memory-briefing/` |
+| `modules/hooks-mempalace-interject/` | `modules/hooks-memory-interject/` |
+| `amplifier_module_tool_mempalace` (package) | `amplifier_module_tool_memory` |
+| `amplifier_module_hooks_mempalace_*` (packages) | `amplifier_module_hooks_memory_*` |
+| tool name `palace` | `memory` (operations unchanged: search/remember/status/kg/traverse/diary/mine/events/garden) |
+| `PalaceTool` | `MemoryTool` |
+| `MempalaceCaptureHook` / `MempalaceBriefingHook` / `MempalaceInterjectHook` | `MemoryCaptureHook` / `MemoryBriefingHook` / `MemoryInterjectHook` |
+| `AmplifierDataMemoryStore` | `NativeMemoryStore` (the ONE store now) |
+| `behaviors/mempalace.yaml` | `behaviors/memory.yaml` |
+| `skills/mempalace/SKILL.md` | `skills/memory/SKILL.md` |
+| config key `palace_path` | `home` (default `~/.amplifier/memory`) |
+| `~/.mempalace/*` (store, events, spool) | `~/.amplifier/memory/*` (override: `AMPLIFIER_MEMORY_HOME`) |
+| console script `mempalace-amplifier-data-gateway` | `memory-daemon` |
+| console script `mempalace-load-captures` / `mempalace-write-cells` | `memory-load-captures` / `memory-write-cells` |
+| console script `mempalace-server-concurrency-check` | `memory-daemon-concurrency-check` |
+| console script `mempalace-dualwrite-compare` | retired (folded into `amplifier-memory-import --verify`) |
+| event prefix `memory-mempalace:X` | `memory:X` |
+| event schema | `v: 2` (hook names changed) |
+
+#### Removed (breaking)
+
+- The `mempalace` PyPI dependency, everywhere in this repo.
+- The external SQLite fact-store module previously registered in
+  `behaviors/memory.yaml` under the name `tool-memory`
+  (`git+.../amplifier-module-tool-memory`) — it name-collided with the
+  renamed native tool. Its niche (explicit key-value facts) is now covered
+  by the native `kg` operation.
+- `PalaceMemoryStore`, `DualWriteMemoryStore`, `_call_mcp_tool`, and the
+  `shadow_gateway` config block (both `tool-memory` and
+  `hooks-memory-capture`) — there is no shadow anymore; the daemon IS the
+  store.
+- The `[substrate]` optional-dependency extra on `tool-memory` — folded into
+  hard dependencies (`amplifier-data`, `fastembed`).
+
+#### Added
+
+- **`amplifier-memory-import`** — one-shot, read-only migration from a
+  legacy vendor store. Reads a ChromaDB `mempalace_drawers` collection
+  (via the new `[migrate]` extra, chromadb only — never the vendor package
+  itself), copies drawers and their embeddings verbatim (same MiniLM
+  vector space, no re-embed by default; `--re-embed` opts into re-embedding
+  through the daemon's current model), and writes through the memory
+  daemon so the single-writer guarantee holds. Idempotent on re-run
+  (content addressing + a read-before-write guard on facts and the
+  embedding copy). `--verify` re-reads every imported drawer and
+  byte-compares it against the source. The source directory is never
+  modified. KG + diary import is honestly reported as skipped (no
+  independently verifiable on-disk format for either without an installed
+  copy of the vendor package — see `migrate.py`'s docstring).
+- **Home-directory unification.** The event emitter, capture-hook spool,
+  and daemon now all resolve the same `~/.amplifier/memory` home (override
+  `AMPLIFIER_MEMORY_HOME`) and create it lazily on first use — there is no
+  more "silent no-op unless already initialised" behavior.
+- **DTU profiles**: `memory-native-e2e.yaml` (friend-scenario remember ->
+  search round-trip through the auto-started daemon with the legacy vendor
+  package asserted ABSENT; daemon crash-respawn) replaces
+  `memory-bundle-e2e.yaml`; `memory-migration-e2e.yaml` seeds a real
+  legacy-shaped ChromaDB store, uninstalls the vendor package, and asserts
+  the migration report.
+- **`tests/test_vendor_sweep.py`** — executable KG-N4 grep gate (zero
+  `mempalace` outside the migration module and a small explicit allowlist;
+  zero bare `palace` in `modules/`, `behaviors/`, `skills/`, `context/`,
+  `agents/`, `bundle.md`, `README.md`).
+
+#### Migration instructions for existing users
+
+```bash
+pip install 'amplifier-module-tool-memory[migrate]'
+amplifier-memory-import --verify
+```
+
+Then update your bundle pin to `@main` (or the tagged 2.0.0 release) and
+re-add the bundle (`amplifier bundle add ...`) so `behaviors/memory.yaml`
+is picked up. If you had the external SQLite `tool-memory` module composed
+alongside this bundle, remove it from your own bundle config — the name
+now belongs to the native tool.
+
+### Technical Notes
+
+- All module versions bumped to `2.0.0` (breaking rename + transport
+  change) except `hooks-project-context`, which is functionally unchanged
+  by the cutover and stays at `1.1.0`.
+- Durability requires the amplifier-data Rust kernel; a Rust toolchain is
+  now an install-time prerequisite (installing the pinned `amplifier-data`
+  git dependency builds it via maturin).
+
+---
+
 ## [1.2.0] — 2026-04-17
 
 ### Added

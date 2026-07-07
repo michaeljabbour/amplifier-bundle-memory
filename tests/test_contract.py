@@ -9,7 +9,7 @@ verify:
 2. The hook handler ABI is still `async (event, data) -> HookResult` — we
    mount each hook against the real RustHookRegistry and dispatch a synthetic
    event to confirm it returns a HookResult (not raises, not returns None).
-3. The Tool protocol still reads `input_schema` — PalaceTool exposes a
+3. The Tool protocol still reads `input_schema` — MemoryTool exposes a
    well-formed JSON Schema with `type: object`.
 4. Each module's async `mount(coordinator, config)` entry-point matches the
    current loader convention (signature + return shape).
@@ -104,11 +104,11 @@ class TestHookHandlerABI:
     def test_capture_hook_returns_hook_result(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import amplifier_module_hooks_mempalace_capture as m
+        import amplifier_module_hooks_memory_capture as m
 
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: None)
 
-        hook = m.MempalaceCaptureHook()
+        hook = m.MemoryCaptureHook()
         result = asyncio.run(
             hook(
                 "tool:post",
@@ -121,17 +121,13 @@ class TestHookHandlerABI:
     def test_briefing_hook_returns_hook_result(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import amplifier_module_hooks_mempalace_briefing as m
+        import amplifier_module_hooks_memory_briefing as m
 
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: None)
-
-        def raise_not_found(*a: Any, **kw: Any) -> None:
-            raise FileNotFoundError
-
-        monkeypatch.setattr(m.subprocess, "run", raise_not_found)
+        monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
 
-        hook = m.MempalaceBriefingHook()
+        hook = m.MemoryBriefingHook()
         result = asyncio.run(hook("session:start", {}))
         assert hasattr(result, "action")
 
@@ -174,9 +170,9 @@ class TestMountAndDispatch:
     """
 
     def test_mount_signatures_are_async_coordinator_config(self) -> None:
-        import amplifier_module_hooks_mempalace_briefing as briefing
-        import amplifier_module_hooks_mempalace_capture as capture
-        import amplifier_module_hooks_mempalace_interject as interject
+        import amplifier_module_hooks_memory_briefing as briefing
+        import amplifier_module_hooks_memory_capture as capture
+        import amplifier_module_hooks_memory_interject as interject
         import amplifier_module_hooks_project_context as project_ctx
 
         for mod in (briefing, capture, interject, project_ctx):
@@ -194,7 +190,7 @@ class TestMountAndDispatch:
     def test_capture_mounts_and_dispatches(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import amplifier_module_hooks_mempalace_capture as m
+        import amplifier_module_hooks_memory_capture as m
 
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: None)
 
@@ -214,14 +210,10 @@ class TestMountAndDispatch:
     def test_briefing_mounts_and_dispatches(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import amplifier_module_hooks_mempalace_briefing as m
+        import amplifier_module_hooks_memory_briefing as m
 
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: None)
-
-        def raise_not_found(*a: Any, **kw: Any) -> None:
-            raise FileNotFoundError
-
-        monkeypatch.setattr(m.subprocess, "run", raise_not_found)
+        monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
 
         async def _run() -> list[Any]:
@@ -253,7 +245,7 @@ class TestMountAndDispatch:
 
 
 # ---------------------------------------------------------------------------
-# 4. Tool protocol — PalaceTool must expose input_schema with type:object
+# 4. Tool protocol — MemoryTool must expose input_schema with type:object
 # ---------------------------------------------------------------------------
 
 
@@ -261,9 +253,9 @@ class TestToolProtocol:
     def test_palace_tool_exposes_input_schema(self) -> None:
         """The orchestrator reads tool.input_schema — it must have type:object
         at the root or Anthropic rejects the whole request."""
-        from amplifier_module_tool_mempalace import PalaceTool
+        from amplifier_module_tool_memory import MemoryTool
 
-        tool = PalaceTool()
+        tool = MemoryTool()
         schema = tool.input_schema
         assert isinstance(schema, dict), "input_schema must be a dict"
         assert schema.get("type") == "object", (
@@ -274,9 +266,9 @@ class TestToolProtocol:
 
     def test_palace_tool_has_required_attributes(self) -> None:
         """Tool protocol requires name, description, input_schema, execute."""
-        from amplifier_module_tool_mempalace import PalaceTool
+        from amplifier_module_tool_memory import MemoryTool
 
-        tool = PalaceTool()
+        tool = MemoryTool()
         assert isinstance(tool.name, str) and tool.name
         assert isinstance(tool.description, str) and tool.description
         assert callable(getattr(tool, "execute", None))

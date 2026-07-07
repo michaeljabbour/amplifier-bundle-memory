@@ -2,7 +2,7 @@
 
 The behavioral write hook is the memory bundle's half of the behavioral
 plasticity loop. It ships in the memory repo for dependency-locality (it imports only
-tool-mempalace internals) but is mounted exclusively by the
+tool-memory internals) but is mounted exclusively by the
 behavioral-plasticity conductor via a ``source:`` reference into this
 subdirectory — it is intentionally not wired by any memory behavior, since
 the conductor owns the activation decision. It fires on
@@ -22,7 +22,7 @@ Hard constraints honoured here (the constellation's prime directives):
 * **Peer isolation.** This module reads the raw ``events.jsonl`` substrate
   directly to derive the outcome. It does NOT import the context-intelligence
   bundle or the survey bundle (peers must not import each other). It imports
-  only within the memory bundle (tool-mempalace) and amplifier-core.
+  only within the memory bundle (tool-memory) and amplifier-core.
 * **Full mutation contract.** Every write carries provenance, causal
   interaction id, reversible delta, timestamp, source outcome, confidence, and
   a rollback handle (see ``scripts/mutation.py``), and is appended to an audit
@@ -38,13 +38,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from amplifier_module_tool_mempalace.phase3 import compute_importance
-from amplifier_module_tool_mempalace.salience import (
+from amplifier_module_tool_memory.phase3 import compute_importance
+from amplifier_module_tool_memory.salience import (
     SalienceConfig,
     SalienceInput,
     evaluate_salience,
 )
-from amplifier_module_tool_mempalace.scripts.mutation import MutationRecord
+from amplifier_module_tool_memory.scripts.mutation import MutationRecord
 
 try:
     from amplifier_core import HookResult  # type: ignore
@@ -67,7 +67,7 @@ DEFAULT_SALIENCE = SalienceConfig(threshold=0.25)
 
 # Event whose presence marks a drawer touched this session (emitted by the
 # capture hook's drain worker). We read it from the substrate, not from CI.
-_DRAWER_EVENT_NAMES = {"drawer_filed", "memory-mempalace:drawer_filed"}
+_DRAWER_EVENT_NAMES = {"drawer_filed", "memory:drawer_filed"}
 
 
 @dataclass(frozen=True)

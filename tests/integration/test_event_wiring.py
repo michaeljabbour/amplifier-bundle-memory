@@ -1,15 +1,14 @@
 """End-to-end coordinator event wiring tests.
 
-Runs INSIDE the memory-bundle-e2e DTU container.
+Runs INSIDE the memory-native-e2e DTU container.
 Validates: hook fires -> coordinator.hooks.emit -> hooks-logging writes events.jsonl.
 
-All tests in this module are automatically skipped on the host machine —
+All tests in this module are automatically skipped on the host machine --
 see tests/integration/conftest.py (pytest_collection_modifyitems).
 
-DTU requirements (provisioned by memory-bundle-e2e.yaml):
-- /root/.mempalace (seeded palace + spool dir)
+DTU requirements (provisioned by memory-native-e2e.yaml):
 - amplifier installed via uv tool install
-- mempalace CLI on PATH
+- the memory bundle registered via behaviors/memory.yaml
 - ANTHROPIC_API_KEY / OPENAI_API_KEY in /root/.amplifier/keys.env
 - pytest-asyncio installed
 """
@@ -50,12 +49,12 @@ def _events_in(path: Path) -> list[dict]:
 
 
 def _coordinator_events(path: Path) -> list[dict]:
-    """Filter events whose 'event' key starts with 'memory-mempalace:'."""
+    """Filter events whose 'event' key starts with the native `memory:` prefix
+    (native cutover: was the vendor-branded coordinator-bridge prefix)."""
     return [
         e
         for e in _events_in(path)
-        if isinstance(e.get("event"), str)
-        and e["event"].startswith("memory-mempalace:")
+        if isinstance(e.get("event"), str) and e["event"].startswith("memory:")
     ]
 
 
@@ -63,8 +62,8 @@ def test_drawer_filed_appears_in_events_jsonl():
     """drawer_filed event should appear in events.jsonl after amplifier run.
 
     Runs an amplifier session with a message that contains an architecture
-    decision — the mempalace hook should file it as a drawer and emit a
-    memory-mempalace:drawer_filed coordinator event.
+    decision -- the capture hook should file it as a drawer and emit a
+    memory:drawer_filed coordinator event.
     """
     subprocess.run(
         [
@@ -78,18 +77,17 @@ def test_drawer_filed_appears_in_events_jsonl():
     )
     time.sleep(2.0)
     events_path = _latest_events_jsonl()
-    assert events_path is not None, "no events.jsonl found — is hooks-logging mounted?"
+    assert events_path is not None, "no events.jsonl found -- is hooks-logging mounted?"
     coordinator_events = _coordinator_events(events_path)
     event_names = [e.get("event") for e in coordinator_events]
-    assert "memory-mempalace:drawer_filed" in event_names
+    assert "memory:drawer_filed" in event_names
 
 
 def test_briefing_assembled_payload_has_drawer_ids():
     """briefing_assembled event payload should contain a drawer_ids list.
 
     Runs a short amplifier session and checks that the coordinator emitted a
-    memory-mempalace:briefing_assembled event whose payload includes a
-    'drawer_ids' list.
+    memory:briefing_assembled event whose payload includes a 'drawer_ids' list.
     """
     subprocess.run(
         ["amplifier", "run", "--", "echo done"],
@@ -98,12 +96,10 @@ def test_briefing_assembled_payload_has_drawer_ids():
     )
     time.sleep(1.0)
     events_path = _latest_events_jsonl()
-    assert events_path is not None, "no events.jsonl found — is hooks-logging mounted?"
+    assert events_path is not None, "no events.jsonl found -- is hooks-logging mounted?"
     coordinator_events = _coordinator_events(events_path)
     briefing_events = [
-        e
-        for e in coordinator_events
-        if e.get("event") == "memory-mempalace:briefing_assembled"
+        e for e in coordinator_events if e.get("event") == "memory:briefing_assembled"
     ]
     assert briefing_events, "No briefing_assembled event found in coordinator events"
     briefing = briefing_events[-1]

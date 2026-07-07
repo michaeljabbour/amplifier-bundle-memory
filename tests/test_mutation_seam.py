@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from amplifier_module_tool_mempalace.scripts.memory_store import RecordingMemoryStore
-from amplifier_module_tool_mempalace.scripts.mutation import (
+from amplifier_module_tool_memory.store import RecordingMemoryStore
+from amplifier_module_tool_memory.scripts.mutation import (
     ReversibleDelta,
     new_mutation,
 )

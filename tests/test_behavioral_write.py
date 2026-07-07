@@ -16,8 +16,8 @@ from amplifier_module_hooks_behavioral_write import (
     BehavioralWriteHook,
     process_session,
 )
-from amplifier_module_tool_mempalace.phase3 import compute_importance
-from amplifier_module_tool_mempalace.scripts.memory_store import RecordingMemoryStore
+from amplifier_module_tool_memory.phase3 import compute_importance
+from amplifier_module_tool_memory.store import RecordingMemoryStore
 
 
 def _events_file(tmp_path: Path, rows: list[dict[str, Any]]) -> Path:

@@ -24,7 +24,7 @@ digraph curate {
 
     load [
         shape=parallelogram,
-        tool_command="mempalace-load-captures $session_id",
+        tool_command="memory-load-captures $session_id",
         outputs="captures"
     ]
 
@@ -51,7 +51,7 @@ digraph curate {
 
     write [
         shape=parallelogram,
-        tool_command="mempalace-write-cells",
+        tool_command="memory-write-cells",
         outputs="filed"
     ]
 
