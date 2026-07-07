@@ -1,8 +1,36 @@
 # Handoff
 
-*Last updated: 2026-07-07 — substrate-adapter completion*
+*Last updated: 2026-07-07 — substrate adapter completed, MCP transport bug fixed, DTU-validated 5/5*
 
-## TL;DR for Michael (2026-07-07 session)
+## TL;DR for Michael (2026-07-07, later same session — MCP fix + DTU validation)
+
+Both 2026-07-07 work items are now **committed and pushed to origin/main**:
+`6c0974d` (substrate-adapter completion, below) and `758b0fd` (MCP transport fix).
+
+**Critical bug found by DTU validation:** the invocation pattern `mempalace mcp --call <json>`
+NEVER existed in any published mempalace (3.5.0 current; `mcp` only accepts `--backend` and
+merely prints setup instructions). Because most call sites were fire-and-forget, **palace
+writes were silently no-oping**. The real surface is the separate `mempalace-mcp` console
+script: newline-delimited JSON-RPC 2.0 over stdio (initialize handshake → `tools/call`,
+results wrapped in `result.content[0].text`). Fixed at ALL 6 call sites via a canonical
+`_call_mcp_tool()` helper in `scripts/memory_store.py`: `PalaceMemoryStore.file` and the
+capture hook's `_mcp_add_drawer` now FAIL LOUD (making capture's spool-retry contract
+functional for the first time); briefing/garden/tool keep their best-effort contracts with
+observability events; `tests/test_benchmark_recall.py` rewired; the DTU e2e smoke rewritten
+to drive real production paths.
+
+**DTU reality check: 5/5 PASS** (isolated container, Gitea-mirrored repos at
+memory=`758b0fd` / amplifier-data=`09482f1`, pinned-SHA git dep resolved byte-exactly,
+Rust kernel built in-container): bundle composes; `[substrate]` pin verified; tool-mempalace
+191 passed with substrate gates EXECUTING; `tests/integration/test_substrate_shadow_e2e.py`
+PASSED (drawer + embedding + KG fact through the live gateway shadow, read back from the
+substrate, palace unharmed); `mempalace-dualwrite-compare` PASS exit 0. DTU instance
+destroyed after validation; reusable profile saved at
+`~/dev/amplifier-data/.amplifier/digital-twin-universe/profiles/memory-substrate-e2e.yaml`.
+
+Also note: the old TL;DR says "**Not committed** — left on the working tree for review" — update that sentence in the older section to read "(Since committed and pushed as `6c0974d`.)" replacing the not-committed claim. Report the final diff summary.
+
+## TL;DR for Michael (2026-07-07 session — substrate-adapter completion)
 
 Implemented `docs/plans/2026-07-07-substrate-adapter-completion-design.md` in
 full: the `AmplifierDataMemoryStore` seam now routes vectors, KG facts, and
@@ -12,8 +40,7 @@ stale `update_fact`/`append_batch` probe is replaced with the real
 `write_batch` primitive), the gateway gained `add_embedding`/`query_vector`/
 `batch` parity, `tool-mempalace` gained a best-effort shadow for `kg` and
 `diary` ops, and `dualwrite_compare.py` now verifies vector/KG/scope/diary
-read-consistency in addition to E1/scope/facts/durability. **Not committed**
-— left on the working tree for review.
+read-consistency in addition to E1/scope/facts/durability. (Since committed and pushed as `6c0974d`.)
 
 **Killer gates KG-V1…KG-G1:** all encoded as tests and green in the
 substrate-installed dev venv (`~/dev/.venv`, amplifier-data editable at HEAD
