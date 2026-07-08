@@ -326,7 +326,7 @@ def _spawn_and_wait(home: Path, *, retry: bool = True) -> MemoryClient | None:
             lock_path.unlink()
 
 
-def ensure_daemon(home: Path | None = None) -> MemoryClient | None:
+def ensure_daemon(home: Path | str | None = None) -> MemoryClient | None:
     """Discovery -> health-check -> (re)spawn per \u00a75.2. NEVER raises.
 
     Returns ``None`` only when spawning is genuinely impossible (e.g. the
@@ -337,7 +337,7 @@ def ensure_daemon(home: Path | None = None) -> MemoryClient | None:
     """
     global _unavailable_emitted
 
-    resolved_home = home if home is not None else default_memory_home()
+    resolved_home = Path(home).expanduser() if home is not None else default_memory_home()
     try:
         resolved_home.mkdir(mode=0o700, parents=True, exist_ok=True)
         client = _discover(resolved_home)
@@ -346,8 +346,12 @@ def ensure_daemon(home: Path | None = None) -> MemoryClient | None:
         client = _spawn_and_wait(resolved_home)
         if client is not None:
             return client
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 -- NEVER-raises contract; observed, not silent
+        _emit(
+            "daemon_ensure_error",
+            ok=False,
+            data={"home": str(resolved_home), "error": repr(exc)},
+        )
 
     with _unavailable_lock:
         already = _unavailable_emitted

@@ -43,3 +43,8 @@ pythonVersion = "3.11"
 typeCheckingMode = "basic"
 reportMissingImports = false
 reportGeneralTypeIssues = false
+
+# Required: the amplifier-data dependency above is a direct (git+) URL reference;
+# hatchling refuses to build metadata containing direct references without this flag.
+[tool.hatch.metadata]
+allow-direct-references = true
