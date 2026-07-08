@@ -1,6 +1,51 @@
 # Handoff
 
-*Last updated: 2026-07-07 — ROOT CAUSE found & fixed (Tool-protocol signature violation); full conductor-bundle DTU validation 5/5*
+*Last updated: 2026-07-08 — NATIVE CUTOVER v2.0.0 complete: mempalace removed, memory runs on amplifier-data; conductor-bundle DTU validation 6/6*
+
+## TL;DR for Michael (2026-07-08 — NATIVE CUTOVER v2.0.0, DTU-validated 6/6)
+
+**mempalace is GONE. memory runs natively on amplifier-data.** Final HEAD `f1bb266`; the full
+cutover ladder (design → B1 core → B2 rewiring → B3 vendor sweep → 5 DTU fix rounds) is on main.
+
+**What shipped (v2.0.0, breaking):**
+- Modules renamed: tool-mempalace→tool-memory, hooks-mempalace-*→hooks-memory-*; tool `palace`→`memory`
+  (operations unchanged); `NativeMemoryStore` (store.py); behaviors/memory.yaml; home `~/.amplifier/memory/`;
+  events schema v2 (`memory:*`); external SQLite tool-memory module dropped (name collision).
+- Local `FastEmbedEmbedder` (all-MiniLM-L6-v2 ONNX, 384-dim, daemon-side — nothing leaves the machine).
+- Auto-started `memory-daemon` (ensure_daemon: daemon.json discovery, /health, spawn-lock race,
+  stale-pid + kill-9 recovery, version-mismatch respawn); durable amplifier-data store (pin 09482f1).
+- `amplifier-memory-import` migration script ([migrate] extra = chromadb only; copies vectors verbatim;
+  --verify; KG/diary import loudly skipped by design).
+- Killer gates KG-N1..N7 all EXECUTED (semantic round-trip via real orchestrator convention; 2-process
+  concurrent writers; embedder-offline lexical degradation; vendor-sweep grep gate as a test; real-chroma
+  migration; kill-9 respawn; cold-start sweep convergence).
+
+**Conductor-bundle DTU validation: 6/6 PASS** (memory f1bb266 · conductor 7053120 · survey 05d338e ·
+amplifier-data pin 09482f1): compose + vendor absence · cold-start cross-session recall (model cache
+wiped, re-downloaded, found score 0.803 + semantic rephrase 0.546) · cohort ci+memory + autofire record
+written · full suite battery incl. DTU integration 8 passed (drawer_filed e2e green) · migration
+(3 drawers + vectors verified, searchable at 0.785) · daemon kill-9 respawn with pre-crash fact intact.
+
+**Bug ledger — 7 real defects the DTU rounds caught (none visible to green unit suites):**
+1. Cold-start data loss — needs_embedding had no consumer; writes during model download permanently
+   unsearchable → `b2c9334` (sweep on warm-up + lexical union window).
+2. Autofire worker crashed EVERY session (spawned by file path, relative imports → ImportError,
+   swallowed) → conductor `7053120`.
+3. Cohort never auto-detected on direct tool calls (always "neither") → conductor `7053120`.
+4. Direct-URL pins without hatchling allow-direct-references → ALL five hook modules failed to
+   activate in live sessions → `8f3224b`.
+5. ensure_daemon swallowed str-home TypeError → silent None → `8f3224b`.
+6. Ambient capture NEVER worked live — hook read `tool_output`; orchestrator sends
+   `result={success,output,error}` → `37b6499` (+ verbatim-contract tests).
+7. Drain-thread bridge context loss — `memory:drawer_filed` had never reached any events.jsonl;
+   Future exceptions never inspected → `f1bb266` (bridge from session context; done-callback logging).
+Plus `bac6dd0` (transitive-URL pin restatement, found concurrently) and `c597a1e` (deterministic e2e
+test + capture_skipped bridged into events.jsonl — the observability that made #6/#7 one-grep finds).
+
+**Follow-ups (not blockers):** stale AGENTS.md note re tool_success (line exists pre-cutover);
+2 pre-existing test-isolation flakes in combined repo-root runs (reproduced at baseline); ANN
+accelerator behind VectorBackend when scale demands; friend's feature ask (stable memory ids +
+memory_outcome event) still open as backlog — invite issues.
 
 ## TL;DR for Michael (2026-07-07, fourth pass — THE root cause + conductor DTU 5/5)
 
