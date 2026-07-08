@@ -67,12 +67,32 @@ def _drain(timeout: float = 5.0) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _drain_capture_queue_between_tests() -> Any:
+def _drain_capture_queue_between_tests(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Ensure each capture-hook test starts and ends with an empty queue.
 
     The drain thread is a module-level singleton — without this fixture, a
     job left in flight by one test would emit drawer_filed into the next
     test's monkeypatched event list and confuse assertions.
+
+    Requesting ``monkeypatch`` here (even though it's unused directly) is
+    load-bearing, not decorative: pytest sets up fixtures with no declared
+    dependency in declaration order and tears them down in reverse (LIFO).
+    An autouse fixture with no explicit dependency on ``monkeypatch`` is set
+    up FIRST and torn down LAST -- meaning its post-yield code below would
+    run AFTER the test's own ``monkeypatch.setattr`` calls have already been
+    reverted. A test that leaves a job in flight when it returns (e.g. one
+    that intentionally doesn't drain, to assert hot-path latency) would then
+    have that job's remaining steps (``_detect_wing``, ``_file_drawer``)
+    resolve against the REAL module-level names -- including the real
+    ``ensure_daemon()``, which can take up to ~10s to give up spawning a
+    daemon. That real call can easily outlive this fixture's 5s wait
+    (silently swallowed by the try/except below) and finish while a LATER
+    test's ``emit_event`` patch is active, leaking a stray ``capture_failed``
+    event into that later test's assertions. Declaring ``monkeypatch`` as a
+    dependency forces this fixture to be set up AFTER and torn down BEFORE
+    the test's own monkeypatch instance, so the drain-wait below always runs
+    while the test's patches are still active -- the queue always drains
+    under the fakes, never under the real, possibly-slow implementations.
     """
     yield
     try:
@@ -267,7 +287,17 @@ class TestCaptureHookEmissions:
         }
         (spool_dir / f"{capture_id}.json").write_text(json.dumps(payload))
 
-        replayed = m._replay_orphans("test_session", emit_events=True)
+        # _replay_orphans wires the same completion-future/bridge-task
+        # machinery as the hot path (_wire_completion_bridge), which requires
+        # a running event loop (asyncio.get_running_loop()) -- mirrors how
+        # mount() always calls it from within a coroutine. Calling it bare,
+        # synchronously, raises "RuntimeError: no running event loop"; the
+        # blessed pattern (see hooks-memory-capture/tests/test_drawer_filed_
+        # coordinator_bridge.py) is to invoke it from inside asyncio.run().
+        async def _run_replay() -> int:
+            return m._replay_orphans("test_session", emit_events=True)
+
+        replayed = asyncio.run(_run_replay())
         assert replayed == 1
         _drain()
 

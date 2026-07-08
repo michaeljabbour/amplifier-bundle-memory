@@ -6,5 +6,18 @@ __pycache__/
 dist/
 build/
 .venv/
-# Runtime scratch (digital-twin-universe profiles, etc.) — never commit
-.amplifier/
+# Runtime scratch (digital-twin-universe state, mock services, etc.) — never
+# commit. DTU profiles under digital-twin-universe/profiles/ are checked-in
+# test fixtures (not scratch), so they're explicitly re-included below.
+#
+# NOTE: re-including nested paths under an ignored directory requires
+# ignoring each level's *contents* (`dir/*`) rather than the bare directory
+# (`dir/`) -- a bare `dir/` short-circuits git's recursion into that
+# directory entirely, so deeper `!` negations are never even evaluated.
+# Proven with `git check-ignore -v` against all three checked-in profiles.
+.amplifier/*
+!.amplifier/digital-twin-universe/
+.amplifier/digital-twin-universe/*
+!.amplifier/digital-twin-universe/profiles/
+.amplifier/digital-twin-universe/profiles/*
+!.amplifier/digital-twin-universe/profiles/*.yaml

@@ -7,24 +7,31 @@ name = "amplifier-module-hooks-project-context"
 version = "1.1.0"
 description = "Amplifier hook that integrates the project-context coordination file system"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
-    "amplifier-core",
-    "amplifier-module-tool-memory>=1.0.0",
+    # amplifier-core is a peer dependency -- provided by the host runtime.
+    # Do NOT declare it here (amplifier-foundation BUNDLE_GUIDE anti-pattern).
+    #
+    # amplifier-module-tool-memory is a sibling module provided by bundle
+    # composition (behaviors/memory.yaml), not pip -- see BUNDLE_GUIDE;
+    # availability guarded at import (try/except ImportError in
+    # amplifier_module_hooks_project_context/__init__.py).
+    #
     # Mirror of tool-memory's amplifier-data pin -- MUST move in lockstep
     # with modules/tool-memory/pyproject.toml (same SHA). Module activation
     # installs with `uv pip install --no-sources`, and uv rejects
     # *transitive* URL dependencies ("URL dependencies must be expressed as
     # direct requirements") -- so every module that depends on tool-memory
-    # must restate the pin directly.
+    # must restate the pin directly. Direct URL restated deliberately: uv
+    # --no-sources rejects transitive URL deps -- NOT the sibling-dep
+    # anti-pattern; amplifier-data is an external library.
     "amplifier-data @ git+https://github.com/michaeljabbour/amplifier-data@09482f1fa569ba8407894cad3a32f8ab6aecbc3d",
 ]
 
 [project.entry-points."amplifier.modules"]
 hooks-project-context = "amplifier_module_hooks_project_context:mount"
 
-[tool.uv.sources]
-amplifier-module-tool-memory = { path = "../tool-memory", editable = true }
 
 [dependency-groups]
 dev = [

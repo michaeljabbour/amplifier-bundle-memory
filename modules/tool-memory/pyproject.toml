@@ -3,12 +3,14 @@ name = "amplifier-module-tool-memory"
 version = "2.0.0"
 description = "High-level Amplifier tool module for the native memory daemon (amplifier-data) — search, remember, knowledge graph, traverse, diary, mine, and events operations"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [
     { name = "Michael Jabbour" },
 ]
 dependencies = [
-    "amplifier-core>=0.1.0",
+    # amplifier-core is a peer dependency -- provided by the host runtime.
+    # Do NOT declare it here (amplifier-foundation BUNDLE_GUIDE anti-pattern).
     # THE store now (native cutover, D8 of
     # docs/plans/2026-07-07-native-cutover-design.md) -- was the [substrate]
     # extra; promoted to a hard dependency once the tool and hooks are
@@ -17,7 +19,9 @@ dependencies = [
     # the sibling hook modules (hooks-memory-capture/-briefing/-interject,
     # hooks-project-context, hooks-behavioral-write) in lockstep -- uv's
     # --no-sources resolver requires them to restate this URL directly
-    # (see HANDOFF.md).
+    # (see HANDOFF.md). Direct URL restated deliberately: uv --no-sources
+    # rejects transitive URL deps -- NOT the sibling-dep anti-pattern;
+    # amplifier-data is an external library.
     "amplifier-data @ git+https://github.com/michaeljabbour/amplifier-data@09482f1fa569ba8407894cad3a32f8ab6aecbc3d",
     # Local daemon-side embedder (fastembed, ONNX, no torch; §4 of the design
     # doc). Only the memory daemon process actually loads a model

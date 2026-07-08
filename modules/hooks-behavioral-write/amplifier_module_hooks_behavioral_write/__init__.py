@@ -34,17 +34,84 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from amplifier_module_tool_memory.phase3 import compute_importance
-from amplifier_module_tool_memory.salience import (
-    SalienceConfig,
-    SalienceInput,
-    evaluate_salience,
-)
-from amplifier_module_tool_memory.scripts.mutation import MutationRecord
+# amplifier-module-tool-memory is a sibling module provided by bundle
+# composition (behaviors/memory.yaml) or, for this hook, the
+# behavioral-plasticity conductor's own composition -- not pip (see
+# BUNDLE_GUIDE). Guarded here so this module remains importable (e.g. for
+# isolated unit tests, static analysis) even when tool-memory isn't
+# installed; the fallbacks below always reject (never learn) rather than
+# silently fabricate a decision, matching the salience gate's own
+# "default: don't learn" invariant.
+try:
+    from amplifier_module_tool_memory.phase3 import compute_importance
+except ImportError:
+
+    def compute_importance(*args: Any, **kwargs: Any) -> float:  # type: ignore[misc]
+        return 0.5  # neutral default; matches phase3's own untagged-store default
+
+
+try:
+    from amplifier_module_tool_memory.salience import (
+        SalienceConfig,
+        SalienceInput,
+        evaluate_salience,
+    )
+except ImportError:
+    from dataclasses import dataclass as _dataclass
+
+    @_dataclass(frozen=True)
+    class SalienceConfig:  # type: ignore
+        threshold: float = 0.6
+        min_novelty: float = 0.0
+        min_reward: float = 0.0
+        min_surprise: float = 0.0
+        weights: tuple[float, float, float] = (1.0, 1.0, 1.0)
+
+    @_dataclass(frozen=True)
+    class SalienceInput:  # type: ignore
+        novelty: float
+        reward: float
+        surprise: float
+
+    def evaluate_salience(  # type: ignore[misc]
+        signals: SalienceInput, config: SalienceConfig | None = None
+    ) -> Any:
+        # Fail closed: reject every candidate write when the real gate is
+        # unavailable, rather than fabricate a "cleared" decision.
+        return _NoopSalienceDecision()
+
+    @_dataclass(frozen=True)
+    class _NoopSalienceDecision:
+        write: bool = False
+        salience: float = 0.0
+        reason: str = "tool_memory_unavailable"
+        components: dict = None  # type: ignore[assignment]
+
+
+try:
+    from amplifier_module_tool_memory.scripts.mutation import MutationRecord
+except ImportError:
+
+    @dataclass(frozen=True)
+    class MutationRecord:  # type: ignore
+        """Fallback stand-in; only reachable when tool-memory is absent,
+        in which case the salience gate above already rejects every write."""
+
+        interaction_id: str
+        provenance: str
+        source_outcome: str
+        delta: Any
+        confidence: float
+        timestamp: str
+        rollback_handle: str
+        atomic: bool
+        applied: bool = False
+        extra: dict = field(default_factory=dict)
+
 
 try:
     from amplifier_core import HookResult  # type: ignore

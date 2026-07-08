@@ -189,7 +189,9 @@ class TestCaptureCoordinatorBridge:
 
         monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
-        monkeypatch.setattr(m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x"))
+        monkeypatch.setattr(
+            m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
+        )
 
         emit_lock = threading.Lock()
         emitted: list[tuple[Any, ...]] = []
@@ -248,7 +250,9 @@ class TestCaptureCoordinatorBridge:
 
         monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
-        monkeypatch.setattr(m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x"))
+        monkeypatch.setattr(
+            m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
+        )
 
         emit_lock = threading.Lock()
         emitted: list[tuple[Any, ...]] = []
@@ -300,7 +304,9 @@ class TestCaptureCoordinatorBridge:
 
         monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
-        monkeypatch.setattr(m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x"))
+        monkeypatch.setattr(
+            m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
+        )
 
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
@@ -407,6 +413,15 @@ class TestBriefingCoordinatorBridge:
             ),
         )
         monkeypatch.setattr(m, "_detect_project_name", lambda: "testproject")
+        # Native cutover: __call__ gates on ensure_daemon() being truthy
+        # BEFORE it ever calls _build_briefing (see the "if ensure_daemon()
+        # is None" check at the top of __call__). Without this patch the
+        # REAL ensure_daemon() runs, finds/spawns no daemon in the test
+        # sandbox, and the hook takes the daemon_unavailable/briefing_skipped
+        # path -- _build_briefing (patched above) is never reached and
+        # briefing_assembled never bridges. Same patch as the sibling test
+        # in tests/test_hook_emissions.py::test_briefing_emits_on_assemble.
+        monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: object())
 
         bridge_calls: list[tuple[str, Any]] = []
 
@@ -417,7 +432,9 @@ class TestBriefingCoordinatorBridge:
         asyncio.run(hook("session:start", {"opening_prompt": "test"}))
 
         assembled_calls = [
-            (name, payload) for name, payload in bridge_calls if name == "memory:briefing_assembled"
+            (name, payload)
+            for name, payload in bridge_calls
+            if name == "memory:briefing_assembled"
         ]
         assert len(assembled_calls) == 1, (
             f"Expected exactly one 'memory:briefing_assembled' bridge call, got: {bridge_calls}"
@@ -449,7 +466,9 @@ class TestBriefingCoordinatorBridge:
         async def fake_bridge(event_name: str, payload: Any) -> None:
             bridge_calls.append((event_name, payload))
 
-        hook = m.MemoryBriefingHook(config={"emit_events": False}, bridge_emit=fake_bridge)
+        hook = m.MemoryBriefingHook(
+            config={"emit_events": False}, bridge_emit=fake_bridge
+        )
         asyncio.run(hook("session:start", {}))
 
         # Private-JSONL channel: no emits
@@ -458,7 +477,9 @@ class TestBriefingCoordinatorBridge:
         )
 
         # Coordinator channel: no events starting with 'memory:'
-        coordinator_events = [name for name, _ in bridge_calls if name.startswith("memory:")]
+        coordinator_events = [
+            name for name, _ in bridge_calls if name.startswith("memory:")
+        ]
         assert coordinator_events == [], (
             f"emit_events=False must suppress coordinator bridge emits, got: {coordinator_events}"
         )
@@ -876,4 +897,6 @@ class TestMakeSyncBridgeFailureLogging:
 
         asyncio.run(_main())
 
-        assert printed == [], f"a successful bridged emit must not log anything, got: {printed}"
+        assert printed == [], (
+            f"a successful bridged emit must not log anything, got: {printed}"
+        )

@@ -3,6 +3,7 @@ name = "amplifier-module-context-sleep"
 version = "0.1.0"
 description = "Amplifier context module — sleep-time LLM consolidation with research-validated faithful guardrails"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [
     { name = "Michael Jabbour" },

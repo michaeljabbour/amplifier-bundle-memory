@@ -81,6 +81,7 @@ digraph memory {
     disclaimer [label="Token estimates: ~4 chars/token\nSolid border = local (counted)\nDashed + red = external, hidden cost (not counted)\nDashed + muted = external, no cost\nExcludes: sub-session costs, runtime-dynamic", shape=note, fillcolor="#eceff1", style="filled", fontsize=9]
 
     ext_githttps___github_com_microsoft_amplifier_foundation_main [label="Amplifier Foundation\nShared base brought in from GitHub\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_michaeljabbour_amplifier_module_hooks_project_isolation_main [label="Project Isolation Hook\nPer-project session isolation,\nbrought in from GitHub\n(hooks-project-isolation, external)", shape=box, fillcolor="#bbdefb", style="dashed", color="red", penwidth=2]
 
     root_memory -> ext_githttps___github_com_microsoft_amplifier_foundation_main [style=dashed]
     root_memory -> beh_memory_behavior [label="composes"]
@@ -91,6 +92,7 @@ digraph memory {
     beh_memory_behavior -> mod_hooks_memory_briefing [label="uses", penwidth=0.8]
     beh_memory_behavior -> mod_hooks_project_context [label="uses", penwidth=0.8]
     beh_memory_behavior -> mod_hooks_memory_interject [label="uses", penwidth=0.8]
+    beh_memory_behavior -> ext_githttps___github_com_michaeljabbour_amplifier_module_hooks_project_isolation_main [label="uses", penwidth=0.8, style=dashed]
     beh_memory_behavior -> ctx_instructions_md [style=dotted, color=purple]
     beh_memory_behavior -> ctx_project_context_guide_md [style=dotted, color=purple]
     root_memory -> ctx_instructions_md [style=dotted, color=purple]

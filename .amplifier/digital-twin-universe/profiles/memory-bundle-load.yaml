@@ -1,0 +1,77 @@
+# Validates local changes to: amplifier-bundle-memory (branch feat/manifest-and-curate-pipeline)
+#
+# Out-of-band requirements:
+#   - Host-side Gitea mirror of admin/amplifier-bundle-memory (working-tree snapshot pushed).
+#   - Launch with:
+#       amplifier-digital-twin launch <this-file> \
+#         --var GITEA_TOKEN=<token> \
+#         --name memory-bundle-load
+#
+# Design note: this profile deliberately does NOT use url_rewrites/mitmproxy.
+# It is a bundle-only change, and the only repo that must come from local state
+# (amplifier-bundle-memory) is added directly from the Gitea mirror over HTTP.
+# foundation + provider modules come straight from public GitHub. This avoids
+# the proxy entirely (mitmproxy CA-cert generation fails on this host).
+# The Gitea IP 192.168.0.101 is the host LAN IP reachable from inside Incus
+# on macOS (Incus + Docker live in separate VMs; localhost/gateway do not route).
+name: memory-bundle-load
+description: >
+  Validates that amplifier-bundle-memory composes and loads cleanly in a fresh
+  Amplifier install (manifest + curate pipeline + amplifier-data seam + capture
+  shadow, shadow disabled by default), and that the new console-script entry
+  points are registered.
+
+base:
+  image: ubuntu:24.04
+
+# Forward provider keys referenced by the in-DTU settings.yaml.
+passthrough:
+  allow_external: true
+  services:
+    - name: anthropic
+      key_env: ANTHROPIC_API_KEY
+    - name: openai
+      key_env: OPENAI_API_KEY
+
+provision:
+  setup_cmds:
+    - apt-get update && apt-get install -y git curl build-essential
+    - curl -LsSf https://astral.sh/uv/install.sh | sh
+
+    # Install the Amplifier CLI from public GitHub.
+    - uv tool install git+https://github.com/microsoft/amplifier
+
+    # Mirror host providers (anthropic + openai). Keys expand from passthrough'd env.
+    - |
+      mkdir -p /root/.amplifier
+      cat > /root/.amplifier/settings.yaml << EOF
+      config:
+        providers:
+          - module: provider-anthropic
+            source: git+https://github.com/microsoft/amplifier-module-provider-anthropic@main
+            config:
+              api_key: ${ANTHROPIC_API_KEY}
+              base_url: https://api.anthropic.com
+              default_model: claude-opus-4-8
+          - module: provider-openai
+            source: git+https://github.com/microsoft/amplifier-module-provider-openai@main
+            config:
+              api_key: ${OPENAI_API_KEY}
+              base_url: https://api.openai.com/v1
+              default_model: gpt-5.3-codex
+              priority: 2
+      EOF
+
+    # Register the memory bundle directly from the Gitea working-tree snapshot.
+    - amplifier bundle add "git+http://admin:${GITEA_TOKEN}@192.168.0.101:10110/admin/amplifier-bundle-memory@main" --app
+
+    - amplifier --version
+    - amplifier bundle list
+
+update:
+  cmds:
+    - amplifier update --yes --force
+
+readiness:
+  - name: amplifier-installed
+    command: amplifier --version

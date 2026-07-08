@@ -128,8 +128,9 @@ amplifier bundle use memory
 # Optional: add to your always-on `app` bundles so memory composes into every session
 # (Edit ~/.amplifier/settings.yaml → bundle.app → append the git URL)
 
-# 2. Run — coordination files scaffold automatically on first session, and the
-#    memory daemon auto-starts on first use. Nothing else to install.
+# 2. Run — the memory daemon auto-starts on first use. Nothing else to
+#    install. project-context coordination-file scaffolding is disabled by
+#    default (see "project-context Coordination Files" below).
 amplifier run "start a session"
 ```
 
@@ -205,7 +206,15 @@ The docent synthesizes from memory search + KG + diaries + session events + coor
 
 ## project-context Coordination Files
 
-On first run, the bundle scaffolds a `project-context/` directory and an `AGENTS.md` at the project root. These files are cross-platform — read natively by Amplifier, OpenAI Codex, GitHub Copilot, Cursor, and Windsurf.
+Auto-scaffolding is **disabled by default** (`setup_if_missing: false` in `behaviors/memory.yaml`): the `hooks-project-context` hook reads and updates an existing `project-context/` directory but will not create one in projects that lack it. To scaffold a project deliberately:
+
+```bash
+amplifier run "set up project-context coordination files for this project"
+```
+
+Or set `setup_if_missing: true` in `behaviors/memory.yaml` to restore automatic scaffolding everywhere.
+
+Once present, these files (plus `AGENTS.md` at the project root) are cross-platform — read natively by Amplifier, OpenAI Codex, GitHub Copilot, Cursor, and Windsurf.
 
 | File | Tier | Purpose |
 |---|---|---|
@@ -232,7 +241,7 @@ On first run, the bundle scaffolds a `project-context/` directory and an `AGENTS
 
 The first four rows are properties of the retrieval engine. The last row measures the briefing hook's re-ranking on a local synthetic proxy — the harness supports running against real LongMemEval when the dataset is available. Full methodology in `docs/research/gene-transfer-v1.2.0.pdf`.
 
-See `evals/` for benchmark runner configuration and the `memory:evaluator` agent for running evals via Amplifier.
+The benchmark runner lives in `tests/test_benchmark_recall.py` (run the full R@5 simulation with `pytest -m benchmark`); raw run logs backing the re-ranking delta above are in `docs/eval/briefing-rerank-benchmark.md`. The LongMemEval/LoCoMo evaluation methodology is documented in `docs/eval/EVALUATION.md`.
 
 ---
 

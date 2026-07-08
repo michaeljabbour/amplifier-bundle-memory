@@ -3,23 +3,28 @@ name = "amplifier-module-hooks-memory-briefing"
 version = "2.0.0"
 description = "Amplifier hook module — injects a memory wake-up briefing at session start using semantic search, knowledge graph, and agent diary"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [
     { name = "Michael Jabbour" },
 ]
 dependencies = [
-    "amplifier-core>=0.1.0",
-    # amplifier-module-tool-memory already hard-depends on amplifier-data
-    # + fastembed (native cutover) -- there is no vendor dependency
-    # anymore -- every memory read goes through MemoryClient via
-    # ensure_daemon(), no vendor subprocess.
-    "amplifier-module-tool-memory>=2.0.0",
+    # amplifier-core is a peer dependency -- provided by the host runtime.
+    # Do NOT declare it here (amplifier-foundation BUNDLE_GUIDE anti-pattern).
+    #
+    # amplifier-module-tool-memory is a sibling module provided by bundle
+    # composition (behaviors/memory.yaml), not pip -- see BUNDLE_GUIDE;
+    # availability guarded at import (try/except ImportError in
+    # amplifier_module_hooks_memory_briefing/__init__.py).
+    #
     # Mirror of tool-memory's amplifier-data pin -- MUST move in lockstep
     # with modules/tool-memory/pyproject.toml (same SHA). Module activation
     # installs with `uv pip install --no-sources`, and uv rejects
     # *transitive* URL dependencies ("URL dependencies must be expressed as
     # direct requirements") -- so every module that depends on tool-memory
-    # must restate the pin directly.
+    # must restate the pin directly. Direct URL restated deliberately: uv
+    # --no-sources rejects transitive URL deps -- NOT the sibling-dep
+    # anti-pattern; amplifier-data is an external library.
     "amplifier-data @ git+https://github.com/michaeljabbour/amplifier-data@09482f1fa569ba8407894cad3a32f8ab6aecbc3d",
 ]
 
@@ -33,8 +38,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["amplifier_module_hooks_memory_briefing"]
 
-[tool.uv.sources]
-amplifier-module-tool-memory = { path = "../tool-memory", editable = true }
 
 [dependency-groups]
 dev = [

@@ -4,6 +4,8 @@ Sleep-time context consolidation for Amplifier sessions.
 
 Implements the full `ContextManager` protocol with a two-buffer architecture that compresses verbose, redundant context using an LLM (or a verbatim fallback when no provider is available) while preserving the full raw history.
 
+Like `hooks-behavioral-write`, this module is intentionally not wired into any `amplifier-bundle-memory` behavior; it is opt-in, sourced externally by whichever bundle wants it via a `source: git+.../amplifier-bundle-memory@main#subdirectory=modules/context-sleep` reference (see Installation below), leaving the activation decision to the consuming bundle rather than defaulting it on here (see `docs/research/context-sleep-study.md` for the evidence behind keeping it opt-in).
+
 ---
 
 ## What it does
