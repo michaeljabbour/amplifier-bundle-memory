@@ -34,7 +34,6 @@ from unittest.mock import AsyncMock, MagicMock  # noqa: F401  (used by later tas
 
 import pytest  # noqa: F401  (used by later tasks in this file)
 
-
 # ---------------------------------------------------------------------------
 # Shared stubs
 # ---------------------------------------------------------------------------
@@ -190,9 +189,7 @@ class TestCaptureCoordinatorBridge:
 
         monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
-        monkeypatch.setattr(
-            m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
-        )
+        monkeypatch.setattr(m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x"))
 
         emit_lock = threading.Lock()
         emitted: list[tuple[Any, ...]] = []
@@ -230,8 +227,7 @@ class TestCaptureCoordinatorBridge:
         # drawer_filed must appear in the private-JSONL emit list
         emitted_names = [a[0][1] for a in emitted if a[0] and len(a[0]) > 1]
         assert "drawer_filed" in emitted_names, (
-            f"Expected 'drawer_filed' in private-JSONL emits after drain, "
-            f"got: {emitted_names}"
+            f"Expected 'drawer_filed' in private-JSONL emits after drain, got: {emitted_names}"
         )
 
     def test_capture_queued_does_not_emit_to_coordinator(
@@ -252,9 +248,7 @@ class TestCaptureCoordinatorBridge:
 
         monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
-        monkeypatch.setattr(
-            m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
-        )
+        monkeypatch.setattr(m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x"))
 
         emit_lock = threading.Lock()
         emitted: list[tuple[Any, ...]] = []
@@ -306,9 +300,7 @@ class TestCaptureCoordinatorBridge:
 
         monkeypatch.setattr(m, "_file_drawer", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_detect_wing", lambda: "wing_test")
-        monkeypatch.setattr(
-            m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x")
-        )
+        monkeypatch.setattr(m, "_spool_dir_for", lambda sid: tmp_path / "spool" / (sid or "x"))
 
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
@@ -341,8 +333,7 @@ class TestCaptureCoordinatorBridge:
             ev[0] for ev in coordinator.hooks._emit_log if ev[0].startswith("memory:")
         ]
         assert coordinator_events == [], (
-            f"emit_events=False must suppress coordinator bridge emits, "
-            f"got: {coordinator_events}"
+            f"emit_events=False must suppress coordinator bridge emits, got: {coordinator_events}"
         )
 
 
@@ -426,13 +417,10 @@ class TestBriefingCoordinatorBridge:
         asyncio.run(hook("session:start", {"opening_prompt": "test"}))
 
         assembled_calls = [
-            (name, payload)
-            for name, payload in bridge_calls
-            if name == "memory:briefing_assembled"
+            (name, payload) for name, payload in bridge_calls if name == "memory:briefing_assembled"
         ]
         assert len(assembled_calls) == 1, (
-            f"Expected exactly one 'memory:briefing_assembled' bridge call, "
-            f"got: {bridge_calls}"
+            f"Expected exactly one 'memory:briefing_assembled' bridge call, got: {bridge_calls}"
         )
         _, payload = assembled_calls[0]
         assert payload.get("ok") is True, f"Expected ok=True in payload, got: {payload}"
@@ -461,9 +449,7 @@ class TestBriefingCoordinatorBridge:
         async def fake_bridge(event_name: str, payload: Any) -> None:
             bridge_calls.append((event_name, payload))
 
-        hook = m.MemoryBriefingHook(
-            config={"emit_events": False}, bridge_emit=fake_bridge
-        )
+        hook = m.MemoryBriefingHook(config={"emit_events": False}, bridge_emit=fake_bridge)
         asyncio.run(hook("session:start", {}))
 
         # Private-JSONL channel: no emits
@@ -472,12 +458,9 @@ class TestBriefingCoordinatorBridge:
         )
 
         # Coordinator channel: no events starting with 'memory:'
-        coordinator_events = [
-            name for name, _ in bridge_calls if name.startswith("memory:")
-        ]
+        coordinator_events = [name for name, _ in bridge_calls if name.startswith("memory:")]
         assert coordinator_events == [], (
-            f"emit_events=False must suppress coordinator bridge emits, "
-            f"got: {coordinator_events}"
+            f"emit_events=False must suppress coordinator bridge emits, got: {coordinator_events}"
         )
 
 
@@ -563,8 +546,7 @@ class TestInterjectCoordinatorBridge:
 
         # Initially _briefed_ids must be empty
         assert hook._briefed_ids == set(), (
-            f"Expected _briefed_ids == set() before briefing event, "
-            f"got: {hook._briefed_ids}"
+            f"Expected _briefed_ids == set() before briefing event, got: {hook._briefed_ids}"
         )
 
         # Emit briefing_assembled — the registered listener must update _briefed_ids
@@ -755,3 +737,143 @@ class TestToolMemoryCoordinatorBridge:
         assert "memory:garden_progress" in events, (
             "contributor callback must include 'memory:garden_progress'"
         )
+
+
+# ---------------------------------------------------------------------------
+# coordinator_bridge.py hardening — done-callback logging
+# ---------------------------------------------------------------------------
+
+
+class TestMakeSyncBridgeFailureLogging:
+    """``make_sync_bridge`` must never let an exception raised inside the
+    bridged coroutine vanish silently.
+
+    Root cause of the native-cutover seam bug: ``run_coroutine_threadsafe``
+    returns a ``concurrent.futures.Future`` whose exception is discarded
+    unless something inspects it. Nothing did -- so a coroutine that failed
+    (for any reason, including "no session context to resolve against")
+    died with zero signal anywhere. ``make_sync_bridge`` now attaches a
+    done-callback (``_log_bridge_failure``) that surfaces the exception via
+    stderr and the memory-side JSONL event emitter, without changing
+    ``bridge_emit``'s own never-raises contract.
+    """
+
+    def test_exception_in_bridged_coroutine_is_logged_not_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Schedule a coroutine that raises via bridge_emit; assert the
+        exception is surfaced (stderr print) rather than silently absorbed."""
+        import asyncio
+
+        from amplifier_module_tool_memory.coordinator_bridge import make_sync_bridge
+
+        class _BoomHooks:
+            async def emit(self, event_name: str, data: Any) -> None:
+                raise RuntimeError("simulated bridged-coroutine failure")
+
+        class _BoomCoordinator:
+            def __init__(self) -> None:
+                self.hooks = _BoomHooks()
+
+        printed: list[str] = []
+        monkeypatch.setattr(
+            "builtins.print",
+            lambda *args, **kwargs: printed.append(" ".join(str(a) for a in args)),
+        )
+
+        async def _main() -> None:
+            coordinator = _BoomCoordinator()
+            bridge_emit = make_sync_bridge(coordinator)
+
+            # bridge_emit itself must never raise (never-raises contract).
+            bridge_emit("memory:drawer_filed", {"ok": True})
+
+            # Give the scheduled coroutine (and its done-callback) a chance
+            # to run on this same loop.
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if printed:
+                    break
+
+        asyncio.run(_main())
+
+        assert printed, (
+            "make_sync_bridge must log the exception from a failed bridged "
+            "coroutine via its done-callback -- it must not vanish silently"
+        )
+        assert any("simulated bridged-coroutine failure" in line for line in printed), (
+            f"Expected the actual exception message in the logged output, got: {printed}"
+        )
+        assert any("memory:drawer_filed" in line for line in printed), (
+            f"Expected the event name in the logged output, got: {printed}"
+        )
+
+    def test_exception_in_bridged_coroutine_also_reaches_event_emitter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The done-callback must also try the module's own JSONL event
+        emitter (best-effort) so the failure is visible even if stderr is
+        not being watched."""
+        import asyncio
+
+        from amplifier_module_tool_memory.coordinator_bridge import make_sync_bridge
+
+        class _BoomHooks:
+            async def emit(self, event_name: str, data: Any) -> None:
+                raise ValueError("boom")
+
+        class _BoomCoordinator:
+            def __init__(self) -> None:
+                self.hooks = _BoomHooks()
+
+        recorded: list[tuple[Any, ...]] = []
+        monkeypatch.setattr(
+            "amplifier_module_tool_memory.event_emitter.emit_event",
+            lambda *a, **kw: recorded.append((a, kw)),
+        )
+
+        async def _main() -> None:
+            coordinator = _BoomCoordinator()
+            bridge_emit = make_sync_bridge(coordinator)
+            bridge_emit("memory:drawer_filed", {"ok": True})
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if recorded:
+                    break
+
+        asyncio.run(_main())
+
+        assert recorded, (
+            "make_sync_bridge's done-callback must also report the failure "
+            "via the module's own event emitter (best-effort)"
+        )
+        (args, kwargs) = recorded[0]
+        assert args[0] == "coordinator_bridge"
+        assert args[1] == "bridge_emit_failed"
+        assert kwargs.get("ok") is False
+
+    def test_successful_bridged_coroutine_logs_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The done-callback must be a no-op when the bridged coroutine
+        succeeds -- no false-positive noise."""
+        import asyncio
+
+        from amplifier_module_tool_memory.coordinator_bridge import make_sync_bridge
+
+        printed: list[str] = []
+        monkeypatch.setattr(
+            "builtins.print",
+            lambda *args, **kwargs: printed.append(" ".join(str(a) for a in args)),
+        )
+
+        async def _main() -> None:
+            coordinator = FakeCoordinator()
+            bridge_emit = make_sync_bridge(coordinator)
+            bridge_emit("memory:drawer_filed", {"ok": True})
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+
+        asyncio.run(_main())
+
+        assert printed == [], f"a successful bridged emit must not log anything, got: {printed}"

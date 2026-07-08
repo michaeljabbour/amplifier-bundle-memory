@@ -41,6 +41,7 @@ version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "amplifier-core" },
+    { name = "amplifier-data" },
     { name = "amplifier-module-tool-memory" },
 ]
 
@@ -53,6 +54,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "amplifier-core", specifier = ">=0.1.0" },
+    { name = "amplifier-data", git = "https://github.com/michaeljabbour/amplifier-data?rev=09482f1fa569ba8407894cad3a32f8ab6aecbc3d" },
     { name = "amplifier-module-tool-memory", editable = "../tool-memory" },
 ]
 

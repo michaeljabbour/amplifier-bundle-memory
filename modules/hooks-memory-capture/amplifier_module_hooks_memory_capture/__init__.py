@@ -24,6 +24,39 @@ A daemon thread drains the queue and performs the slow work
 (``git remote get-url`` for wing detection, and the memory daemon call
 for the drawer write) entirely off the hot path.
 
+Coordinator bridging (native-cutover seam fix, 2026-07)
+--------------------------------------------------------
+The drain thread MUST NOT emit coordinator events directly. Doing so
+(the pre-fix design) means the coroutine scheduled via
+``run_coroutine_threadsafe`` runs with no session/contextvars context --
+the memory-side JSONL log (``emit_event``) still worked because it takes
+an explicit ``session_id`` argument, but the bridged coordinator event
+(``coordinator.hooks.emit`` -> downstream observability hooks that resolve
+"the current session's events.jsonl") had nothing to resolve against, and
+died invisibly.  ``memory:drawer_filed`` never once appeared in ANY
+session's ``events.jsonl`` as a result -- confirmed across the DTU's
+entire history.
+
+The fix: never call the coordinator bridge from the drain thread. Instead:
+
+1. At enqueue time (``__call__``, the hot path, running on the event loop
+   with the real session context intact), create a per-job
+   ``asyncio.Future`` and attach it to the job (``_CaptureJob.completion_future``).
+2. Also at enqueue time, schedule a task (``_await_and_bridge``) that awaits
+   that future. Because the task is created via ``asyncio.ensure_future``
+   from within the hot-path coroutine, it inherits the SAME context
+   (``contextvars.copy_context()`` semantics of ``asyncio.Task``) --  i.e.
+   the real session context, not an empty one.
+3. The drain thread does its slow work as before, but instead of bridging
+   directly, it resolves the future via ``loop.call_soon_threadsafe`` (see
+   ``_resolve_future``) -- thread-safe, and tolerant of a future that's
+   already done/cancelled (e.g. the session ended first).
+4. The awaiting task (still running in the ORIGINAL hot-path context) then
+   bridges the coordinator event once the future resolves.
+
+``_replay_orphans`` (invoked from ``mount()``, also on the loop) uses the
+same wiring so replayed captures get the same treatment.
+
 Durability
 ----------
 We rely on amplifier's native session re-hydration as the recovery
@@ -31,7 +64,7 @@ mechanism.  Each queued capture is spooled to ``~/.amplifier/memory/spool/{sid}/
 and an entry recorded in the session event log.  The drain worker deletes
 the spool file on ``drawer_filed`` or ``capture_failed``.  On ``mount``
 the module sweeps the spool dir for the resolved session id and re-enqueues
-anything orphaned by a prior crash — when amplifier resumes the session,
+anything orphaned by a prior crash \u2014 when amplifier resumes the session,
 the spool dir is restored alongside the event log, and we pick up where
 we left off.
 
@@ -40,6 +73,8 @@ Credits: built on lessons from prior verbatim-memory research.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import os
 import queue
@@ -122,7 +157,7 @@ except ImportError:
 # hook's write path now goes through MemoryClient via ensure_daemon() -- the
 # auto-started memory daemon IS the store, not a shadow of one. This is a
 # hard dependency (amplifier-module-tool-memory already hard-depends on
-# amplifier-data + fastembed as of B2, §8), so no defensive ImportError
+# amplifier-data + fastembed as of B2, \u00a78), so no defensive ImportError
 # fallback here -- a failure to import means the environment is genuinely
 # misconfigured, not something a private duplicate helper should paper over.
 from amplifier_module_tool_memory.client import ensure_daemon
@@ -140,7 +175,7 @@ def _detect_wing(cwd: str | None = None) -> str:
         )
         if result.returncode == 0:
             url = result.stdout.strip()
-            # Extract repo name from URL: github.com/user/repo-name → repo-name
+            # Extract repo name from URL: github.com/user/repo-name \u2192 repo-name
             name = url.rstrip("/").split("/")[-1].replace(".git", "")
             return f"wing_{name}" if name else "wing_general"
     except Exception:
@@ -186,7 +221,7 @@ def _is_memory_worthy(tool_name: str, output: str) -> bool:
     skip_tools = {"memory_status", "memory_reconnect", "memory_hook_settings"}
     if tool_name in skip_tools:
         return False
-    # Skip very long outputs (>8KB) — too noisy for verbatim storage
+    # Skip very long outputs (>8KB) \u2014 too noisy for verbatim storage
     if len(output) > 8192:
         return False
     return True
@@ -257,9 +292,7 @@ def _extract_outcome(data: dict[str, Any]) -> tuple[str, bool]:
         tool_output = _coerce_output(getattr(result, "output", None))
         success_attr = getattr(result, "success", None)
         error_attr = getattr(result, "error", None)
-        tool_success = bool(
-            success_attr if success_attr is not None else not error_attr
-        )
+        tool_success = bool(success_attr if success_attr is not None else not error_attr)
         return tool_output, tool_success
 
     # Legacy/direct-caller shape -- flat keys directly on the payload.
@@ -269,9 +302,7 @@ def _extract_outcome(data: dict[str, Any]) -> tuple[str, bool]:
     return tool_output, tool_success
 
 
-def _file_drawer(
-    wing: str, room: str, content: str, source: str, category: str | None
-) -> None:
+def _file_drawer(wing: str, room: str, content: str, source: str, category: str | None) -> None:
     """File a verbatim drawer via the native memory daemon (client.remember).
 
     Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md):
@@ -285,9 +316,7 @@ def _file_drawer(
     client = ensure_daemon()
     if client is None:
         raise RuntimeError("memory daemon unavailable")
-    client.remember(
-        wing=wing, room=room, content=content, source=source, category=category
-    )
+    client.remember(wing=wing, room=room, content=content, source=source, category=category)
 
 
 # Category keyword signals (absorbed from hooks-memory-capture)
@@ -322,9 +351,7 @@ _CATEGORY_SIGNALS: dict[str, list[str]] = {
 }
 
 
-def _detect_category(
-    text: str, signals: dict[str, list[str]] | None = None
-) -> str | None:
+def _detect_category(text: str, signals: dict[str, list[str]] | None = None) -> str | None:
     """Heuristically detect a memory category from text content.
 
     ``signals`` maps category id -> list of lowercase keyword seeds. When None,
@@ -345,17 +372,31 @@ def _detect_category(
 # ---------------------------------------------------------------------------
 #
 # The on-event handler does only cheap work and a put_nowait on _QUEUE.
-# A single daemon thread (_DRAIN_THREAD) does the slow work — git subprocess
+# A single daemon thread (_DRAIN_THREAD) does the slow work \u2014 git subprocess
 # for wing detection and the memory daemon call for the drawer write.
 # Module-level state is appropriate here: hooks are per-process and we want
 # exactly one drain thread per process regardless of how many sessions run.
+#
+# Coordinator bridging happens NOWHERE in the drain thread (see the module
+# docstring's "Coordinator bridging" section) -- the drain thread only ever
+# resolves a job's ``completion_future`` (thread-safe, via
+# ``loop.call_soon_threadsafe``). The actual bridge call happens in
+# ``_await_and_bridge``, a task created on the hot-path's event loop/context.
 
-_QUEUE_MAXSIZE = 1024  # bounded — drop with a recorded event on overflow
+_QUEUE_MAXSIZE = 1024  # bounded \u2014 drop with a recorded event on overflow
 _QUEUE: queue.Queue[_CaptureJob] | None = None
 _DRAIN_THREAD: threading.Thread | None = None
 _DRAIN_LOCK = threading.Lock()
-# Bridge for drain thread → coordinator forwarding. Set by mount().
+# Bridge used for replay-orphan jobs enqueued from mount() (also on the
+# loop, never the drain thread). Set by mount().
 _DRAIN_BRIDGE: SyncBridge = NOOP_SYNC_BRIDGE
+
+# Strong references to in-flight "await completion future, then bridge"
+# tasks. asyncio only holds a weak reference to a task once it's no longer
+# referenced elsewhere, so a fire-and-forget task can be garbage collected
+# mid-execution; this set keeps them alive until they finish, then the
+# task's own done-callback discards them.
+_PENDING_BRIDGE_TASKS: set[asyncio.Task[None]] = set()
 
 
 @dataclass(frozen=True)
@@ -381,6 +422,125 @@ class _CaptureJob:
     # *boosts* importance (a failed tool is more memory-worthy, not less).
     tool_success: bool = True
     spool_path: str | None = field(default=None, compare=False)
+    # Coordinator-bridge completion signal (native-cutover seam fix). Never
+    # spooled to disk (not JSON-serializable, and process-local anyway) --
+    # explicitly popped before every ``_spool_write`` call. Populated by
+    # ``_wire_completion_bridge`` immediately before a job is enqueued;
+    # ``None`` means "no coordinator bridge wanted for this job" (either
+    # emit_events=False, or a legacy/direct caller that built a job by hand).
+    completion_future: asyncio.Future[dict[str, Any]] | None = field(
+        default=None, compare=False, repr=False
+    )
+
+
+def _track_bridge_task(task: asyncio.Task[None]) -> None:
+    """Keep a strong reference to a fire-and-forget bridge task until it
+    completes. See ``_PENDING_BRIDGE_TASKS`` docstring for why this exists.
+    """
+    _PENDING_BRIDGE_TASKS.add(task)
+    task.add_done_callback(_PENDING_BRIDGE_TASKS.discard)
+
+
+async def _await_and_bridge(
+    future: asyncio.Future[dict[str, Any]],
+    capture_id: str,
+    session_id: str | None,
+    bridge_emit: SyncBridge,
+) -> None:
+    """Await the drain thread's completion signal for one capture and
+    bridge the resulting coordinator event from THIS coroutine's context.
+
+    This coroutine is scheduled (via ``asyncio.ensure_future``) from the
+    hot-path ``tool:post`` handler or from ``mount()``'s orphan-replay sweep
+    -- i.e. it runs with the REAL session context, unlike the foreign drain
+    thread the bridge call used to be made from. That is the entire fix for
+    the seam where ``memory:drawer_filed`` bridged from ``_drain_loop`` /
+    ``_process_job`` never reached a session's events.jsonl.
+
+    Tolerant of:
+
+    * Cancellation -- the session ended (and its tasks were cancelled)
+      before the drain thread finished. The memory-side JSONL log
+      (``emit_event``) already recorded the real outcome; there's simply no
+      coordinator event left to bridge. Not an error -- swallowed quietly.
+    * Any other exception -- never propagates out of a fire-and-forget task.
+
+    ``session_id`` is always attached to the bridged payload regardless of
+    what the drain thread's envelope contains, per the fix's requirement
+    that bridged payloads always carry the session id.
+    """
+    try:
+        envelope = await future
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+
+    event_name = envelope.pop("event", "memory:drawer_filed")
+    envelope.setdefault("capture_id", capture_id)
+    envelope["session_id"] = session_id
+    try:
+        bridge_emit(event_name, envelope)
+    except Exception:
+        pass
+
+
+def _wire_completion_bridge(job: _CaptureJob, bridge_emit: SyncBridge) -> _CaptureJob:
+    """Attach a completion future to *job* and schedule the awaiting bridge
+    task, both on the CURRENTLY running loop and in the CURRENT context.
+
+    Must be called from a coroutine running on the target event loop (the
+    hot-path ``tool:post`` handler, or ``mount()``'s replay-orphans sweep)
+    so the scheduled task inherits the SAME contextvars context as the
+    caller -- the real session context, not an empty one.
+
+    No-op (returns *job* unchanged, no future attached, no task scheduled)
+    when ``job.emit_events`` is False -- matches the pre-existing contract
+    that emit_events=False suppresses both the private-JSONL and
+    coordinator channels.
+    """
+    if not job.emit_events:
+        return job
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+    wired = dataclasses.replace(job, completion_future=fut)
+
+    task = asyncio.ensure_future(
+        _await_and_bridge(fut, wired.capture_id, wired.session_id, bridge_emit)
+    )
+    _track_bridge_task(task)
+    return wired
+
+
+def _resolve_future(
+    future: asyncio.Future[dict[str, Any]] | None, envelope: dict[str, Any]
+) -> None:
+    """Thread-safe resolution of a job's completion future from the drain
+    thread (or the worker-exception fallback in ``_drain_loop``).
+
+    A raw ``future.set_result()`` call from a non-owning thread is unsafe --
+    asyncio futures are not thread-safe. ``call_soon_threadsafe`` is the
+    correct primitive. Tolerates the future already being done/cancelled
+    (e.g. the awaiting task/session went away before the drain thread
+    finished) -- never raises regardless of the future's state or the
+    loop's.
+    """
+    if future is None:
+        return
+    try:
+        loop = future.get_loop()
+    except Exception:
+        return
+
+    def _set() -> None:
+        if not future.done():
+            future.set_result(envelope)
+
+    try:
+        loop.call_soon_threadsafe(_set)
+    except Exception:
+        pass
 
 
 def _spool_dir_for(session_id: str | None) -> Path | None:
@@ -441,6 +601,11 @@ def _drain_loop() -> None:
 
     The worker MUST NOT die.  Any exception inside one job is swallowed and
     recorded as ``capture_failed``; the loop continues forever.
+
+    This thread NEVER calls a coordinator bridge directly (see the module
+    docstring) -- it only resolves ``job.completion_future`` via
+    ``_resolve_future``, which is thread-safe and tolerant of a future
+    that's already done or whose loop is gone.
     """
     assert _QUEUE is not None
     while True:
@@ -465,16 +630,14 @@ def _drain_loop() -> None:
                         },
                         session_id=job.session_id,
                     )
-                    try:
-                        _DRAIN_BRIDGE(
-                            "memory:capture_failed",
-                            {
-                                "capture_id": job.capture_id,
-                                "reason": "worker_exception",
-                            },
-                        )
-                    except Exception:
-                        pass
+                _resolve_future(
+                    job.completion_future,
+                    {
+                        "event": "memory:capture_failed",
+                        "capture_id": job.capture_id,
+                        "reason": "worker_exception",
+                    },
+                )
             except Exception:
                 pass
             _spool_delete(job.spool_path)
@@ -488,11 +651,7 @@ def _drain_loop() -> None:
 def _process_job(job: _CaptureJob) -> None:
     """Do one capture's slow work: detect wing, file drawer, emit completion."""
     wing = _detect_wing() if job.auto_wing else job.config_wing
-    base_room = (
-        _detect_room(job.tool_name, job.tool_input)
-        if job.auto_room
-        else job.config_room
-    )
+    base_room = _detect_room(job.tool_name, job.tool_input) if job.auto_room else job.config_room
     room = f"{base_room}-{job.category}" if job.category else base_room
 
     try:
@@ -514,23 +673,21 @@ def _process_job(job: _CaptureJob) -> None:
                 },
                 session_id=job.session_id,
             )
-            try:
-                _DRAIN_BRIDGE(
-                    "memory:drawer_filed",
-                    {
-                        "capture_id": job.capture_id,
-                        "wing": wing,
-                        "room": room,
-                        "category": job.category,
-                        "content_bytes": len(job.tool_output.encode("utf-8")),
-                        "source": job.source,
-                        "tool_success": job.tool_success,
-                        "ok": True,
-                        "preview": truncate_preview(job.tool_output),
-                    },
-                )
-            except Exception:
-                pass
+        _resolve_future(
+            job.completion_future,
+            {
+                "event": "memory:drawer_filed",
+                "capture_id": job.capture_id,
+                "wing": wing,
+                "room": room,
+                "category": job.category,
+                "content_bytes": len(job.tool_output.encode("utf-8")),
+                "source": job.source,
+                "tool_success": job.tool_success,
+                "ok": True,
+                "preview": truncate_preview(job.tool_output),
+            },
+        )
         _spool_delete(job.spool_path)
     except Exception:
         if job.emit_events:
@@ -542,16 +699,14 @@ def _process_job(job: _CaptureJob) -> None:
                 data={"capture_id": job.capture_id, "reason": "mcp_error"},
                 session_id=job.session_id,
             )
-            try:
-                _DRAIN_BRIDGE(
-                    "memory:capture_failed",
-                    {
-                        "capture_id": job.capture_id,
-                        "reason": "mcp_error",
-                    },
-                )
-            except Exception:
-                pass
+        _resolve_future(
+            job.completion_future,
+            {
+                "event": "memory:capture_failed",
+                "capture_id": job.capture_id,
+                "reason": "mcp_error",
+            },
+        )
         # Leave the spool entry in place so a future resume can retry.
 
 
@@ -562,6 +717,11 @@ def _replay_orphans(session_id: str | None, *, emit_events: bool) -> int:
     when a session resumes, the event log AND the spool dir are restored
     intact, so we can detect captures that were queued but never finished
     and put them back on the work queue.
+
+    Runs on the event loop (invoked synchronously from within ``mount()``,
+    itself a coroutine), so replayed jobs get the same completion-future
+    bridging as hot-path captures via ``_wire_completion_bridge`` -- using
+    ``_DRAIN_BRIDGE``, the bridge captured at mount time.
     """
     spool_dir = _spool_dir_for(session_id)
     if spool_dir is None or not spool_dir.exists():
@@ -591,13 +751,16 @@ def _replay_orphans(session_id: str | None, *, emit_events: bool) -> int:
             payload["spool_path"] = str(spool_file)
             job = _CaptureJob(**payload)
         except Exception:
-            # Corrupt spool file — drop it silently.
+            # Corrupt spool file \u2014 drop it silently.
             _spool_delete(spool_file)
             continue
+        job = _wire_completion_bridge(job, _DRAIN_BRIDGE)
         try:
             work_queue.put_nowait(job)
             replayed += 1
         except queue.Full:
+            if job.completion_future is not None and not job.completion_future.done():
+                job.completion_future.cancel()
             # We'll get another chance on the next mount.
             break
 
@@ -641,16 +804,18 @@ class MemoryCaptureHook:
             except Exception:
                 signals = dict(_CATEGORY_SIGNALS)
         self._signals: dict[str, list[str]] = signals
-        # Coordinator bridge — no-op default keeps the drain thread safe in tests
+        # Coordinator bridge \u2014 no-op default keeps the drain thread safe in tests
         self._bridge_emit: SyncBridge = bridge_emit or NOOP_SYNC_BRIDGE
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         """Hot-path handler.
 
         Does only cheap, deterministic work: heuristic gate, category
-        detection, spool the payload, emit ``capture_queued``, enqueue.
-        Returns immediately.  All slow work — git subprocess, the memory
-        daemon call — happens in the drain thread.
+        detection, spool the payload, emit ``capture_queued``, enqueue,
+        and wire the coordinator-bridge completion future/task (see
+        ``_wire_completion_bridge``). Returns immediately.  All slow work
+        \u2014 git subprocess, the memory daemon call \u2014 happens in the drain
+        thread; the drain thread never bridges coordinator events itself.
         """
         tool_name: str = data.get("tool_name", "unknown")
         tool_input: dict[str, Any] = data.get("tool_input", {}) or {}
@@ -733,17 +898,28 @@ class MemoryCaptureHook:
         )
 
         # Spool to disk so a crash leaves the work recoverable on next mount.
+        # completion_future is never spooled -- it's process-local and not
+        # JSON-serializable, and at this point it's still None regardless
+        # (wired in below, after spooling).
         spool_dir = _spool_dir_for(sid)
         spool_path: Path | None = None
         if spool_dir is not None:
             try:
                 payload = asdict(job)
                 payload.pop("spool_path", None)
+                payload.pop("completion_future", None)
                 spool_path = _spool_write(spool_dir, capture_id, payload)
             except Exception:
-                spool_path = None  # spool failure is non-fatal — we still queue
+                spool_path = None  # spool failure is non-fatal \u2014 we still queue
         if spool_path is not None:
-            job = _CaptureJob(**{**asdict(job), "spool_path": str(spool_path)})
+            job = dataclasses.replace(job, spool_path=str(spool_path))
+
+        # Wire the coordinator-bridge completion future BEFORE enqueueing --
+        # the drain thread must see it on the exact job object it pops.
+        # This is the fix: the future/task are created HERE, on the hot
+        # path's event loop and in the hot path's context, not inside the
+        # foreign drain thread. See module docstring + _wire_completion_bridge.
+        job = _wire_completion_bridge(job, self._bridge_emit)
 
         work_queue = _ensure_drain_thread()
         try:
@@ -751,7 +927,11 @@ class MemoryCaptureHook:
         except queue.Full:
             # Backpressure: the worker is behind. Don't block the kernel.
             # Drop with a visible event; the spool entry remains so a future
-            # mount-time replay can pick it up.
+            # mount-time replay can pick it up. Cancel the just-created
+            # future/task so it doesn't wait forever for a job that will
+            # never be processed.
+            if job.completion_future is not None and not job.completion_future.done():
+                job.completion_future.cancel()
             if self.emit_events:
                 emit_event(
                     "memory-capture",
@@ -785,9 +965,7 @@ class MemoryCaptureHook:
         return HookResult(action="continue")
 
 
-async def mount(
-    coordinator: Any, config: dict[str, Any] | None = None
-) -> dict[str, Any]:
+async def mount(coordinator: Any, config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Mount the memory-capture hook into the Amplifier coordinator.
 
     Side effect: registers the contributor, wires the coordinator bridge,
@@ -825,6 +1003,6 @@ async def mount(
 
     return {
         "name": "hooks-memory-capture",
-        "version": "1.2.2",
+        "version": "1.2.3",
         "provides": ["memory-capture"],
     }
