@@ -204,6 +204,71 @@ def _skip_reason(tool_name: str, output: str) -> str:
     return "too_short"
 
 
+def _coerce_output(raw: Any) -> str:
+    """Coerce a ToolResult.output value into the str this hook stores."""
+    if isinstance(raw, str):
+        return raw
+    if raw is None:
+        return ""
+    return json.dumps(raw)
+
+
+def _extract_outcome(data: dict[str, Any]) -> tuple[str, bool]:
+    """Extract ``(tool_output, tool_success)`` from a ``tool:post`` payload.
+
+    Real contract (verified against amplifier-module-loop-streaming, both the
+    sequential and the parallel tool-execution paths): the payload is
+    ``{"tool_name", "tool_call_id", "tool_input", "result", "parallel_group_id"}``
+    where ``result`` is ``ToolResult.model_dump()`` -- i.e.
+    ``{"success": bool, "output": Any | None, "error": dict | None}``. There is
+    NO top-level ``tool_output``/``is_error``/``success`` key in that shape.
+
+    Reading those top-level keys directly (the pre-fix behavior) always
+    produced an empty string and outcome-blind defaults, which gated every
+    live-session capture as ``too_short`` -- ambient capture never fired in a
+    real session (DTU-validated). This function reads the real nested shape
+    first, with two fallbacks for robustness:
+
+    1. ``result`` as a plain object with a ``.output`` attribute (cheap
+       ``getattr`` path) -- covers a hook invoked directly against a
+       ``ToolResult`` instance rather than its serialized dict.
+    2. ``result`` as a plain string -- covers loop-streaming's own fallback
+       (``str(result)`` when the tool result has no ``model_dump``). No
+       outcome signal is available in that shape, so success defaults True.
+
+    Only when none of these apply do we fall back to the legacy flat shape
+    (``data["tool_output"]`` / ``data["is_error"]`` / ``data["success"]``)
+    directly on the payload -- this is NOT the real orchestrator contract,
+    but keeps existing direct callers (tests, potential future orchestrator
+    variants) working rather than silently reading nothing.
+    """
+    result = data.get("result")
+
+    if isinstance(result, dict):
+        tool_output = _coerce_output(result.get("output"))
+        tool_success = bool(result.get("success", not result.get("error")))
+        return tool_output, tool_success
+
+    if isinstance(result, str):
+        # loop-streaming's `str(result)` fallback path -- no outcome signal.
+        return result, True
+
+    if result is not None and hasattr(result, "output"):
+        tool_output = _coerce_output(getattr(result, "output", None))
+        success_attr = getattr(result, "success", None)
+        error_attr = getattr(result, "error", None)
+        tool_success = bool(
+            success_attr if success_attr is not None else not error_attr
+        )
+        return tool_output, tool_success
+
+    # Legacy/direct-caller shape -- flat keys directly on the payload.
+    tool_output = str(data.get("tool_output", ""))
+    is_error = bool(data.get("is_error", False))
+    tool_success = bool(data.get("success", not is_error))
+    return tool_output, tool_success
+
+
 def _file_drawer(
     wing: str, room: str, content: str, source: str, category: str | None
 ) -> None:
@@ -589,15 +654,15 @@ class MemoryCaptureHook:
         """
         tool_name: str = data.get("tool_name", "unknown")
         tool_input: dict[str, Any] = data.get("tool_input", {}) or {}
-        tool_output: str = str(data.get("tool_output", ""))
         sid = data.get("session_id")
 
-        # T1-MEM-1: read the tool outcome BEFORE the worthiness gate so the
-        # signal is known regardless of whether the drawer is filed. Prefer an
-        # explicit ``success`` flag; fall back to ``is_error``; default to
-        # success when neither key is present (outcome-blind payloads unchanged).
-        is_error = bool(data.get("is_error", False))
-        tool_success = bool(data.get("success", not is_error))
+        # T1-MEM-1 + orchestrator-contract fix: read the tool outcome BEFORE
+        # the worthiness gate so the signal is known regardless of whether the
+        # drawer is filed. _extract_outcome reads the REAL amplifier-core /
+        # loop-streaming payload shape (data["result"] = ToolResult.model_dump())
+        # with a legacy flat-shape fallback -- see its docstring for the full
+        # contract and why the fallback exists.
+        tool_output, tool_success = _extract_outcome(data)
 
         if not _is_memory_worthy(tool_name, tool_output):
             reason = _skip_reason(tool_name, tool_output)
@@ -760,6 +825,6 @@ async def mount(
 
     return {
         "name": "hooks-memory-capture",
-        "version": "1.2.1",
+        "version": "1.2.2",
         "provides": ["memory-capture"],
     }
