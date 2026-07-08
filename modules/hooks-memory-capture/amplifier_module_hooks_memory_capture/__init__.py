@@ -600,15 +600,27 @@ class MemoryCaptureHook:
         tool_success = bool(data.get("success", not is_error))
 
         if not _is_memory_worthy(tool_name, tool_output):
+            reason = _skip_reason(tool_name, tool_output)
             if self.emit_events:
                 emit_event(
                     "memory-capture",
                     "capture_skipped",
                     ok=False,
                     preview=truncate_preview(tool_output) if tool_output else None,
-                    data={"reason": _skip_reason(tool_name, tool_output)},
+                    data={"reason": reason},
                     session_id=sid,
                 )
+                try:
+                    self._bridge_emit(
+                        "memory:capture_skipped",
+                        {
+                            "reason": reason,
+                            "tool_name": tool_name,
+                            "ok": False,
+                        },
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         category = _detect_category(tool_output, self._signals)
@@ -622,6 +634,18 @@ class MemoryCaptureHook:
                     data={"reason": "category_filtered"},
                     session_id=sid,
                 )
+                try:
+                    self._bridge_emit(
+                        "memory:capture_skipped",
+                        {
+                            "reason": "category_filtered",
+                            "tool_name": tool_name,
+                            "category": category,
+                            "ok": False,
+                        },
+                    )
+                except Exception:
+                    pass
             return HookResult(action="continue")
 
         capture_id = uuid.uuid4().hex
@@ -714,7 +738,7 @@ async def mount(
     register_events(
         coordinator,
         "memory-capture",
-        ["memory:drawer_filed", "memory:capture_failed"],
+        ["memory:drawer_filed", "memory:capture_failed", "memory:capture_skipped"],
     )
 
     bridge_emit = make_sync_bridge(coordinator)
@@ -736,6 +760,6 @@ async def mount(
 
     return {
         "name": "hooks-memory-capture",
-        "version": "1.2.0",
+        "version": "1.2.1",
         "provides": ["memory-capture"],
     }

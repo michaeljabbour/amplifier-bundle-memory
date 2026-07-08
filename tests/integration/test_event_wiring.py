@@ -58,29 +58,149 @@ def _coordinator_events(path: Path) -> list[dict]:
     ]
 
 
+def _poll_for_event_name(
+    event_name: str,
+    *,
+    timeout: float = 30.0,
+    interval: float = 1.0,
+) -> tuple[bool, list[dict]]:
+    """Poll the freshest events.jsonl until ``event_name`` appears or timeout.
+
+    The drain thread that files drawers and bridges ``memory:drawer_filed``
+    into events.jsonl runs off the hot path (see hooks-memory-capture's
+    module docstring), so there is an inherent -- if normally small -- delay
+    between the tool call completing and the event landing in the log. A
+    single fixed sleep is not generous enough to be robust against that
+    delay under DTU load; poll instead.
+
+    Returns ``(found, last_seen_coordinator_events)`` so callers can build an
+    informative assertion message from whatever WAS observed even on
+    timeout.
+    """
+    deadline = time.monotonic() + timeout
+    last_seen: list[dict] = []
+    while True:
+        events_path = _latest_events_jsonl()
+        if events_path is not None:
+            last_seen = _coordinator_events(events_path)
+            if any(e.get("event") == event_name for e in last_seen):
+                return True, last_seen
+        if time.monotonic() >= deadline:
+            return False, last_seen
+        time.sleep(interval)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic capture-worthy payload
+# ---------------------------------------------------------------------------
+#
+# hooks-memory-capture (modules/hooks-memory-capture/.../__init__.py) gates
+# every tool:post output through two checks before it becomes a
+# `memory:drawer_filed` event:
+#
+#   1. _is_memory_worthy(): 50 < len(output) <= 8192 bytes, and the tool
+#      isn't in the skip_tools set ({"memory_status", "memory_reconnect",
+#      "memory_hook_settings"}).
+#   2. category filter: behaviors/memory.yaml configures
+#      `categories: [decision]` for this hook, so the detected category
+#      must be "decision". Category detection (_detect_category /
+#      manifest.detect_category) walks the manifest's attractors IN
+#      DECLARATION ORDER and returns the FIRST one with a matching seed
+#      (context/memory-manifest.yaml: "decision" is declared first, ahead
+#      of "architecture"). So text containing a decision-seed word
+#      ("decided", "decision", "we will", "going with", "chosen", "agreed")
+#      resolves to category "decision" even if it ALSO contains an
+#      architecture-seed word ("architecture", "design", "pattern", ...).
+#
+# The text below is built with a large safety margin against both gates
+# (well over 50 bytes, nowhere near 8192) and contains "decision" as an
+# unambiguous decision-category seed.
+_DECISION_TEXT = (
+    "Architecture decision: we have decided to use dual-emit for "
+    "observability. This decision routes every memory-capture completion "
+    "through both the session event log and the coordinator bridge, so "
+    "drawer_filed events reach events.jsonl in real time for downstream "
+    "consolidation, auditing, and the memory briefing hook in future "
+    "sessions. Recording this decision verbatim for the event-wiring "
+    "regression test."
+)
+assert 50 < len(_DECISION_TEXT) < 8192  # guards the fixture itself, not the DTU run
+
+_CAPTURE_COMMAND = f"echo '{_DECISION_TEXT}'"
+
+# The prompt is deliberately an explicit, unambiguous IMPERATIVE to invoke a
+# tool with a literal command -- not a free-form statement that merely
+# *resembles* a shell command. The original test's prompt (`amplifier run --
+# "echo '...'"`) handed the model a topic to discuss; whether the model
+# elected to run anything, and what it chose to run if it did, was entirely
+# the model's call. Diagnosed in a real DTU failure: the session made
+# exactly one tool call whose output was too short (capture_skipped,
+# reason=too_short) -- the model did not execute the embedded text
+# verbatim, it improvised a much shorter command of its own.
+#
+# This prompt removes that degree of freedom: it tells the model there is
+# exactly one required action (call the tool, run this exact command) and
+# nothing else is being asked of it. Coding-agent models are highly
+# reliable at following a single, explicit, literal instruction like this
+# -- this is the same operating mode every other tool call in a session
+# depends on. Combined with the conftest workspace-hygiene fixture (which
+# stops a prior session's project-context edits from making the model think
+# the "decision" is already handled and this step can be skipped), the
+# residual non-determinism is materially different in kind from the
+# original bug: before, *whether and what* to run was open-ended; now only
+# faithful execution of a single named instruction is required, which the
+# shell -- not the model -- ultimately produces the output for.
+_CAPTURE_PROMPT = (
+    "AUTOMATED TEST INSTRUCTION (not a real user request). You have exactly "
+    "one required action: call your bash/shell tool right now and run the "
+    "following command verbatim. Do not shorten it, do not paraphrase it, "
+    "do not summarize it, and do not run any other command before or "
+    "instead of it. After it completes, reply with one short line "
+    "confirming it ran.\n\n"
+    f"Command:\n{_CAPTURE_COMMAND}"
+)
+
+
 def test_drawer_filed_appears_in_events_jsonl():
     """drawer_filed event should appear in events.jsonl after amplifier run.
 
-    Runs an amplifier session with a message that contains an architecture
-    decision -- the capture hook should file it as a drawer and emit a
-    memory:drawer_filed coordinator event.
+    Drives an explicit, deterministic tool call (see _CAPTURE_PROMPT above)
+    through a real `amplifier run` session so the capture hook's real
+    tool:post -> _process_job -> _DRAIN_BRIDGE -> coordinator.hooks.emit ->
+    events.jsonl path is exercised end-to-end, exactly as a live user
+    session would exercise it. This intentionally does NOT collapse to a
+    unit test of the hook in isolation -- that path is already covered by
+    modules/hooks-memory-capture/tests/; this test exists to prove the
+    live-session bridge.
     """
-    subprocess.run(
-        [
-            "amplifier",
-            "run",
-            "--",
-            "echo 'Architecture decision: we use dual-emit for observability'",
-        ],
+    result = subprocess.run(
+        ["amplifier", "run", "--", _CAPTURE_PROMPT],
         timeout=120,
         cwd=WORKSPACE,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    time.sleep(2.0)
-    events_path = _latest_events_jsonl()
-    assert events_path is not None, "no events.jsonl found -- is hooks-logging mounted?"
-    coordinator_events = _coordinator_events(events_path)
+
+    found, coordinator_events = _poll_for_event_name(
+        "memory:drawer_filed", timeout=30.0, interval=1.0
+    )
+
     event_names = [e.get("event") for e in coordinator_events]
-    assert "memory:drawer_filed" in event_names
+    skipped = [
+        e.get("data", {}).get("reason")
+        for e in coordinator_events
+        if e.get("event") == "memory:capture_skipped"
+    ]
+    assert found, (
+        "memory:drawer_filed did not appear in events.jsonl within the poll "
+        "window.\n"
+        f"coordinator events observed: {event_names}\n"
+        f"capture_skipped reasons observed: {skipped}\n"
+        f"amplifier run exit code: {result.returncode}\n"
+        f"amplifier run stdout: {result.stdout[-2000:]}\n"
+        f"amplifier run stderr: {result.stderr[-2000:]}"
+    )
 
 
 def test_briefing_assembled_payload_has_drawer_ids():

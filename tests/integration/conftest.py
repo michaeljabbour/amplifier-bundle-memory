@@ -10,6 +10,16 @@ Fixtures designed to run inside the DTU container:
   the native memory store before each test module so each module starts
   from a clean slate.
 
+- reset_project_context_workspace: autouse function-scope fixture that
+  best-effort resets project-context/ in the workspace clone (git checkout)
+  before every test in this suite. Prevents cross-test pollution: an
+  earlier session's model can write to project-context/PROVENANCE.md (the
+  bundle's own AGENTS.md instructs the agent to record decisions there),
+  and a later session's model can then read that content and conclude a
+  decision is "already documented" -- steering it away from an action a
+  test depends on. Resetting before every test removes that cross-test
+  dependency.
+
 - workspace_dir: returns the Path to /workspace, the directory where
   Amplifier is launched inside the DTU. /workspace contains project-context/
   (the project context read by hooks-project-context) and
@@ -18,6 +28,7 @@ Fixtures designed to run inside the DTU container:
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -27,6 +38,13 @@ import pytest
 #: sentinel (replaces the pre-cutover "does the legacy vendor directory
 #: exist" check -- there is no such directory to key off of anymore).
 _DTU_SENTINEL = Path("/root/.dtu-memory-native")
+
+#: The git clone of this bundle inside the DTU container -- amplifier is
+#: launched with this as cwd (see tests/integration/test_event_wiring.py's
+#: WORKSPACE constant and test_native_smoke.py). project-context/ lives at
+#: the root of this clone (it's tracked in this very repo), so a plain
+#: `git checkout -- project-context/` from here is sufficient to reset it.
+_BUNDLE_CLONE = Path("/workspace/amplifier-bundle-memory")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -62,6 +80,35 @@ def reset_memory_store():
     reset script it can be wired in here. Tests should not assume a clean
     store between modules; they scope by wing/room instead.
     """
+    yield
+
+
+@pytest.fixture(autouse=True)
+def reset_project_context_workspace():
+    """Reset project-context/ in the workspace clone before every test.
+
+    Best-effort and tolerant of every reason this could fail to apply:
+    missing git binary, _BUNDLE_CLONE not existing yet (e.g. tests run
+    before provisioning finished), project-context/ absent, or the clone
+    not being a git repo. A test should never fail because hygiene
+    couldn't run -- only because the thing it actually tests failed.
+    """
+    if not _BUNDLE_CLONE.is_dir():
+        yield
+        return
+    pc_dir = _BUNDLE_CLONE / "project-context"
+    if pc_dir.is_dir():
+        try:
+            subprocess.run(
+                ["git", "checkout", "--", "project-context/"],
+                cwd=_BUNDLE_CLONE,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            pass
     yield
 
 
