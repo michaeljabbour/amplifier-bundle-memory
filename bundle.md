@@ -2,7 +2,7 @@
 bundle:
   schema_version: 1
   name: memory
-  version: 2.0.0
+  version: 2.0.1
   description: |
     Local-first AI memory for Amplifier. Combines native semantic vector
     storage (amplifier-data + a local embedder, via an auto-started memory

@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.0.1] — 2026-08-24
+
+### Fixed
+
+- Memory search folds the append-only store once per query instead of once per
+  result, removing the repeated-log-fold hot path on large stores.
+- The interject hook no longer registers `tool:pre` retrieval by default and
+  bounds prompt/orchestrator searches to three seconds, so memory fails open
+  instead of adding a search round trip to every tool call.
+- The daemon holds an OS-backed lifetime lock per memory home and removes
+  `daemon.json` only when it still owns that discovery record, preventing
+  duplicate daemons and older shutdowns from erasing newer discovery state.
+
 ## [2.0.0] — 2026-07-07
 
 ### BREAKING — Native cutover (docs/plans/2026-07-07-native-cutover-design.md)

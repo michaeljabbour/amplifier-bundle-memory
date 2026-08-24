@@ -374,6 +374,7 @@ Embedding happens **only inside the memory daemon** (D2):
 | `store.log` | the durable amplifier-data log — the ONE store |
 | `daemon.json` | discovery: `{url, port, pid, version, token_file, started_at}` — written atomically (tmp + `os.replace`) by the daemon itself once listening |
 | `daemon.lock` | spawn mutex (`O_CREAT\|O_EXCL`); §5.2 |
+| `daemon.owner.lock` | OS-held exclusive lifetime lock; prevents more than one daemon from opening a memory home and releases automatically on crash |
 | `token` | bearer token, 0600, auto-generated (existing `ensure_token` moves here) |
 | `daemon.log` | daemon stderr (rotation out of scope) |
 | `events/`, `spool/` | JSONL event logs; capture spool (moved from `~/.mempalace/`) |

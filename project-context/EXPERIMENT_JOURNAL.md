@@ -1,5 +1,35 @@
 # Experiment Journal
 
+## 2026-08-24 — large-store search hot path and daemon multiplicity
+
+**Hypothesis:** the user-visible TUI stalls come from synchronous memory
+retrieval and duplicate daemons, not from Textual rendering.
+
+**Method:** sampled the live TUI process, timed the memory daemon's health and
+search surfaces, correlated tool-call durations in the affected session, and
+benchmarked the old regenerate-per-hit search against the one-fold
+implementation on the same 68,894-event store. Process enumeration checked how
+many daemons shared `~/.amplifier/memory`.
+
+**Results:**
+
+- The TUI main loop was idle in 88% of sampled stacks; its event ledger was
+  2.2 MB / 1,770 records, so render/replay volume did not explain the stalls.
+- Daemon health returned in 13 ms, while search exceeded 20 seconds before the
+  hot-path fix. In the affected turn, 41 of 45 non-delegate tool calls took
+  14–17 seconds (median 15.154 seconds), matching the 15-second client timeout.
+- Search on the 68,894-event store improved from 42.03 seconds to 1.85 seconds
+  when the log was folded once per query instead of once per result.
+- Ten daemon processes shared the same memory home; the hottest used roughly
+  3.14 GB RSS and a full CPU core.
+
+**Conclusion:** the causal chain is confirmed: per-tool synchronous retrieval
+amplified an O(results x log-fold) search, while the spawn-only lock allowed
+duplicate long-lived daemons. Keep semantic retrieval at prompt/orchestrator
+boundaries by default, bound it to 3 seconds, retain the one-fold search, and
+enforce a kernel-held lifetime singleton. These changes preserve retrieval
+result equivalence and fail open when the memory service is slow.
+
 ## 2026-06-07 — ANN + embedder spike: can the vector index move ChromaDB → amplifier-data?
 
 **Hypothesis:** amplifier-data's vector lens can replace ChromaDB as memory's

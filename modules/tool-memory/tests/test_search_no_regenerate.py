@@ -107,9 +107,9 @@ class TestSnapshotEquivalence:
         assert fold is not None
         assert fold.payloads  # non-empty: the fold saw the synthetic cells
         for ref, raw in fold.payloads.items():
-            assert (
-                store.store.regenerate(ref, record_access=False).payload == raw
-            ), f"snapshot payload diverges from regenerate for {ref}"
+            assert store.store.regenerate(ref, record_access=False).payload == raw, (
+                f"snapshot payload diverges from regenerate for {ref}"
+            )
 
     def test_no_kernel_backend_returns_none(self) -> None:
         class KernellessBackend:
