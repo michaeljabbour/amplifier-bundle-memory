@@ -814,6 +814,6 @@ async def mount(
     await coordinator.mount("tools", tool, name=tool.name)
     return {
         "name": "tool-memory",
-        "version": "2.0.0",
+        "version": "2.0.1",
         "provides": ["memory"],
     }

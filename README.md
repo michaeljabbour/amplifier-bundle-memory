@@ -60,7 +60,8 @@ session:start
 
 during work
   ├── hooks-memory-capture    →  verbatim memory drawers + emit `drawer_filed` event
-  ├── hooks-memory-interject  →  surface relevant memory on prompt_submit/tool_pre/orchestrator_complete
+  ├── hooks-memory-interject  →  surface relevant memory on prompt_submit/orchestrator_complete
+  │                                 (tool_pre retrieval is available as an opt-in)
   │                                 (only when cosine >= 0.72, LLM-judged when uncertain)
   └── (every hook)               →  emit events to ~/.amplifier/memory/events/{session_id}.jsonl
 

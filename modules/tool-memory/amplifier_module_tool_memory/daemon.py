@@ -857,6 +857,85 @@ def _write_daemon_json(home: Path, info: dict[str, Any]) -> None:
     os.replace(tmp, target)
 
 
+def _acquire_daemon_owner(home: Path) -> Any | None:
+    """Hold an OS-backed exclusive lock for this daemon's whole lifetime.
+
+    ``daemon.lock`` in :mod:`client` is intentionally only a short-lived spawn
+    mutex. It cannot prevent a direct launch, a recovery race, or an older
+    daemon from remaining alive after a newer launcher has taken over
+    ``daemon.json``. This second lock is kernel-owned, so it is released even
+    after SIGKILL and does not rely on stale-file age heuristics.
+    """
+    path = home / "daemon.owner.lock"
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+            import msvcrt
+
+            handle.seek(0)
+            if not handle.read(1):
+                handle.seek(0)
+                handle.write("0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        handle.close()
+        return None
+
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
+def _release_daemon_owner(handle: Any) -> None:
+    """Release a handle returned by :func:`_acquire_daemon_owner`."""
+    try:
+        if os.name == "nt":  # pragma: no cover - exercised on Windows CI
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _remove_daemon_json_if_owned(path: Path, pid: int) -> None:
+    """Remove discovery state only when it still names *pid*.
+
+    A daemon that is finishing late must never unlink discovery metadata
+    written by a newer daemon. Malformed or concurrently replaced files are
+    deliberately left for the normal discovery/recovery path.
+    """
+    try:
+        info = json.loads(path.read_text(encoding="utf-8"))
+        if int(info.get("pid", -1)) == pid:
+            path.unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return
+
+
+def _discovered_daemon_reachable(home: Path) -> bool:
+    """Whether this home already advertises a responsive daemon."""
+    try:
+        info = json.loads((home / "daemon.json").read_text(encoding="utf-8"))
+        request = urllib.request.Request(f"{info['url']}/health", method="GET")  # noqa: S310
+        with urllib.request.urlopen(request, timeout=0.5) as response:  # noqa: S310
+            return bool(json.loads(response.read()).get("ok"))
+    except Exception:  # noqa: BLE001 - best-effort startup race probe
+        return False
+
+
 def run_daemon(
     *,
     home: Path | None = None,
@@ -883,6 +962,47 @@ def run_daemon(
     """
     resolved_home = home if home is not None else default_memory_home()
     resolved_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    owner = _acquire_daemon_owner(resolved_home)
+    if owner is None:
+        if _discovered_daemon_reachable(resolved_home):
+            # Another healthy daemon owns this home. ensure_daemon() will
+            # discover that owner, so a direct duplicate can exit immediately.
+            return 0
+        # Recovery/version-upgrade can observe the old socket stop just before
+        # its finally block releases the lifetime lock. Give that owner a short
+        # grace period instead of letting the replacement process exit and
+        # leaving the home with no daemon at all.
+        deadline = time.monotonic() + 5.0
+        while owner is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+            owner = _acquire_daemon_owner(resolved_home)
+        if owner is None:
+            return 0
+    try:
+        return _run_owned_daemon(
+            home=resolved_home,
+            host=host,
+            port=port,
+            ephemeral=ephemeral,
+            embedder_model=embedder_model,
+            token_path=token_path,
+        )
+    finally:
+        _release_daemon_owner(owner)
+
+
+def _run_owned_daemon(
+    *,
+    home: Path,
+    host: str,
+    port: int,
+    ephemeral: bool,
+    embedder_model: str,
+    token_path: str | Path | None,
+) -> int:
+    """Run a daemon after :func:`run_daemon` acquired lifetime ownership."""
+    resolved_home = home
 
     durable = not ephemeral
     if durable:
@@ -965,7 +1085,7 @@ def run_daemon(
         pass
     finally:
         httpd.server_close()
-        daemon_json_path.unlink(missing_ok=True)
+        _remove_daemon_json_if_owned(daemon_json_path, os.getpid())
     return 0
 
 

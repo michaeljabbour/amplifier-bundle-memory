@@ -86,13 +86,22 @@ def test_llm_judge_not_invoked_when_disabled_even_with_uncertain_candidates(
 
 def test_mount_config_reports_llm_judge_enabled_default(monkeypatch):
     class _FakeHooks:
+        def __init__(self):
+            self.registrations = []
+
         def register(self, *a, **k):
-            pass
+            self.registrations.append((a, k))
 
     class _FakeCoordinator:
         hooks = _FakeHooks()
 
-    result = asyncio.run(interject.mount(_FakeCoordinator(), {}))
+    coordinator = _FakeCoordinator()
+    result = asyncio.run(interject.mount(coordinator, {}))
     assert result["config"]["llm_judge_enabled"] is False
-    assert "collection" not in result["config"]
+    assert result["config"]["tool_pre_enabled"] is False
+    assert result["config"]["retrieval_timeout_s"] == 3.0
+    names = {kwargs.get("name") for _, kwargs in coordinator.hooks.registrations}
+    assert "memory-interject-prompt" in names
+    assert "memory-interject-orc-complete" in names
+    assert "memory-interject-tool-pre" not in names
     assert "collection" not in result["config"]

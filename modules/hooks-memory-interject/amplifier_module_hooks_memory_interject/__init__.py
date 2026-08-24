@@ -5,9 +5,9 @@ Amplifier hook that surfaces relevant memories mid-session at the right
 moment — non-disruptive, contemplative, and timely.
 
 Design (from Amplifier expert consultation):
-  - Registers on THREE events with separate handlers (OR-firing pattern):
+  - Provides separate handlers for three events (OR-firing pattern):
       1. prompt:submit   — check if the user's new prompt triggers a memory
-      2. tool:pre        — check if this tool+input was seen before
+      2. tool:pre        — optional; check if this tool+input was seen before
       3. orchestrator:complete — check if the response contradicts a memory
   - Relevance gate: cosine similarity threshold (primary) + optional LLM
     judge (secondary, only when cosine score is in the "uncertain" band)
@@ -51,7 +51,8 @@ Configuration keys (all optional):
   uncertain_band:    float = 0.10   # band above threshold that triggers LLM judge
   max_inject_chars:  int   = 800    # max chars per injection
   cooldown_turns:    int   = 3      # min turns between injections for same memory
-  tool_pre_enabled:  bool  = True   # enable tool:pre handler
+  retrieval_timeout_s: float = 3.0  # maximum time for a memory search request
+  tool_pre_enabled:  bool  = False  # opt in to retrieval before every tool call
   prompt_enabled:    bool  = True   # enable prompt:submit handler
   orc_enabled:       bool  = True   # enable orchestrator:complete handler
   llm_judge_enabled: bool  = False  # OPT-IN: sends query + memory text to OpenAI
@@ -63,6 +64,7 @@ Configuration keys (all optional):
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 from typing import Any
 
@@ -129,6 +131,7 @@ DEFAULT_COSINE_THRESHOLD = 0.72
 DEFAULT_UNCERTAIN_BAND = 0.10
 DEFAULT_MAX_INJECT_CHARS = 800
 DEFAULT_COOLDOWN_TURNS = 3
+DEFAULT_RETRIEVAL_TIMEOUT_S = 3.0
 
 # ── LLM judge ──────────────────────────────────────────────────────────────────
 
@@ -177,7 +180,7 @@ def _derive_memory_id(hit: dict[str, Any], text: str) -> str:
     return hashlib.sha1(basis.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
-def _call_client(method: str, **kwargs: Any) -> Any:
+def _call_client(method: str, *, timeout_s: float | None = None, **kwargs: Any) -> Any:
     """Invoke ``MemoryClient.<method>(**kwargs)`` against the native memory
     daemon. Returns ``None`` on ANY failure (daemon unavailable or a genuine
     call error) -- retrieval is a best-effort mid-session convenience that
@@ -187,12 +190,19 @@ def _call_client(method: str, **kwargs: Any) -> Any:
         client = ensure_daemon()
         if client is None:
             return None
+        if timeout_s is not None:
+            client.timeout = timeout_s
         return getattr(client, method)(**kwargs)
     except Exception:
         return None
 
 
-def _mcp_search(query: str, n_results: int = 5) -> list[dict[str, Any]]:
+def _mcp_search(
+    query: str,
+    n_results: int = 5,
+    *,
+    timeout_s: float = DEFAULT_RETRIEVAL_TIMEOUT_S,
+) -> list[dict[str, Any]]:
     """Retrieve candidate memories via the native memory daemon's ``search``
     tool (native cutover, B2, docs/plans/2026-07-07-native-cutover-design.md).
 
@@ -210,7 +220,7 @@ def _mcp_search(query: str, n_results: int = 5) -> list[dict[str, Any]]:
     """
     if not query:
         return []
-    result = _call_client("search", query=query[:250], k=n_results)
+    result = _call_client("search", timeout_s=timeout_s, query=query[:250], k=n_results)
     if not isinstance(result, dict):
         return []
     hits = result.get("results")
@@ -276,7 +286,8 @@ def _format_injection(
 class MemoryInterjectHook:
     """OR-firing hook that injects relevant memories at the right moment.
 
-    Registers on prompt:submit, tool:pre, and orchestrator:complete.
+    Registers on prompt:submit and orchestrator:complete by default; tool:pre
+    retrieval is available as an explicit opt-in.
     Uses cosine similarity as the primary relevance gate, with an optional
     LLM judge for scores in the uncertain band.
     """
@@ -300,8 +311,12 @@ class MemoryInterjectHook:
         self.cooldown_turns: int = int(
             config.get("cooldown_turns", DEFAULT_COOLDOWN_TURNS)
         )
+        self.retrieval_timeout_s: float = max(
+            0.1,
+            float(config.get("retrieval_timeout_s", DEFAULT_RETRIEVAL_TIMEOUT_S)),
+        )
         self.prompt_enabled: bool = bool(config.get("prompt_enabled", True))
-        self.tool_pre_enabled: bool = bool(config.get("tool_pre_enabled", True))
+        self.tool_pre_enabled: bool = bool(config.get("tool_pre_enabled", False))
         self.orc_enabled: bool = bool(config.get("orc_enabled", True))
         # OPT-IN, default False: gates the ONLY external network call this
         # hook can make (OpenAI gpt-4.1-nano for uncertain-band scoring).
@@ -341,9 +356,13 @@ class MemoryInterjectHook:
         # Retrieve top candidates via the native memory daemon's search tool.
         # This runs off the event loop the same way the old OpenAI-embedding
         # call did.
-        candidates = await asyncio.get_event_loop().run_in_executor(
-            None, _mcp_search, query, 5
+        search = functools.partial(
+            _mcp_search,
+            query,
+            5,
+            timeout_s=self.retrieval_timeout_s,
         )
+        candidates = await asyncio.get_running_loop().run_in_executor(None, search)
         if not candidates:
             return [], False, "retrieval_failed", False
 
@@ -825,8 +844,9 @@ async def mount(
 ) -> dict[str, Any]:
     """Mount the interject hook into the Amplifier coordinator.
 
-    Registers three separate handlers on prompt:submit, tool:pre, and
-    orchestrator:complete, all at priority 20 (early, non-critical).
+    Registers enabled handlers on prompt:submit, tool:pre, and
+    orchestrator:complete at priority 20 (early, non-critical). Tool-pre is
+    disabled by default because its cost scales with every tool call.
 
     Also registers a contributor for observability events and a cross-hook
     listener for memory:briefing_assembled to populate _briefed_ids.
@@ -861,37 +881,41 @@ async def mount(
 
     # Register each event with its own dedicated handler method
     # Priority 20: runs early (after critical instrumentation at 50+)
-    coordinator.hooks.register(
-        HookRegistry.PROMPT_SUBMIT,
-        hook.on_prompt_submit,
-        priority=20,
-        name="memory-interject-prompt",
-    )
-    coordinator.hooks.register(
-        HookRegistry.TOOL_PRE,
-        hook.on_tool_pre,
-        priority=20,
-        name="memory-interject-tool-pre",
-    )
-    coordinator.hooks.register(
-        HookRegistry.ORCHESTRATOR_COMPLETE,
-        hook.on_orchestrator_complete,
-        priority=20,
-        name="memory-interject-orc-complete",
-    )
+    if hook.prompt_enabled:
+        coordinator.hooks.register(
+            HookRegistry.PROMPT_SUBMIT,
+            hook.on_prompt_submit,
+            priority=20,
+            name="memory-interject-prompt",
+        )
+    if hook.tool_pre_enabled:
+        coordinator.hooks.register(
+            HookRegistry.TOOL_PRE,
+            hook.on_tool_pre,
+            priority=20,
+            name="memory-interject-tool-pre",
+        )
+    if hook.orc_enabled:
+        coordinator.hooks.register(
+            HookRegistry.ORCHESTRATOR_COMPLETE,
+            hook.on_orchestrator_complete,
+            priority=20,
+            name="memory-interject-orc-complete",
+        )
 
     return {
         "name": "hooks-memory-interject",
-        "version": "1.1.0",
+        "version": "2.0.1",
         "description": (
             "OR-firing memory interjection hook: surfaces relevant memories "
-            "on prompt:submit, tool:pre, and orchestrator:complete"
+            "on prompt:submit and orchestrator:complete (tool:pre is opt-in)"
         ),
         "config": {
             "cosine_threshold": hook.cosine_threshold,
             "uncertain_band": hook.uncertain_band,
             "max_inject_chars": hook.max_inject_chars,
             "cooldown_turns": hook.cooldown_turns,
+            "retrieval_timeout_s": hook.retrieval_timeout_s,
             "prompt_enabled": hook.prompt_enabled,
             "tool_pre_enabled": hook.tool_pre_enabled,
             "orc_enabled": hook.orc_enabled,

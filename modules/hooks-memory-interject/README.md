@@ -30,9 +30,9 @@ snippets to OpenAI using `OPENAI_API_KEY`.
 | `uncertain_band` | `0.10` | Band above threshold that triggers the LLM judge |
 | `max_inject_chars` | `800` | Max chars per injection |
 | `cooldown_turns` | `3` | Min turns between injections for the same memory |
+| `retrieval_timeout_s` | `3.0` | Fail-open timeout for a daemon search request |
 | `prompt_enabled` | `true` | Enable the `prompt:submit` handler |
-| `tool_pre_enabled` | `true` | Enable the `tool:pre` handler |
+| `tool_pre_enabled` | `false` | Opt in to retrieval before every tool call; disabled by default to avoid a per-tool latency tax |
 | `orc_enabled` | `true` | Enable the `orchestrator:complete` handler |
 | `llm_judge_enabled` | `false` | **Opt-in.** Sends query + memory text to OpenAI (see Privacy above) |
 | `emit_events` | `true` | Emit JSONL events |
-

@@ -43,7 +43,11 @@ def test_mcp_search_maps_hits_to_expected_shape(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][0] == "search"
-    assert calls[0][1] == {"query": "rust decision", "k": 5}
+    assert calls[0][1] == {
+        "timeout_s": interject.DEFAULT_RETRIEVAL_TIMEOUT_S,
+        "query": "rust decision",
+        "k": 5,
+    }
 
     assert len(memories) == 1
     mem = memories[0]
@@ -74,6 +78,21 @@ def test_mcp_search_truncates_query_to_250_chars(monkeypatch):
 def test_mcp_search_returns_empty_on_daemon_unavailable(monkeypatch):
     monkeypatch.setattr(interject, "_call_client", lambda *a, **k: None)
     assert interject._mcp_search("anything") == []
+
+
+def test_call_client_applies_bounded_request_timeout(monkeypatch):
+    class _Client:
+        timeout = 15.0
+
+        def search(self, **kwargs):
+            return {"timeout": self.timeout, "kwargs": kwargs}
+
+    client = _Client()
+    monkeypatch.setattr(interject, "ensure_daemon", lambda: client)
+
+    result = interject._call_client("search", timeout_s=0.25, query="bounded", k=1)
+
+    assert result == {"timeout": 0.25, "kwargs": {"query": "bounded", "k": 1}}
 
 
 def test_mcp_search_returns_empty_on_empty_query(monkeypatch):

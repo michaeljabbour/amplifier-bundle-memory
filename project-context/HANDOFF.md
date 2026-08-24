@@ -1,6 +1,35 @@
 # Handoff
 
-*Last updated: 2026-07-08 — NATIVE CUTOVER v2.0.0 complete: mempalace removed, memory runs on amplifier-data; conductor-bundle DTU validation 6/6*
+*Last updated: 2026-08-24 — v2.0.1 latency and daemon-singleton hardening on `perf/search-no-regenerate`*
+
+## TL;DR for Michael (2026-08-24 — latency RCA and v2.0.1 hardening)
+
+The observed TUI slowdown was not primarily rendering. A large native memory
+store made synchronous interject searches expensive, and the default
+`tool:pre` registration paid that search cost before nearly every tool call.
+The default gateway timeout was 15 seconds, matching the repeated 14–17 second
+gaps in the affected turn. Multiple daemons also shared one memory home because
+`daemon.lock` protected only process spawn, not daemon lifetime; an older daemon
+could unlink a newer daemon's `daemon.json` during shutdown.
+
+The v2.0.1 branch now combines the existing one-fold-per-search optimization
+(`577d6bf`) with three runtime guards:
+
+- `tool:pre` interjection is opt-in (prompt and orchestrator retrieval remain
+  enabled), and daemon search requests fail open after 3 seconds.
+- `memory-daemon` holds `daemon.owner.lock` through an OS-backed exclusive lock
+  for its full lifetime; SIGKILL releases it automatically.
+- discovery cleanup removes `daemon.json` only when it still names the exiting
+  PID. Package/module versions are 2.0.1 so version mismatch restarts the
+  discoverable old daemon when the new bundle activates.
+
+Evidence: hook suites 24/24; tool-memory suites 272/272 using the shared
+substrate venv (`RUST_AVAILABLE=True`); lifecycle regression proves a direct
+second daemon cannot replace the active owner; result-equivalence coverage
+proves the one-fold search returns the old refs/scores/order/fields exactly.
+The live user's existing daemon processes were deliberately not killed while a
+turn was active; installation/restart and orphan cleanup are release/operations
+steps, not evidence from this source checkout.
 
 ## TL;DR for Michael (2026-07-08 — NATIVE CUTOVER v2.0.0, DTU-validated 6/6)
 

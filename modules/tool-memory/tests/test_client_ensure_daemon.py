@@ -29,6 +29,7 @@ import pytest
 pytest.importorskip("amplifier_data")
 
 from amplifier_module_tool_memory import client as client_mod  # noqa: E402
+from amplifier_module_tool_memory import daemon as daemon_mod  # noqa: E402
 from amplifier_module_tool_memory.client import MemoryClient, ensure_daemon  # noqa: E402
 
 
@@ -57,6 +58,15 @@ def _wait_for_daemon_json_gone(home: Path, *, timeout: float = 10.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not (home / "daemon.json").exists():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _wait_for_daemon_json(home: Path, *, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if (home / "daemon.json").exists():
             return True
         time.sleep(0.1)
     return False
@@ -121,6 +131,44 @@ class TestEnsureDaemonSpawnFromScratch:
         finally:
             client1.shutdown()
             _wait_for_daemon_json_gone(home)
+
+
+class TestDaemonLifetimeOwnership:
+    def test_direct_second_daemon_cannot_replace_active_owner(
+        self, tmp_path: Path
+    ) -> None:
+        home = _home(tmp_path)
+        first = _spawn_ephemeral(home)
+        assert _wait_for_daemon_json(home), "first daemon did not become discoverable"
+        pid1 = _daemon_pid_from_json(home)
+
+        second = _spawn_ephemeral(home)
+        try:
+            assert second.wait(timeout=10) == 0
+            assert _daemon_pid_from_json(home) == pid1
+            assert (
+                client_mod._health(  # noqa: SLF001
+                    json.loads((home / "daemon.json").read_text())["url"], timeout=1.0
+                )
+                is not None
+            )
+        finally:
+            info = json.loads((home / "daemon.json").read_text(encoding="utf-8"))
+            MemoryClient(info["url"], None).shutdown()
+            _wait_for_daemon_json_gone(home)
+            if first.poll() is None:
+                first.terminate()
+
+    def test_discovery_cleanup_never_removes_another_pid(self, tmp_path: Path) -> None:
+        home = _home(tmp_path)
+        path = home / "daemon.json"
+        path.write_text(json.dumps({"pid": 222}), encoding="utf-8")
+
+        daemon_mod._remove_daemon_json_if_owned(path, 111)  # noqa: SLF001
+        assert json.loads(path.read_text(encoding="utf-8"))["pid"] == 222
+
+        daemon_mod._remove_daemon_json_if_owned(path, 222)  # noqa: SLF001
+        assert not path.exists()
 
 
 def _spawn_daemon_ephemeral(home: Path) -> None:
