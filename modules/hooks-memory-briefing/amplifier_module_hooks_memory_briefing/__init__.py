@@ -260,15 +260,37 @@ def _detect_project_name() -> str:
     return Path(os.getcwd()).name
 
 
-def _find_project_context_dir() -> Path | None:
-    """Walk up from cwd to find a project-context/ directory."""
+# Kept identical to hooks-project-context's resolver on purpose: sibling
+# tool-memory imports must be ImportError-guarded per BUNDLE_GUIDE, and a
+# guarded import whose fallback resolves *differently* is worse than two copies
+# that resolve the same. Change both or neither.
+HIDDEN_DIR = Path(".amplifier") / "project-context"
+LEGACY_DIR = Path("project-context")
+
+
+def _find_project_context_dir(context_dir: str | None = None) -> Path | None:
+    """Walk up from cwd to find the coordination directory.
+
+    Prefers ``.amplifier/project-context/`` over the legacy top-level
+    ``project-context/`` at each level. An absolute ``context_dir`` short-
+    circuits the walk.
+    """
+    if context_dir:
+        configured = Path(context_dir).expanduser()
+        if configured.is_absolute():
+            return configured if configured.is_dir() else None
+        candidates: tuple[Path, ...] = (configured,)
+    else:
+        candidates = (HIDDEN_DIR, LEGACY_DIR)
+
     cwd = Path(os.getcwd())
-    for candidate in [cwd, *cwd.parents]:
-        pc = candidate / "project-context"
-        if pc.is_dir():
-            return pc
+    for parent in [cwd, *cwd.parents]:
+        for name in candidates:
+            pc = parent / name
+            if pc.is_dir():
+                return pc
         # Stop at git root
-        if (candidate / ".git").exists():
+        if (parent / ".git").exists():
             break
     return None
 
@@ -318,6 +340,7 @@ def _build_briefing(
     include_diary: bool,
     include_project_context: bool,
     importance_weight: float = 1.0,
+    context_dir: str | None = None,
 ) -> tuple[str, list[str], int, list[dict[str, Any]], list[dict[str, Any]]]:
     """Assemble a concise briefing from memory search, KG, diary, and coordination files.
 
@@ -431,7 +454,7 @@ def _build_briefing(
 
     # 5. project-context Tier 1 coordination files
     if include_project_context and approx_tokens < token_budget:
-        pc_dir = _find_project_context_dir()
+        pc_dir = _find_project_context_dir(context_dir)
         if pc_dir:
             remaining_budget = token_budget - approx_tokens
             coord_section = _read_coordination_files(pc_dir, remaining_budget)
@@ -470,6 +493,7 @@ class MemoryBriefingHook:
         self.include_project_context: bool = self.config.get(
             "include_project_context", True
         )
+        self.context_dir: str | None = self.config.get("context_dir")
         self.ephemeral: bool = self.config.get("ephemeral", True)
         self.emit_events: bool = bool(self.config.get("emit_events", True))
         # CP4: importance re-ranking weight. 0.0 = disabled (exact v1.1.0 behavior).
@@ -503,7 +527,7 @@ class MemoryBriefingHook:
                     pass
             # Still inject project-context coordination files even without the daemon
             if self.include_project_context:
-                pc_dir = _find_project_context_dir()
+                pc_dir = _find_project_context_dir(self.context_dir)
                 if pc_dir:
                     section = _read_coordination_files(pc_dir, self.token_budget)
                     if section:
@@ -529,6 +553,7 @@ class MemoryBriefingHook:
                 include_kg=self.include_kg,
                 include_diary=self.include_diary,
                 include_project_context=self.include_project_context,
+                context_dir=self.context_dir,
                 importance_weight=self.briefing_importance_weight,
             )
         )

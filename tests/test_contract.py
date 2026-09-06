@@ -125,7 +125,7 @@ class TestHookHandlerABI:
 
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: None)
         monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: None)
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: None)
 
         hook = m.MemoryBriefingHook()
         result = asyncio.run(hook("session:start", {}))
@@ -137,7 +137,7 @@ class TestHookHandlerABI:
         import amplifier_module_hooks_project_context as m
 
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: None)
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_find_git_root", lambda: None)
 
         hook = m.ProjectContextStartHook()
@@ -150,7 +150,7 @@ class TestHookHandlerABI:
         import amplifier_module_hooks_project_context as m
 
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: None)
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: None)
 
         hook = m.ProjectContextEndHook()
         result = asyncio.run(hook("session:end", {}))
@@ -214,7 +214,7 @@ class TestMountAndDispatch:
 
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: None)
         monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: None)
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: None)
 
         async def _run() -> list[Any]:
             coord = _FakeCoordinator()
@@ -230,7 +230,7 @@ class TestMountAndDispatch:
         import amplifier_module_hooks_project_context as m
 
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: None)
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_find_git_root", lambda: None)
 
         async def _run() -> list[Any]:

@@ -4,11 +4,22 @@ amplifier-module-hooks-project-context
 Amplifier hook that integrates the project-context coordination file system.
 
 At session:start:
-  - Locates project-context/ by walking up from cwd to the git root
+  - Locates the coordination directory by walking up from cwd to the git root,
+    preferring `.amplifier/project-context/` and falling back to a legacy
+    top-level `project-context/` (see "Location" below)
   - If tier1_always=True, reads PROJECT_CONTEXT.md, GLOSSARY.md, HANDOFF.md
-    and injects them as ephemeral context
-  - If setup_if_missing=True and no project-context/ exists, scaffolds the
-    directory with template stubs so the Curator can populate them
+    and injects them as ephemeral context, prefixed with an inventory of the
+    files that actually exist
+  - If setup_if_missing=True and no coordination directory exists, scaffolds
+    one with template stubs so the Curator can populate them
+
+Location:
+  The coordination files live in `.amplifier/project-context/` — the same
+  hidden directory the rest of Amplifier already uses for per-repo state, and
+  the target of the `@project:` mention shortcut. A top-level
+  `project-context/` is still found when present, so existing repos keep
+  working; `context_dir` in config overrides both (absolute or relative to the
+  repo root).
 
 At session:end:
   - If handoff_on_end=True, delegates to the Curator agent to update
@@ -66,44 +77,46 @@ except ImportError:
 
 # ── Template stubs ─────────────────────────────────────────────────────────────
 
-_AGENTS_MD = """\
+_AGENTS_MD_TEMPLATE = """\
 # Agent Instructions
 
-This project uses a coordination file system in `project-context/`.
-These files give you persistent memory across sessions. **Read them before starting any work.**
+This project uses a coordination file system in `{pc}/`.
+These files give you persistent memory across sessions.
 
 ## Starting a Session
 
-Read these files in order:
-1. `project-context/PROJECT_CONTEXT.md` — current project state, phase, team
-2. `project-context/GLOSSARY.md` — terminology (use these terms exactly)
-3. `project-context/HANDOFF.md` — what happened last session, what to do next
+The session briefing injects the Tier 1 files automatically and lists which
+coordination files exist — you do not need to open them yourself, and you
+should not go looking for ones the inventory doesn't name.
 
-Also read when relevant:
-- `project-context/STRUCTURE.md` — before creating or moving files
-- `project-context/WAYSOFWORKING.md` — for workflows, failure patterns, verification steps
-- `project-context/PROVENANCE.md` — to understand why a decision was made
-- `project-context/EXPERIMENT_JOURNAL.md` — to see what was tried and learned
+| Tier 1 (injected every session) | |
+|---|---|
+| `{pc}/PROJECT_CONTEXT.md` | current project state, phase, team |
+| `{pc}/GLOSSARY.md` | terminology (use these terms exactly) |
+| `{pc}/HANDOFF.md` | what happened last session, what to do next |
+
+## Tier 2 — write these, don't hunt for them
+
+These are created **when a session has something to put in them**. A missing
+file means nobody has needed it yet; create it then, rather than reading it now.
+
+| When you... | Write to |
+|-------------|--------|
+| Use a term not in the glossary | `{pc}/GLOSSARY.md` |
+| Make a design or architecture decision | `{pc}/PROVENANCE.md` |
+| Hit an error and find the fix | `{pc}/WAYSOFWORKING.md` |
+| Create or move files | `{pc}/STRUCTURE.md` |
+| Run an experiment or benchmark | `{pc}/EXPERIMENT_JOURNAL.md` |
+| Change the project phase or milestone | `{pc}/PROJECT_CONTEXT.md` |
+| Finish any session | `{pc}/HANDOFF.md` |
 
 ## Ending a Session
 
-Update `project-context/HANDOFF.md` with:
+Update `{pc}/HANDOFF.md` with:
 - What you accomplished (specific files, decisions, results)
 - What's blocked or unresolved
 - What the next session should start with
 - Non-obvious context the next agent needs
-
-## Continuous Improvement
-
-| When you... | Update |
-|-------------|--------|
-| Use a term not in the glossary | `project-context/GLOSSARY.md` |
-| Make a design or architecture decision | `project-context/PROVENANCE.md` |
-| Hit an error and find the fix | `project-context/WAYSOFWORKING.md` |
-| Create or move files | `project-context/STRUCTURE.md` |
-| Run an experiment or benchmark | `project-context/EXPERIMENT_JOURNAL.md` |
-| Change the project phase or milestone | `project-context/PROJECT_CONTEXT.md` |
-| Finish any session | `project-context/HANDOFF.md` |
 """
 
 _PROJECT_CONTEXT_STUB = """\
@@ -181,25 +194,85 @@ def _find_git_root() -> Path | None:
     return None
 
 
-def _find_project_context_dir() -> Path | None:
-    """Walk up from cwd to find a project-context/ directory."""
+# The preferred home: the hidden per-repo directory Amplifier already owns and
+# the `@project:` mention shortcut already points at. The bare name is the
+# legacy location, still discovered so existing repos keep working.
+#
+# NOTE: hooks-memory-briefing carries an identical resolver. The duplication is
+# deliberate: sibling tool-memory imports must be ImportError-guarded per
+# BUNDLE_GUIDE, and a guarded import whose fallback resolves *differently* is
+# worse than two copies that resolve the same.
+HIDDEN_DIR = Path(".amplifier") / "project-context"
+LEGACY_DIR = Path("project-context")
+
+# Files the Curator maintains, in the order an inventory should list them.
+KNOWN_FILES = (
+    "PROJECT_CONTEXT.md",
+    "GLOSSARY.md",
+    "HANDOFF.md",
+    "STRUCTURE.md",
+    "WAYSOFWORKING.md",
+    "PROVENANCE.md",
+    "EXPERIMENT_JOURNAL.md",
+)
+
+
+def _candidate_dirs(context_dir: str | None) -> tuple[Path, ...]:
+    """Relative directory names to probe at each level of the upward walk."""
+    if context_dir:
+        return (Path(context_dir).expanduser(),)
+    return (HIDDEN_DIR, LEGACY_DIR)
+
+
+def _find_project_context_dir(context_dir: str | None = None) -> Path | None:
+    """Walk up from cwd to find the coordination directory.
+
+    Probes ``.amplifier/project-context/`` before the legacy top-level
+    ``project-context/`` at each level, so a repo that has migrated wins over a
+    stale copy higher up the tree. An absolute ``context_dir`` short-circuits
+    the walk entirely.
+    """
+    candidates = _candidate_dirs(context_dir)
+    if len(candidates) == 1 and candidates[0].is_absolute():
+        return candidates[0] if candidates[0].is_dir() else None
+
     cwd = Path(os.getcwd())
-    for candidate in [cwd, *cwd.parents]:
-        pc = candidate / "project-context"
-        if pc.is_dir():
-            return pc
-        if (candidate / ".git").exists():
+    for parent in [cwd, *cwd.parents]:
+        for name in candidates:
+            pc = parent / name
+            if pc.is_dir():
+                return pc
+        if (parent / ".git").exists():
             break
     return None
 
 
-def _scaffold_project_context(git_root: Path) -> tuple[Path, list[str]]:
-    """Scaffold a minimal project-context/ directory at the git root.
+def _scaffold_target(git_root: Path, context_dir: str | None = None) -> Path:
+    """Where a new coordination directory should be created."""
+    if context_dir:
+        configured = Path(context_dir).expanduser()
+        return configured if configured.is_absolute() else git_root / configured
+    return git_root / HIDDEN_DIR
+
+
+def _present_files(pc_dir: Path) -> list[str]:
+    """Names of the coordination files that actually exist, in known order."""
+    present = [name for name in KNOWN_FILES if (pc_dir / name).is_file()]
+    extra = sorted(
+        p.name for p in pc_dir.glob("*.md") if p.is_file() and p.name not in KNOWN_FILES
+    )
+    return present + extra
+
+
+def _scaffold_project_context(
+    git_root: Path, context_dir: str | None = None
+) -> tuple[Path, list[str]]:
+    """Scaffold a minimal coordination directory for the repo.
 
     Returns (pc_dir, list_of_created_files).
     """
-    pc_dir = git_root / "project-context"
-    pc_dir.mkdir(exist_ok=True)
+    pc_dir = _scaffold_target(git_root, context_dir)
+    pc_dir.mkdir(parents=True, exist_ok=True)
 
     stubs = {
         "PROJECT_CONTEXT.md": _PROJECT_CONTEXT_STUB,
@@ -213,13 +286,34 @@ def _scaffold_project_context(git_root: Path) -> tuple[Path, list[str]]:
             path.write_text(content, encoding="utf-8")
             files_created.append(str(path))
 
-    # Write AGENTS.md at the git root if not present
+    # Write AGENTS.md at the git root if not present, naming the directory we
+    # actually created rather than a hardcoded one.
     agents_path = git_root / "AGENTS.md"
     if not agents_path.exists():
-        agents_path.write_text(_AGENTS_MD, encoding="utf-8")
+        try:
+            rel = pc_dir.relative_to(git_root).as_posix()
+        except ValueError:
+            rel = str(pc_dir)
+        agents_path.write_text(_AGENTS_MD_TEMPLATE.format(pc=rel), encoding="utf-8")
         files_created.append(str(agents_path))
 
     return pc_dir, files_created
+
+
+def _inventory_line(pc_dir: Path) -> str:
+    """One line naming the directory and the files that exist inside it.
+
+    Costs ~30 tokens and removes an entire class of wasted tool calls: without
+    it, agents follow the generic instructions and open STRUCTURE.md /
+    WAYSOFWORKING.md / PROVENANCE.md in repos that never created them.
+    """
+    present = _present_files(pc_dir)
+    listed = ", ".join(present) if present else "(none yet)"
+    return (
+        f"Location: `{pc_dir}` — files present: {listed}. "
+        "Any coordination file not listed does not exist yet: create it when "
+        "you have something to record, rather than trying to read it."
+    )
 
 
 def _read_tier1(pc_dir: Path, token_budget: int) -> tuple[str, list[str], int]:
@@ -254,7 +348,12 @@ def _read_tier1(pc_dir: Path, token_budget: int) -> tuple[str, list[str], int]:
     if not sections:
         return "", [], 0
 
-    result = "## Project Coordination Files\n\n" + "\n\n---\n\n".join(sections)
+    result = (
+        "## Project Coordination Files\n\n"
+        + _inventory_line(pc_dir)
+        + "\n\n"
+        + "\n\n---\n\n".join(sections)
+    )
     token_estimate = len(result) // 4
     return result, files_read, token_estimate
 
@@ -276,18 +375,21 @@ class ProjectContextStartHook:
         self.tier1_always: bool = self.config.get("tier1_always", True)
         self.setup_if_missing: bool = self.config.get("setup_if_missing", True)
         self.token_budget: int = self.config.get("token_budget", 800)
+        self.context_dir: str | None = self.config.get("context_dir")
         self.emit_events: bool = bool(self.config.get("emit_events", True))
         self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
         sid = data.get("session_id")
 
-        pc_dir = _find_project_context_dir()
+        pc_dir = _find_project_context_dir(self.context_dir)
 
         if pc_dir is None and self.setup_if_missing:
             git_root = _find_git_root()
             if git_root:
-                pc_dir, files_created = _scaffold_project_context(git_root)
+                pc_dir, files_created = _scaffold_project_context(
+                    git_root, self.context_dir
+                )
                 if self.emit_events and files_created:
                     emit_event(
                         "project-context",
@@ -362,6 +464,7 @@ class ProjectContextEndHook:
     ) -> None:
         self.config = config or {}
         self.handoff_on_end: bool = self.config.get("handoff_on_end", True)
+        self.context_dir: str | None = self.config.get("context_dir")
         self.emit_events: bool = bool(self.config.get("emit_events", True))
         self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
@@ -369,7 +472,7 @@ class ProjectContextEndHook:
         if not self.handoff_on_end:
             return HookResult(action="continue")
 
-        pc_dir = _find_project_context_dir()
+        pc_dir = _find_project_context_dir(self.context_dir)
         if pc_dir is None:
             return HookResult(action="continue")
 
@@ -379,11 +482,12 @@ class ProjectContextEndHook:
         # For now, just emit the event so external watchers know the session
         # ended with a pending handoff. The Curator can be invoked manually.
         prompt = (
-            "Update the project-context coordination files for this session. "
+            f"Update the coordination files in {pc_dir} for this session. "
             "Rewrite HANDOFF.md with what was accomplished, what is blocked, "
             "and what the next session should start with. "
             "Append to PROVENANCE.md, GLOSSARY.md, and WAYSOFWORKING.md "
-            "if any decisions, terms, or patterns emerged."
+            "if any decisions, terms, or patterns emerged — creating them if "
+            "they do not exist yet."
         )
         if self.emit_events:
             emit_event(
@@ -430,6 +534,6 @@ async def mount(
             coordinator.hooks.register(evt, hook, name=hook.name)
     return {
         "name": "hooks-project-context",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "provides": ["project-context-start", "project-context-end"],
     }

@@ -11,38 +11,31 @@ This repo is the **episodic write target** of the Amplifier behavioral-plasticit
 
 ## Project coordination
 
-This project uses a coordination file system in `project-context/`.
-These files give you persistent memory across sessions. **Read them before starting any work.**
+This project uses a coordination file system in `.amplifier/project-context/`.
+These files are this repo's cross-clone memory; they are checked in.
 
 ## Starting a Session
 
-Read these files in order:
-1. `project-context/PROJECT_CONTEXT.md` — current project state, phase, team
-2. `project-context/GLOSSARY.md` — terminology (use these terms exactly)
-3. `project-context/HANDOFF.md` — what happened last session, what to do next
+The briefing injects the Tier 1 files (`PROJECT_CONTEXT.md`, `GLOSSARY.md`,
+`HANDOFF.md`) automatically and lists which coordination files exist. Do not go
+looking for one the inventory does not name — it has not been created yet.
 
-Also read when relevant:
-- `project-context/STRUCTURE.md` — before creating or moving files
-- `project-context/WAYSOFWORKING.md` — for workflows, failure patterns, verification steps
-- `project-context/PROVENANCE.md` — to understand why a decision was made
-- `project-context/EXPERIMENT_JOURNAL.md` — to see what was tried and learned
+## Tier 2 — write these, don't hunt for them
+
+| When you... | Write to |
+|-------------|--------|
+| Use a term not in the glossary | `GLOSSARY.md` |
+| Make a design or architecture decision | `PROVENANCE.md` |
+| Hit an error and find the fix | `WAYSOFWORKING.md` |
+| Create or move files | `STRUCTURE.md` |
+| Run an experiment or benchmark | `EXPERIMENT_JOURNAL.md` |
+| Change the project phase or milestone | `PROJECT_CONTEXT.md` |
+| Finish any session | `HANDOFF.md` |
 
 ## Ending a Session
 
-Update `project-context/HANDOFF.md` with:
+Update `.amplifier/project-context/HANDOFF.md` with:
 - What you accomplished (specific files, decisions, results)
 - What's blocked or unresolved
 - What the next session should start with
 - Non-obvious context the next agent needs
-
-## Continuous Improvement
-
-| When you... | Update |
-|-------------|--------|
-| Use a term not in the glossary | `project-context/GLOSSARY.md` |
-| Make a design or architecture decision | `project-context/PROVENANCE.md` |
-| Hit an error and find the fix | `project-context/WAYSOFWORKING.md` |
-| Create or move files | `project-context/STRUCTURE.md` |
-| Run an experiment or benchmark | `project-context/EXPERIMENT_JOURNAL.md` |
-| Change the project phase or milestone | `project-context/PROJECT_CONTEXT.md` |
-| Finish any session | `project-context/HANDOFF.md` |

@@ -1,6 +1,8 @@
 # Project Coordination Files
 
-This bundle integrates the **project-context** coordination system. Every project using this bundle gets a `project-context/` directory containing structured files that persist memory across sessions, across clones, and across AI tools.
+This bundle integrates the **project-context** coordination system: a `.amplifier/project-context/` directory of structured files that persist memory across sessions, across clones, and across AI tools.
+
+**Location.** The files live in `.amplifier/project-context/` — the hidden per-repo directory Amplifier already uses for local state, reachable as `@project:project-context/…`. A top-level `project-context/` is still read when a repo has one, so nothing breaks before migration; `context_dir` in the hook config overrides both. To migrate a repo: `mkdir -p .amplifier && git mv project-context .amplifier/project-context` (add a `!.amplifier/project-context/` negation if your `.gitignore` ignores `.amplifier/`).
 
 ## File Tiers
 
@@ -10,28 +12,28 @@ The coordination files are organized by how often they change and how critical t
 
 | File | Purpose | Update When |
 |---|---|---|
-| `project-context/PROJECT_CONTEXT.md` | Current phase, milestone, team, active work | Phase or milestone changes |
-| `project-context/GLOSSARY.md` | Canonical terminology with "Means" / "Does NOT Mean" | A new term is used |
-| `project-context/HANDOFF.md` | Last session summary, blockers, next session start | Every session end |
+| `PROJECT_CONTEXT.md` | Current phase, milestone, team, active work | Phase or milestone changes |
+| `GLOSSARY.md` | Canonical terminology with "Means" / "Does NOT Mean" | A new term is used |
+| `HANDOFF.md` | Last session summary, blockers, next session start | Every session end |
 
-**Tier 2 — Read when relevant**:
+**Tier 2 — Written on demand, not read speculatively.** These exist only once a session has had something to put in them. The session briefing lists which files are actually present; if one is not listed, create it when you have content for it rather than opening it:
 
 | File | Purpose | Update When |
 |---|---|---|
-| `project-context/STRUCTURE.md` | Directory layout and routing table | Files are created or moved |
-| `project-context/WAYSOFWORKING.md` | Proven workflows, failure patterns, fixes | A better pattern is found |
-| `project-context/PROVENANCE.md` | Decision log with context, alternatives, rationale | An architecture decision is made |
-| `project-context/EXPERIMENT_JOURNAL.md` | Experiments: hypothesis, method, results, learnings | After any experiment or benchmark |
+| `STRUCTURE.md` | Directory layout and routing table | Files are created or moved |
+| `WAYSOFWORKING.md` | Proven workflows, failure patterns, fixes | A better pattern is found |
+| `PROVENANCE.md` | Decision log with context, alternatives, rationale | An architecture decision is made |
+| `EXPERIMENT_JOURNAL.md` | Experiments: hypothesis, method, results, learnings | After any experiment or benchmark |
 
 **Tier 3 — Specialized** (ask before generating):
 
 | File | Purpose |
 |---|---|
-| `project-context/CLAIMS_TRACKER.md` | Patent/IP claim tracking with prior art analysis |
+| `CLAIMS_TRACKER.md` | Patent/IP claim tracking with prior art analysis |
 
 ## Session Protocol
 
-**At session start**, the `hooks-project-context` hook automatically reads Tier 1 files and injects them into the briefing. You do not need to read them manually.
+**At session start**, the `hooks-project-context` hook automatically reads Tier 1 files and injects them into the briefing, prefixed with an inventory of the coordination files that exist. You do not need to read them manually, and you should not open a Tier 2 file the inventory does not name — it is not there.
 
 **During the session**, keep files accurate as you work. This is not extra work — it is part of the work. The rule: if you learned something that would save the next session time, write it down.
 
@@ -43,10 +45,10 @@ The coordination files are organized by how often they change and how critical t
 
 ## Setup
 
-Auto-scaffolding is **disabled by default** (`setup_if_missing: false` in `behaviors/memory.yaml`): the hook reads and updates an existing `project-context/` directory but will not create one in projects that lack it. To scaffold a project deliberately, use the manual command below, or set `setup_if_missing: true` to restore automatic scaffolding everywhere.
+Auto-scaffolding is **disabled by default** (`setup_if_missing: false` in `behaviors/memory.yaml`): the hook reads and updates an existing coordination directory but will not create one in projects that lack it. To scaffold a project deliberately, use the manual command below, or set `setup_if_missing: true` to restore automatic scaffolding everywhere.
 
 ```bash
-# Manual setup (if needed)
+# Manual setup (if needed) — scaffolds .amplifier/project-context/
 amplifier run "set up project-context coordination files for this project"
 ```
 
@@ -54,4 +56,4 @@ amplifier run "set up project-context coordination files for this project"
 
 `AGENTS.md` at the project root is the cross-platform entry point. It is read natively by Amplifier, OpenAI Codex, GitHub Copilot, Cursor, and Windsurf. Claude Code users should symlink: `ln -s AGENTS.md CLAUDE.md`.
 
-The coordination files in `project-context/` complement the native semantic memory index — the files are human-readable and repo-portable; the memory store provides fast semantic retrieval. Both layers work together.
+The coordination files in `.amplifier/project-context/` complement the native semantic memory index — the files are human-readable and repo-portable; the memory store provides fast semantic retrieval. Both layers work together.

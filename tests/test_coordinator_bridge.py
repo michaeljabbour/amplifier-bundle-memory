@@ -456,7 +456,7 @@ class TestBriefingCoordinatorBridge:
         import amplifier_module_hooks_memory_briefing as m  # type: ignore[import]
 
         monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: None)
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: None)
 
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
@@ -692,7 +692,7 @@ class TestProjectContextCoordinatorBridge:
         pc_dir = tmp_path / "project-context"
         pc_dir.mkdir()
 
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: pc_dir)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: pc_dir)
 
         bridge_calls: list[tuple[str, Any]] = []
 

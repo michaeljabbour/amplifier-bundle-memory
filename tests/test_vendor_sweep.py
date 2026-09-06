@@ -7,7 +7,8 @@ rather than relying on a human to remember to run it manually.
 
 Allowlist (per the design doc's \u00a712 KG-N4 definition): the migration module
 (migrate.py, which must describe what it imports FROM), and the historical
-dirs explicitly carved out of the B3 sweep (docs/plans/, project-context/,
+dirs explicitly carved out of the B3 sweep (docs/plans/,
+.amplifier/project-context/,
 CHANGELOG.md). Additionally, a small number of test/profile files that must
 name the legacy vendor package literally in order to assert its ABSENCE
 (you cannot test for the absence of a package without naming it) are
@@ -32,7 +33,8 @@ _EXCLUDE_DIRS = {
 }
 _EXCLUDE_DIR_PREFIXES = (
     REPO_ROOT / "docs" / "plans",
-    REPO_ROOT / "project-context",
+    REPO_ROOT / ".amplifier" / "project-context",
+    REPO_ROOT / "project-context",  # legacy location, kept for unmigrated forks
 )
 _EXCLUDE_FILES = {
     REPO_ROOT / "CHANGELOG.md",
