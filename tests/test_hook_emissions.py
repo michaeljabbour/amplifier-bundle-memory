@@ -359,7 +359,7 @@ class TestBriefingHookEmissions:
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
         monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: None)
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: None)
 
         hook = m.MemoryBriefingHook()
         asyncio.run(hook("session:start", {}))
@@ -377,7 +377,7 @@ class TestBriefingHookEmissions:
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
         monkeypatch.setattr(m, "ensure_daemon", lambda *a, **kw: None)
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: None)
 
         hook = m.MemoryBriefingHook(config={"emit_events": False})
         asyncio.run(hook("session:start", {}))
@@ -505,7 +505,7 @@ class TestProjectContextHookEmissions:
             "# Handoff\n\nSome content here.", encoding="utf-8"
         )
 
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: pc_dir)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: pc_dir)
 
         hook = m.ProjectContextStartHook()
         result = asyncio.run(hook("session:start", {}))
@@ -530,7 +530,7 @@ class TestProjectContextHookEmissions:
         emitted: list[tuple[Any, ...]] = []
         monkeypatch.setattr(m, "emit_event", lambda *a, **kw: emitted.append((a, kw)))
 
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: None)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: None)
         monkeypatch.setattr(m, "_find_git_root", lambda: tmp_path)
 
         hook = m.ProjectContextStartHook(config={"tier1_always": False})
@@ -553,7 +553,7 @@ class TestProjectContextHookEmissions:
 
         pc_dir = tmp_path / "project-context"
         pc_dir.mkdir()
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: pc_dir)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: pc_dir)
 
         hook = m.ProjectContextEndHook()
         asyncio.run(hook("session:end", {}))
@@ -576,7 +576,7 @@ class TestProjectContextHookEmissions:
         pc_dir = tmp_path / "project-context"
         pc_dir.mkdir()
         (pc_dir / "HANDOFF.md").write_text("content", encoding="utf-8")
-        monkeypatch.setattr(m, "_find_project_context_dir", lambda: pc_dir)
+        monkeypatch.setattr(m, "_find_project_context_dir", lambda *a, **kw: pc_dir)
 
         hook = m.ProjectContextStartHook(config={"emit_events": False})
         asyncio.run(hook("session:start", {}))

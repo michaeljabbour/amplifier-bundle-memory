@@ -6,13 +6,23 @@
 #
 # Resolution order (first found wins):
 #   1. manifest_path set in behaviors/memory.yaml (hooks-memory-capture config)
-#   2. <project>/project-context/memory-manifest.yaml   (per-project override)
-#   3. ~/.amplifier/memory-manifest.yaml                 (per-user default)
-#   4. the built-in default baked into the module (mirrors this file)
+#   2. <project>/.amplifier/project-context/memory-manifest.yaml (per-project)
+#   3. <project>/project-context/memory-manifest.yaml    (legacy per-project)
+#   4. ~/.amplifier/memory-manifest.yaml                 (per-user default)
+#   5. the built-in default baked into the module (mirrors this file)
 #
 # Each attractor is a category the capture hook recognises by keyword (zero-LLM,
 # hot-path safe) and that the cold-path consolidation pipeline (curate.dot) uses
 # as a classification target.
+#
+# SEEDS ARE PHRASES, NOT BARE WORDS — and that is the capture filter, not a
+# nicety. Content that matches no attractor is not filed at all, so a seed like
+# "module" or "error" turns every file read and every shell result into a
+# memory. Measured over 7 days of real sessions with the old word-level seeds:
+# 8,330 drawers, 18.2 MB, 68% raw tool output, 4,190 filed as "architecture"
+# because source code contains the word "module". Prefer phrasing that only
+# appears when someone is *stating a conclusion* ("we decided", "root cause",
+# "turns out"), not phrasing that appears inside the artifacts being worked on.
 #
 # Fields per attractor:
 #   id              required  — stable category name (also the room suffix)
@@ -24,37 +34,37 @@ version: 1
 attractors:
   - id: decision
     intent: "Decisions that shape what we build or how we build it"
-    seeds: ["decided", "decision", "we will", "going with", "chosen", "agreed"]
+    seeds: ["we decided", "decision:", "we will use", "going with", "chose to", "agreed to", "opted for", "settled on"]
     importance_base: 0.75
 
   - id: architecture
     intent: "System structure, design patterns, component boundaries"
-    seeds: ["architecture", "design", "pattern", "structure", "component", "module"]
+    seeds: ["design decision", "architectural", "component boundary", "module boundary", "the seam between", "layering rule", "how this fits together"]
     importance_base: 0.70
 
   - id: blocker
     intent: "Active problems blocking progress"
-    seeds: ["blocked", "blocking", "cannot", "failed", "error", "issue", "problem"]
+    seeds: ["blocked on", "blocked by", "is blocking", "cannot proceed", "root cause", "fails because", "reproduced with"]
     importance_base: 0.65
 
   - id: resolved_blocker
     intent: "Problems that were fixed, with the resolution"
-    seeds: ["fixed", "resolved", "workaround", "solution found", "now works"]
+    seeds: ["fixed by", "the fix was", "resolved by", "workaround:", "now passes", "works now because"]
     importance_base: 0.55
 
   - id: dependency
     intent: "What depends on what; external requirements"
-    seeds: ["depends on", "requires", "dependency", "import", "package"]
+    seeds: ["depends on", "requires that", "hard dependency", "peer dependency", "pinned to", "must move in lockstep"]
     importance_base: 0.50
 
   - id: pattern
     intent: "Conventions and rules to follow or avoid"
-    seeds: ["pattern", "convention", "always", "never", "best practice", "rule"]
+    seeds: ["the convention is", "always use", "never use", "the rule is", "anti-pattern", "best practice is"]
     importance_base: 0.50
 
   - id: lesson_learned
     intent: "Non-obvious things discovered the hard way"
-    seeds: ["learned", "lesson", "turns out", "discovered", "realized", "note:"]
+    seeds: ["turns out", "the lesson", "learned that", "discovered that", "counter-intuitively", "the surprising part"]
     importance_base: 0.45
 
 # Emergent targets: when the consolidation pipeline sees recurring content that

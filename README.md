@@ -56,7 +56,7 @@ Released 2026-04-17.
 session:start
   ├── hooks-memory-briefing  →  ephemeral briefing (memory search + KG + diary + HANDOFF.md)
   │                                 with importance re-ranking (kill switch: briefing_importance_weight=0.0)
-  └── hooks-project-context      →  inject Tier 1 coordination files; scaffold if missing
+  └── hooks-project-context      →  inject Tier 1 coordination files + inventory; scaffold if missing
 
 during work
   ├── hooks-memory-capture    →  verbatim memory drawers + emit `drawer_filed` event
@@ -207,7 +207,17 @@ The docent synthesizes from memory search + KG + diaries + session events + coor
 
 ## project-context Coordination Files
 
-Auto-scaffolding is **disabled by default** (`setup_if_missing: false` in `behaviors/memory.yaml`): the `hooks-project-context` hook reads and updates an existing `project-context/` directory but will not create one in projects that lack it. To scaffold a project deliberately:
+The coordination files live in **`.amplifier/project-context/`** — the hidden per-repo directory Amplifier already uses for local state, reachable as `@project:project-context/…`. A top-level `project-context/` is still read when a repo has one, so existing repos keep working; set `context_dir` in the hook config to point somewhere else entirely.
+
+To migrate a repo:
+
+```bash
+mkdir -p .amplifier && git mv project-context .amplifier/project-context
+# if .gitignore ignores .amplifier/, re-include the coordination files:
+#   !.amplifier/project-context/
+```
+
+Auto-scaffolding is **disabled by default** (`setup_if_missing: false` in `behaviors/memory.yaml`): the `hooks-project-context` hook reads and updates an existing coordination directory but will not create one in projects that lack it. To scaffold a project deliberately:
 
 ```bash
 amplifier run "set up project-context coordination files for this project"
@@ -217,16 +227,18 @@ Or set `setup_if_missing: true` in `behaviors/memory.yaml` to restore automatic 
 
 Once present, these files (plus `AGENTS.md` at the project root) are cross-platform — read natively by Amplifier, OpenAI Codex, GitHub Copilot, Cursor, and Windsurf.
 
+Tier 1 is injected at session start, prefixed with an inventory of the files that actually exist. Tier 2 files are **written when a session has something to record** — they are not read speculatively, and the inventory is what tells an agent which ones are there.
+
 | File | Tier | Purpose |
 |---|---|---|
 | `AGENTS.md` | — | Cross-platform agent entry point (project root) |
-| `project-context/PROJECT_CONTEXT.md` | 1 | Current phase, milestone, team |
-| `project-context/GLOSSARY.md` | 1 | Canonical terminology |
-| `project-context/HANDOFF.md` | 1 | Last session summary and next steps |
-| `project-context/STRUCTURE.md` | 2 | Directory layout |
-| `project-context/WAYSOFWORKING.md` | 2 | Proven workflows and failure patterns |
-| `project-context/PROVENANCE.md` | 2 | Decision log |
-| `project-context/EXPERIMENT_JOURNAL.md` | 2 | Experiment results and benchmarks |
+| `.amplifier/project-context/PROJECT_CONTEXT.md` | 1 | Current phase, milestone, team |
+| `.amplifier/project-context/GLOSSARY.md` | 1 | Canonical terminology |
+| `.amplifier/project-context/HANDOFF.md` | 1 | Last session summary and next steps |
+| `.amplifier/project-context/STRUCTURE.md` | 2 | Directory layout |
+| `.amplifier/project-context/WAYSOFWORKING.md` | 2 | Proven workflows and failure patterns |
+| `.amplifier/project-context/PROVENANCE.md` | 2 | Decision log |
+| `.amplifier/project-context/EXPERIMENT_JOURNAL.md` | 2 | Experiment results and benchmarks |
 
 ---
 

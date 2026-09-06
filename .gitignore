@@ -17,6 +17,8 @@ build/
 # Proven with `git check-ignore -v` against all three checked-in profiles.
 .amplifier/*
 !.amplifier/digital-twin-universe/
+# Coordination files are checked in: they are this repo's cross-clone memory.
+!.amplifier/project-context/
 .amplifier/digital-twin-universe/*
 !.amplifier/digital-twin-universe/profiles/
 .amplifier/digital-twin-universe/profiles/*

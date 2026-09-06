@@ -8,12 +8,15 @@ read the same manifest, so "what we capture" is a single knowable artifact.
 
 Resolution order (first that parses wins):
     1. explicit ``config_path`` (from the hook's ``manifest_path`` config knob)
-    2. ``<cwd>/project-context/memory-manifest.yaml``   (per-project override)
-    3. ``<home>/.amplifier/memory-manifest.yaml``        (per-user default)
-    4. the in-code ``DEFAULT_MANIFEST`` (mirrors ``context/memory-manifest.yaml``)
+    2. ``<cwd>/.amplifier/project-context/memory-manifest.yaml``  (per-project)
+    3. ``<cwd>/project-context/memory-manifest.yaml``   (legacy per-project)
+    4. ``<home>/.amplifier/memory-manifest.yaml``        (per-user default)
+    5. the in-code ``DEFAULT_MANIFEST`` (mirrors ``context/memory-manifest.yaml``)
 
-The in-code default reproduces the legacy hardcoded behavior exactly, so a
-deployment with no manifest file behaves identically to before this change.
+The in-code default mirrors the shipped ``context/memory-manifest.yaml`` exactly
+(``TestBundledDefaultParity`` enforces id, seed, and importance parity), so a
+deployment with no manifest file behaves the same as one that copies the
+bundled file verbatim.
 
 Pure module: no MCP calls, no network. YAML is parsed with PyYAML when present;
 if PyYAML is unavailable, ``load_manifest`` degrades gracefully to the default.
@@ -131,9 +134,16 @@ def parse_manifest(data: dict[str, Any]) -> Manifest:
 
 
 # ---------------------------------------------------------------------------
-# Default manifest — mirrors context/memory-manifest.yaml and the legacy
-# hardcoded keyword table + importance bases. Keep in sync with that file
-# (TestBundledDefaultParity enforces parity).
+# Default manifest — mirrors context/memory-manifest.yaml. Keep in sync with
+# that file (TestBundledDefaultParity enforces id, seed, and importance parity).
+#
+# Seeds are PHRASES, not bare words. Measured 2026-09-06 over 7 days of real
+# sessions: single common words ("module", "design", "error", "import",
+# "pattern") matched the body of almost every file read and shell result, so
+# 8,330 drawers were filed in a week and 68% of them were raw tool output —
+# 4,190 of those classified "architecture" because source code contains the
+# word "module". Capture requires a category match (see the capture hook's
+# `categories` filter), so seed precision is the capture filter.
 # ---------------------------------------------------------------------------
 
 DEFAULT_MANIFEST = Manifest(
@@ -141,43 +151,96 @@ DEFAULT_MANIFEST = Manifest(
     attractors=(
         Attractor(
             "decision",
-            ("decided", "decision", "we will", "going with", "chosen", "agreed"),
+            (
+                "we decided",
+                "decision:",
+                "we will use",
+                "going with",
+                "chose to",
+                "agreed to",
+                "opted for",
+                "settled on",
+            ),
             0.75,
             "Decisions that shape what we build or how we build it",
         ),
         Attractor(
             "architecture",
-            ("architecture", "design", "pattern", "structure", "component", "module"),
+            (
+                "design decision",
+                "architectural",
+                "component boundary",
+                "module boundary",
+                "the seam between",
+                "layering rule",
+                "how this fits together",
+            ),
             0.70,
             "System structure, design patterns, component boundaries",
         ),
         Attractor(
             "blocker",
-            ("blocked", "blocking", "cannot", "failed", "error", "issue", "problem"),
+            (
+                "blocked on",
+                "blocked by",
+                "is blocking",
+                "cannot proceed",
+                "root cause",
+                "fails because",
+                "reproduced with",
+            ),
             0.65,
             "Active problems blocking progress",
         ),
         Attractor(
             "resolved_blocker",
-            ("fixed", "resolved", "workaround", "solution found", "now works"),
+            (
+                "fixed by",
+                "the fix was",
+                "resolved by",
+                "workaround:",
+                "now passes",
+                "works now because",
+            ),
             0.55,
             "Problems that were fixed, with the resolution",
         ),
         Attractor(
             "dependency",
-            ("depends on", "requires", "dependency", "import", "package"),
+            (
+                "depends on",
+                "requires that",
+                "hard dependency",
+                "peer dependency",
+                "pinned to",
+                "must move in lockstep",
+            ),
             0.50,
             "What depends on what; external requirements",
         ),
         Attractor(
             "pattern",
-            ("pattern", "convention", "always", "never", "best practice", "rule"),
+            (
+                "the convention is",
+                "always use",
+                "never use",
+                "the rule is",
+                "anti-pattern",
+                "best practice is",
+            ),
             0.50,
             "Conventions and rules to follow or avoid",
         ),
         Attractor(
             "lesson_learned",
-            ("learned", "lesson", "turns out", "discovered", "realized", "note:"),
+            (
+                "turns out",
+                "the lesson",
+                "learned that",
+                "discovered that",
+                "counter-intuitively",
+                "the surprising part",
+            ),
             0.45,
             "Non-obvious things discovered the hard way",
         ),
@@ -196,6 +259,9 @@ def _candidate_paths(config_path: str | None, cwd: Path, home: Path) -> list[Pat
     candidates: list[Path] = []
     if config_path:
         candidates.append(Path(config_path).expanduser())
+    # Coordination files moved under the hidden per-repo directory; the legacy
+    # top-level location is still honored so unmigrated repos keep working.
+    candidates.append(cwd / ".amplifier" / "project-context" / "memory-manifest.yaml")
     candidates.append(cwd / "project-context" / "memory-manifest.yaml")
     candidates.append(home / ".amplifier" / "memory-manifest.yaml")
     return candidates
