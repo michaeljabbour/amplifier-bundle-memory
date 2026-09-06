@@ -15,10 +15,22 @@ from amplifier_module_hooks_memory_capture import (
 )
 
 
-def test_detect_category_legacy_default() -> None:
-    # Backward compatible: no signals arg -> legacy keyword table.
+def test_detect_category_builtin_default() -> None:
+    # No signals arg -> the module's own table, kept in sync with the manifest.
     assert _detect_category("we decided to ship it") == "decision"
-    assert _detect_category("the build failed with an error") == "blocker"
+    assert _detect_category("we are blocked on the daemon crash") == "blocker"
+
+
+def test_builtin_default_ignores_raw_tool_output() -> None:
+    """The table is the capture filter: unmatched output is never filed. These
+    samples are what the old word-level seeds actually captured."""
+    for sample in (
+        "amplifier, version 2026.09.03 (core 1.6.1)",
+        '{"returncode": 2, "stderr": "", "stdout": ""}',
+        "     1\tfrom pathlib import Path\n     2\timport os\n",
+        "Path not found: /Users/x/dev/repo/AGENTS.md",
+    ):
+        assert _detect_category(sample) is None, sample
 
 
 def test_detect_category_accepts_custom_signals() -> None:

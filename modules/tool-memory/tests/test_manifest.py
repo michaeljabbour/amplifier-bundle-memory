@@ -49,9 +49,45 @@ class TestDefaultManifest:
 
     def test_default_category_signals_shape(self) -> None:
         sig = DEFAULT_MANIFEST.category_signals()
-        assert sig["decision"][0] == "decided"
+        assert sig["decision"][0] == "we decided"
         assert "turns out" in sig["lesson_learned"]
         assert all(isinstance(v, list) for v in sig.values())
+
+    def test_seeds_are_phrases_not_bare_common_words(self) -> None:
+        """Seeds double as the capture filter — a bare common word turns every
+        file read and shell result into a memory (measured: 8,330 drawers/week,
+        68% raw tool output). Single-token seeds are allowed only when the token
+        is itself unambiguous ("architectural", "anti-pattern")."""
+        banned = {
+            "module",
+            "design",
+            "pattern",
+            "structure",
+            "component",
+            "error",
+            "failed",
+            "issue",
+            "problem",
+            "cannot",
+            "import",
+            "package",
+            "requires",
+            "always",
+            "never",
+            "rule",
+            "fixed",
+            "resolved",
+            "learned",
+            "decision",
+            "decided",
+            "note:",
+        }
+        for attractor in DEFAULT_MANIFEST.attractors:
+            for seed in attractor.seeds:
+                assert seed not in banned, (
+                    f"{attractor.id}: seed {seed!r} matches ordinary source and "
+                    "shell text; use a phrase that only appears in a conclusion"
+                )
 
     def test_default_emergent_disabled(self) -> None:
         assert DEFAULT_MANIFEST.emergent_enabled is False
@@ -70,20 +106,39 @@ class TestDetectCategory:
 
     def test_detects_blocker(self) -> None:
         sig = DEFAULT_MANIFEST.category_signals()
-        assert detect_category("This failed with an error", sig) == "blocker"
+        assert detect_category("We are blocked on the daemon crash", sig) == "blocker"
 
     def test_no_match_returns_none(self) -> None:
         sig = DEFAULT_MANIFEST.category_signals()
         assert detect_category("the quick brown fox jumps", sig) is None
 
     def test_first_match_wins_in_order(self) -> None:
-        # "design pattern" hits architecture before pattern (architecture first)
+        # A text carrying both signals lands in the earlier-declared category
+        # (architecture precedes pattern in declaration order).
         sig = DEFAULT_MANIFEST.category_signals()
-        assert detect_category("a nice design here", sig) == "architecture"
+        text = "the design decision here means you always use the gateway"
+        assert detect_category(text, sig) == "architecture"
 
     def test_case_insensitive(self) -> None:
         sig = DEFAULT_MANIFEST.category_signals()
-        assert detect_category("DECISION made", sig) == "decision"
+        assert detect_category("WE DECIDED to ship it", sig) == "decision"
+
+    def test_raw_tool_output_is_not_a_memory(self) -> None:
+        """Verbatim samples of what the old word-level seeds captured. None of
+        these is a conclusion about the work, so none should classify — and an
+        unclassified output is never filed (the capture hook's `categories`
+        filter drops it)."""
+        sig = DEFAULT_MANIFEST.category_signals()
+        samples = [
+            "amplifier, version 2026.09.03-35ab604 (core 1.6.1)",
+            "Usage: amplifier [OPTIONS] [COMMAND] [ARGS]...\nTry --help",
+            '{"returncode": 2, "stderr": "", "stdout": ""}',
+            "     1\tfrom pathlib import Path\n     2\timport os\n",
+            "def mount(coordinator, config): # module entry point",
+            "Path not found: /Users/x/dev/repo/AGENTS.md",
+        ]
+        for sample in samples:
+            assert detect_category(sample, sig) is None, sample
 
     def test_custom_signals(self) -> None:
         sig = {"weather": ["sunny", "rain"], "mood": ["happy"]}
@@ -223,3 +278,6 @@ class TestBundledDefaultParity:
         assert m.importance_bases() == pytest.approx(
             DEFAULT_MANIFEST.importance_bases()
         )
+        # Seeds are the capture filter, so drift between the editable file and
+        # the in-code fallback silently changes what gets remembered.
+        assert m.category_signals() == DEFAULT_MANIFEST.category_signals()

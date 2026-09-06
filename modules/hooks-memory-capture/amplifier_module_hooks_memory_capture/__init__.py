@@ -292,7 +292,9 @@ def _extract_outcome(data: dict[str, Any]) -> tuple[str, bool]:
         tool_output = _coerce_output(getattr(result, "output", None))
         success_attr = getattr(result, "success", None)
         error_attr = getattr(result, "error", None)
-        tool_success = bool(success_attr if success_attr is not None else not error_attr)
+        tool_success = bool(
+            success_attr if success_attr is not None else not error_attr
+        )
         return tool_output, tool_success
 
     # Legacy/direct-caller shape -- flat keys directly on the payload.
@@ -302,7 +304,9 @@ def _extract_outcome(data: dict[str, Any]) -> tuple[str, bool]:
     return tool_output, tool_success
 
 
-def _file_drawer(wing: str, room: str, content: str, source: str, category: str | None) -> None:
+def _file_drawer(
+    wing: str, room: str, content: str, source: str, category: str | None
+) -> None:
     """File a verbatim drawer via the native memory daemon (client.remember).
 
     Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md):
@@ -316,42 +320,79 @@ def _file_drawer(wing: str, room: str, content: str, source: str, category: str 
     client = ensure_daemon()
     if client is None:
         raise RuntimeError("memory daemon unavailable")
-    client.remember(wing=wing, room=room, content=content, source=source, category=category)
+    client.remember(
+        wing=wing, room=room, content=content, source=source, category=category
+    )
 
 
 # Category keyword signals (absorbed from hooks-memory-capture)
 _CATEGORY_SIGNALS: dict[str, list[str]] = {
-    "decision": ["decided", "decision", "we will", "going with", "chosen", "agreed"],
+    "decision": [
+        "we decided",
+        "decision:",
+        "we will use",
+        "going with",
+        "chose to",
+        "agreed to",
+        "opted for",
+        "settled on",
+    ],
     "architecture": [
-        "architecture",
-        "design",
-        "pattern",
-        "structure",
-        "component",
-        "module",
+        "design decision",
+        "architectural",
+        "component boundary",
+        "module boundary",
+        "the seam between",
+        "layering rule",
+        "how this fits together",
     ],
-    "blocker": ["blocked", "blocking", "cannot", "failed", "error", "issue", "problem"],
+    "blocker": [
+        "blocked on",
+        "blocked by",
+        "is blocking",
+        "cannot proceed",
+        "root cause",
+        "fails because",
+        "reproduced with",
+    ],
     "resolved_blocker": [
-        "fixed",
-        "resolved",
-        "workaround",
-        "solution found",
-        "now works",
+        "fixed by",
+        "the fix was",
+        "resolved by",
+        "workaround:",
+        "now passes",
+        "works now because",
     ],
-    "dependency": ["depends on", "requires", "dependency", "import", "package"],
-    "pattern": ["pattern", "convention", "always", "never", "best practice", "rule"],
+    "dependency": [
+        "depends on",
+        "requires that",
+        "hard dependency",
+        "peer dependency",
+        "pinned to",
+        "must move in lockstep",
+    ],
+    "pattern": [
+        "the convention is",
+        "always use",
+        "never use",
+        "the rule is",
+        "anti-pattern",
+        "best practice is",
+    ],
     "lesson_learned": [
-        "learned",
-        "lesson",
         "turns out",
-        "discovered",
-        "realized",
-        "note:",
+        "the lesson",
+        "learned that",
+        "discovered that",
+        "counter-intuitively",
+        "the surprising part",
     ],
 }
 
 
-def _detect_category(text: str, signals: dict[str, list[str]] | None = None) -> str | None:
+def _detect_category(
+    text: str, signals: dict[str, list[str]] | None = None
+) -> str | None:
     """Heuristically detect a memory category from text content.
 
     ``signals`` maps category id -> list of lowercase keyword seeds. When None,
@@ -651,7 +692,11 @@ def _drain_loop() -> None:
 def _process_job(job: _CaptureJob) -> None:
     """Do one capture's slow work: detect wing, file drawer, emit completion."""
     wing = _detect_wing() if job.auto_wing else job.config_wing
-    base_room = _detect_room(job.tool_name, job.tool_input) if job.auto_room else job.config_room
+    base_room = (
+        _detect_room(job.tool_name, job.tool_input)
+        if job.auto_room
+        else job.config_room
+    )
     room = f"{base_room}-{job.category}" if job.category else base_room
 
     try:
@@ -965,7 +1010,9 @@ class MemoryCaptureHook:
         return HookResult(action="continue")
 
 
-async def mount(coordinator: Any, config: dict[str, Any] | None = None) -> dict[str, Any]:
+async def mount(
+    coordinator: Any, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Mount the memory-capture hook into the Amplifier coordinator.
 
     Side effect: registers the contributor, wires the coordinator bridge,
