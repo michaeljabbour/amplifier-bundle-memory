@@ -48,12 +48,19 @@ _BUNDLE_CLONE = Path("/workspace/amplifier-bundle-memory")
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip all integration tests when not running inside a native-cutover
+    """Skip the integration tests when not running inside a native-cutover
     DTU container.
 
     A PermissionError is treated as "not in DTU" -- it means we are running
     as a non-root user that cannot stat the sentinel path.
+
+    Only items collected from THIS directory are skipped. pytest calls this
+    hook once per session with every collected item, whichever conftest
+    defines it -- so an unfiltered loop here marked the whole repo's unit
+    suite as skipped, and a bare `pytest` at the root reported "138 skipped"
+    while looking green.
     """
+    integration_dir = Path(__file__).parent
     try:
         in_dtu = _DTU_SENTINEL.exists()
     except PermissionError:
@@ -66,7 +73,9 @@ def pytest_collection_modifyitems(config, items):
         reason="DTU environment required (run inside memory-native-e2e container)"
     )
     for item in items:
-        item.add_marker(skip_marker)
+        item_path = Path(str(getattr(item, "fspath", "")))
+        if integration_dir == item_path.parent or integration_dir in item_path.parents:
+            item.add_marker(skip_marker)
 
 
 @pytest.fixture(scope="module", autouse=True)

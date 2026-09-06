@@ -35,8 +35,10 @@ hooks:
       silent: true
       emit_events: true           # false to disable JSONL event emission
       # The capture manifest is the "knowable list" of what memory captures.
-      # Leave manifest_path unset to use the resolution order:
-      #   <project>/project-context/memory-manifest.yaml  (per-project)
+      # Its seeds are also the capture FILTER: content matching no attractor is
+      # never filed. Leave manifest_path unset to use the resolution order:
+      #   <project>/.amplifier/project-context/memory-manifest.yaml (per-project)
+      #   <project>/project-context/memory-manifest.yaml   (legacy per-project)
       #   ~/.amplifier/memory-manifest.yaml                (per-user)
       #   built-in default (mirrors context/memory-manifest.yaml)
       # Set it to pin an explicit manifest file:
@@ -68,8 +70,13 @@ hooks:
   # HANDOFF.md at session:end. Integrates the project-context system natively.
   - module: hooks-project-context
     source: ../modules/hooks-project-context
-    version: 1.1.0
+    version: 1.2.0
     config:
+      # context_dir: .amplifier/project-context
+      #   Where the coordination files live. Unset means: prefer
+      #   <repo>/.amplifier/project-context/, fall back to a legacy top-level
+      #   <repo>/project-context/. Accepts an absolute path or one relative to
+      #   the repo root.
       tier1_always: true              # always read PROJECT_CONTEXT.md + GLOSSARY.md
       handoff_on_end: true            # update HANDOFF.md at session:end
       setup_if_missing: false         # SUSPENDED (2026-07-07): no auto-scaffold of

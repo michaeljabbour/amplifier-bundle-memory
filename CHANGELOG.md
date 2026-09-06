@@ -1,5 +1,41 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Coordination files moved to `.amplifier/project-context/`.** They no longer
+  sit in the repo root: the hook now prefers the hidden per-repo directory
+  Amplifier already owns (and that `@project:` already resolves to). A
+  top-level `project-context/` is still discovered, so unmigrated repos keep
+  working, and a new `context_dir` config knob overrides both. Migrate with
+  `mkdir -p .amplifier && git mv project-context .amplifier/project-context`.
+  The manifest resolution order gained the new location ahead of the legacy
+  one. This repo's own files moved in the same commit.
+- **Capture seeds are phrases, not bare words.** Seeds double as the capture
+  filter — content matching no attractor is never filed — so single common
+  words made every file read and shell result a memory. Measured over 7 days
+  of real sessions with the old seeds: 8,330 drawers, 18.2 MB, 68% raw tool
+  output, 4,190 filed as `architecture` because source code contains the word
+  "module". `context/memory-manifest.yaml`, the in-code `DEFAULT_MANIFEST`,
+  and the capture hook's legacy table all moved together, and the parity test
+  now compares seeds as well as ids and importance bases.
+
+### Fixed
+
+- **The session-start injection lists the coordination files that exist.**
+  Agents were told, unconditionally, to read seven files; in repos that only
+  ever had Tier 1 that produced a steady stream of "Path not found"
+  (66 in one measured week). The injected block now names the directory and
+  its actual contents, and the scaffolded `AGENTS.md` frames Tier 2 as files
+  to write rather than files to read.
+- **`pytest` at the repo root no longer skips the entire suite.** The
+  integration conftest's `pytest_collection_modifyitems` marked *every*
+  collected item as skipped outside the DTU container — pytest calls that hook
+  once per session with all items, whichever conftest defines it — so a bare
+  `pytest` reported "138 skipped" and looked green. It now only skips items
+  collected from `tests/integration/`.
+
 ## [2.0.1] — 2026-08-24
 
 ### Fixed
