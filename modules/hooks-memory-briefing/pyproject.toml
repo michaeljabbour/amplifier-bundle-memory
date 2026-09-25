@@ -1,6 +1,6 @@
 [project]
 name = "amplifier-module-hooks-memory-briefing"
-version = "2.0.0"
+version = "2.1.0"
 description = "Amplifier hook module — injects a memory wake-up briefing at session start using semantic search, knowledge graph, and agent diary"
 readme = "README.md"
 license = { text = "MIT" }

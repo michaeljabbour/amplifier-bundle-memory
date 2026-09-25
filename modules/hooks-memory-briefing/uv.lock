@@ -37,7 +37,7 @@ source = { git = "https://github.com/michaeljabbour/amplifier-data?rev=09482f1fa
 
 [[package]]
 name = "amplifier-module-hooks-memory-briefing"
-version = "2.0.0"
+version = "2.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "amplifier-core" },
