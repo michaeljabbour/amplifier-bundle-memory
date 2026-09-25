@@ -56,6 +56,11 @@ hooks:
   # discards session:start injections. The first prompt waits at most
   # deliver_wait_s for it; if still running, it lands non-blocking at the
   # next provider:request / prompt:submit instead.
+  # Behavior/cost (2.0.2): adds ~300-1,500 tokens (token_budget) on turn one;
+  # under loop-streaming's default ephemeral_injection_mode: persist the
+  # injection is kept in history (protected from compaction) for the rest of
+  # the session. Memory sections may be up to cache_ttl_s old. Sub-agent
+  # sessions are not briefed unless brief_subsessions: true.
   # Session end: Curator agent handles HANDOFF.md update and memory curation.
   - module: hooks-memory-briefing
     source: ../modules/hooks-memory-briefing
@@ -69,8 +74,8 @@ hooks:
       emit_events: true               # false to disable JSONL event emission
       briefing_importance_weight: 1.0 # 0.0 = pure semantic ranking
       deliver_wait_s: 2.0             # max wait on the first prompt (never blocks session:start)
-      cache_ttl_s: 300                # per-process reuse of the prefetched memory sections
-      brief_subsessions: false        # sub-agent sessions (parent_id set) get no briefing
+      cache_ttl_s: 300                # per-process reuse of memory sections (may be up to 5 min stale)
+      brief_subsessions: false        # sub-agent sessions (parent_id set) get no briefing by default
 
   # Reads project-context coordination files at session:start and updates
   # HANDOFF.md at session:end. Integrates the project-context system natively.

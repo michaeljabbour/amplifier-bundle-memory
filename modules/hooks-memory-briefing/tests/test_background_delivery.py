@@ -302,3 +302,71 @@ def test_side_call_provider_request_does_not_consume_delivery(
 
     judge, real = asyncio.run(run())
     assert judge == [] and len(real) == 1
+
+
+def test_partially_failed_prefetch_is_delivered_but_not_cached(
+    fake: _FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review optional 4: a lookup error must not be reused for cache_ttl_s."""
+    orig = fake.kg_query
+    state = {"fail": True}
+
+    def flaky_kg(**kw: Any) -> Any:
+        if state["fail"]:
+            fake._rec("kg_query_failed")
+            raise RuntimeError("HTTP 400")
+        return orig(**kw)
+
+    monkeypatch.setattr(fake, "kg_query", flaky_kg)
+
+    async def session() -> list[str]:
+        coord = await _mounted()
+        await coord.hooks.emit("session:start", {})
+        m._wait_for_background(10)
+        return _injections(await coord.hooks.emit("prompt:submit", {"prompt": "hi"}))
+
+    first = asyncio.run(session())
+    assert len(first) == 1 and "alpha memory" in first[0]
+    assert "uses python" not in first[0]
+    state["fail"] = False
+    second = asyncio.run(session())
+    assert fake.calls.count("search") == 2  # refetched, not served from cache
+    assert len(second) == 1 and "uses python" in second[0]
+
+
+def test_prefetch_runs_on_daemon_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review optional 3: an unfinished prefetch must not hold process exit
+    (ThreadPoolExecutor workers are joined at interpreter shutdown)."""
+    release = threading.Event()
+    seen: list[threading.Thread] = []
+
+    def slow_ensure(*a: Any, **kw: Any) -> Any:
+        seen.append(threading.current_thread())
+        release.wait(10)
+        return None
+
+    monkeypatch.setattr(m, "ensure_daemon", slow_ensure)
+    monkeypatch.setattr(m, "_detect_project_name", lambda: "proj")
+    monkeypatch.setattr(m, "emit_event", lambda *a, **kw: None)
+    fut = m._start_prefetch(1500, True, True, 1.0, 300.0)
+    deadline = time.monotonic() + 5
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.01)
+    try:
+        assert seen and all(t.daemon for t in seen)
+        assert not fut.done()
+    finally:
+        release.set()
+    assert fut.result(5).kind == m._DAEMON_UNAVAILABLE
+
+
+def test_footer_does_not_claim_the_briefing_leaves_no_history() -> None:
+    """Review MUST-FIX 2: under loop-streaming's default
+    ``ephemeral_injection_mode: persist`` the injection IS kept in history,
+    so the briefing must not tell the model it "will not appear" there."""
+    part = m._MemoryPart()
+    part.sections.append("**Relevant memories:**\n- something")
+    text = m._assemble_briefing("proj", part, 1500, False)[0]
+    assert text.startswith("## Memory Briefing")
+    assert "will not appear" not in text
+    assert "ephemeral" not in text

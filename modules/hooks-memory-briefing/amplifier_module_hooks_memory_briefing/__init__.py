@@ -10,8 +10,10 @@ wake-up briefing into the context. The briefing is assembled from:
   4. project-context Tier 1 coordination files (HANDOFF.md,
      PROJECT_CONTEXT.md, GLOSSARY.md) -- if present in the project root
 
-The briefing is ephemeral -- it orients the agent without persisting
-in conversation history.
+The briefing is injected with ``ephemeral=True``. Whether it then stays in
+conversation history is the orchestrator's call: under loop-streaming's
+default ``ephemeral_injection_mode: persist`` it is stored as a (protected)
+message and rides along on every later request of the session.
 
 Delivery (perf/startup-latency): amplifier-core DISCARDS the HookResult of
 ``session:start`` (the kernel emits it and ignores the return value), so an
@@ -184,6 +186,14 @@ def _rerank_by_importance(
 # -- Native transport seam ---------------------------------------------------
 
 
+#: Count of ``_call_client`` failures in this process. A prefetch compares it
+#: before/after its lookups: any failure in between (possibly a sibling
+#: prefetch's -- that only makes caching more conservative) marks the result
+#: incomplete, so it is delivered but never reused from the cache.
+_CALL_FAILURES = 0
+_CALL_FAILURES_LOCK = threading.Lock()
+
+
 def _call_client(method: str, **kwargs: Any) -> Any:
     """Invoke ``MemoryClient.<method>(**kwargs)`` against the native memory
     daemon. Native cutover: replaces the old vendor subprocess
@@ -196,12 +206,15 @@ def _call_client(method: str, **kwargs: Any) -> Any:
     observed via ``emit_event``, unlike a silently-swallowed subprocess
     failure.
     """
+    global _CALL_FAILURES
     try:
         client = ensure_daemon()
         if client is None:
             raise RuntimeError("memory daemon unavailable")
         return getattr(client, method)(**kwargs)
     except Exception as exc:
+        with _CALL_FAILURES_LOCK:
+            _CALL_FAILURES += 1
         try:
             emit_event(
                 "memory-briefing",
@@ -485,17 +498,15 @@ def _fetch_memory_part(
     identical to the sequential version.
     """
     part = _MemoryPart()
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=3, thread_name_prefix="memory-briefing-fetch"
-    ) as pool:
-        f_search = pool.submit(
-            _search_section, project, opening_query, importance_weight
-        )
-        f_kg = pool.submit(_kg_section, project) if include_kg else None
-        f_diary = pool.submit(_diary_section) if include_diary else None
-        search_sec, part.results_fetched, part.results_after_rerank = f_search.result()
-        kg_sec = f_kg.result() if f_kg is not None else None
-        diary_sec = f_diary.result() if f_diary is not None else None
+    name = "memory-briefing-fetch"
+    f_search = _run_daemon(
+        name, _search_section, project, opening_query, importance_weight
+    )
+    f_kg = _run_daemon(name, _kg_section, project) if include_kg else None
+    f_diary = _run_daemon(name, _diary_section) if include_diary else None
+    search_sec, part.results_fetched, part.results_after_rerank = f_search.result()
+    kg_sec = f_kg.result() if f_kg is not None else None
+    diary_sec = f_diary.result() if f_diary is not None else None
 
     if search_sec:
         part.sections.append(search_sec)
@@ -533,8 +544,11 @@ def _assemble_briefing(
         return "", [], 0, part.results_fetched, part.results_after_rerank
 
     header = f"## Memory Briefing -- `{project}`\n"
+    # No claim about history: under loop-streaming's default
+    # ``ephemeral_injection_mode: persist`` the injection IS kept in the
+    # conversation (and protected from compaction) for the rest of the session.
     footer = (
-        "\n*This briefing is ephemeral and will not appear in conversation history.*"
+        "\n*Injected from memory for orientation -- not part of the user's message.*"
     )
     briefing = header + "\n\n".join(sections) + footer
     return (
@@ -590,21 +604,35 @@ class _Prefetch:
     kind: str
     project: str
     part: _MemoryPart | None = None
+    #: False when any lookup failed (timeout, HTTP error, ...): the partial
+    #: briefing is still delivered, but never reused from the cache.
+    complete: bool = True
 
 
-_PREFETCH_POOL: concurrent.futures.ThreadPoolExecutor | None = None
 _PREFETCH_CACHE: dict[tuple[Any, ...], tuple[float, concurrent.futures.Future]] = {}
 _PREFETCH_LOCK = threading.Lock()
 
 
-def _prefetch_pool() -> concurrent.futures.ThreadPoolExecutor:
-    global _PREFETCH_POOL
-    with _PREFETCH_LOCK:
-        if _PREFETCH_POOL is None:
-            _PREFETCH_POOL = concurrent.futures.ThreadPoolExecutor(
-                max_workers=2, thread_name_prefix="memory-briefing"
-            )
-        return _PREFETCH_POOL
+def _run_daemon(name: str, fn: Any, *args: Any) -> concurrent.futures.Future:
+    """Run ``fn(*args)`` on a DAEMON thread, returning a Future.
+
+    ``ThreadPoolExecutor`` workers are joined at interpreter exit, so a
+    session that ended before a (cold, slow) prefetch finished used to hold
+    the process open until it did. Briefing work is disposable: at exit it
+    is simply abandoned.
+    """
+    fut: concurrent.futures.Future = concurrent.futures.Future()
+
+    def _runner() -> None:
+        if not fut.set_running_or_notify_cancel():
+            return
+        try:
+            fut.set_result(fn(*args))
+        except BaseException as exc:  # noqa: BLE001 - surfaced via the Future
+            fut.set_exception(exc)
+
+    threading.Thread(target=_runner, name=name, daemon=True).start()
+    return fut
 
 
 def _prefetch_job(
@@ -623,10 +651,16 @@ def _prefetch_job(
     project = _detect_project_name()
     if ensure() is None:
         return _Prefetch(kind=_DAEMON_UNAVAILABLE, project=project)
+    failures_before = _CALL_FAILURES
     part = _fetch_memory_part(
         project, "", token_budget, include_kg, include_diary, importance_weight
     )
-    return _Prefetch(kind=_OK, project=project, part=part)
+    return _Prefetch(
+        kind=_OK,
+        project=project,
+        part=part,
+        complete=_CALL_FAILURES == failures_before,
+    )
 
 
 def _start_prefetch(
@@ -641,7 +675,8 @@ def _start_prefetch(
     Cached per ``(memory home, cwd, config)`` for ``cache_ttl_s``: sibling
     sessions in the same process (sub-agents, server/TUI hosts running many
     sessions) share one fetch instead of each paying the daemon round-trips.
-    A failed or daemon-unavailable result is never reused.
+    A failed, partially failed (any lookup errored) or daemon-unavailable
+    result is never reused.
     """
     try:
         from amplifier_module_tool_memory.daemon import default_memory_home
@@ -663,11 +698,17 @@ def _start_prefetch(
         if hit is not None:
             started, fut = hit
             reusable = (now - started) < cache_ttl_s and not (
-                fut.done() and (fut.exception() is not None or fut.result().kind != _OK)
+                fut.done()
+                and (
+                    fut.exception() is not None
+                    or fut.result().kind != _OK
+                    or not fut.result().complete
+                )
             )
             if reusable:
                 return fut
-    fut = _prefetch_pool().submit(
+    fut = _run_daemon(
+        "memory-briefing",
         _prefetch_job,
         token_budget,
         include_kg,
