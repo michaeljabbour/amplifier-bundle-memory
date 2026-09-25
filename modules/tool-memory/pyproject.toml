@@ -1,6 +1,6 @@
 [project]
 name = "amplifier-module-tool-memory"
-version = "2.0.1"
+version = "2.0.2"
 description = "High-level Amplifier tool module for the native memory daemon (amplifier-data) — search, remember, knowledge graph, traverse, diary, mine, and events operations"
 readme = "README.md"
 license = { text = "MIT" }

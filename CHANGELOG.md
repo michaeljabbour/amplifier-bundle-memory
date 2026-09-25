@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.0.2] — 2026-09-24
+
+### Fixed
+
+- **The session-start briefing no longer blocks the first turn, and now
+  actually reaches the model.** amplifier-core discards the `HookResult` of
+  `session:start`, so the briefing's injection was silently dropped while its
+  daemon round-trips (search, KG, diary, plus two per search hit for
+  importance) held up the first prompt: 7.8-9.2 s with a warm daemon on a
+  178 MB store, 30 s+ with a cold one.
+  `hooks-memory-briefing` 2.1.0 prefetches the briefing on a background
+  thread from `mount()` and injects it (ephemeral, unchanged text) at the first
+  `prompt:submit`, waiting at most `deliver_wait_s` (2 s); if it is still
+  running it lands non-blocking at the next `provider:request`/`prompt:submit`.
+  The three lookups run concurrently, results are reused per process for
+  `cache_ttl_s`, and sub-agent sessions are skipped unless
+  `brief_subsessions: true`.
+- **Concurrent daemon requests no longer fail with HTTP 400.** The durable
+  Rust kernel raises `Already borrowed` when an append overlaps a read on
+  another thread; the daemon now serializes kernel calls on the kernel's own
+  lock. Live event logs showed ~1.4k briefing lookups lost this way.
+- **Faster daemon reads, same results.** Search hits now carry `importance`
+  (so the briefing drops 16 extra round-trips); per-event cell refs are
+  memoized incrementally; per-hit lens reads and the vector index run over
+  exact log slices; `read_diary`, `query_kg` and standalone `list_drawers`
+  use the one-fold snapshot; and read paths stop appending duplicate
+  scope/anchor cells to the log; a burst of reads shares one log snapshot
+  (reused <= 5 s, only while nothing was appended). On a 178 MB / 403k-event
+  store: warm search 3.3 s -> ~1.0 s, `read_diary` 1.4 s -> 0.4 s, degraded
+  (embedder-cold) search from >15 s (client timeout) to ~0.5-1.2 s.
+- **`hooks-memory-interject` honors `max_inject_chars`.** Once the first
+  snippet was truncated to the cap, a negative slice bound kept almost the
+  whole next memory (a 7,067-char injection was measured under the 800-char
+  default).
+
 ## [2.0.1] — 2026-08-24
 
 ### Fixed
