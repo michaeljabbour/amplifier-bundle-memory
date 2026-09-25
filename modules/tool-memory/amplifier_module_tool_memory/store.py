@@ -147,7 +147,32 @@ class _SearchFold:
     pays for one log materialization instead of one each.
     """
 
-    def __init__(self, kernel: Any, ref_cache: _CellRefCache | None = None) -> None:
+    def __init__(
+        self,
+        kernel: Any,
+        ref_cache: _CellRefCache | None = None,
+        *,
+        prior: _SearchFold | None = None,
+    ) -> None:
+        """Build over *kernel*, or, when *prior* is a valid append-only
+        ancestor of the resulting event list (perf/incremental-fold),
+        EXTEND its already-computed payload join / per-subject index /
+        embedding index with only the newly appended tail instead of
+        rescanning the whole log for each of them.
+
+        ``kernel.all_events()`` itself (the Rust-to-Python event
+        marshaling) has no cheaper incremental form in amplifier-data's
+        current API (``RustFileKernel`` exposes only
+        ``all_events``/``append``/``close``/``open`` -- confirmed by
+        introspection, no windowed/incremental read), so that one call is
+        paid unconditionally, exactly as before. Everything this class
+        itself does with the result -- the ref join, the payload join, the
+        per-subject index, the embedding-edge index -- is what incremental
+        extension actually saves, and on a store dominated by CONTINUOUS
+        writes (concurrent automated sessions, or a capture hook filing
+        after every tool call) that is the difference between reprocessing
+        a few new events and reprocessing the entire log on every fold.
+        """
         from amplifier_data.models import CellWriteEvent
 
         self._events: Any = kernel.all_events()
@@ -159,13 +184,97 @@ class _SearchFold:
                 for _pos, ev in self._events
             ]
         self.refs: list[Any] = refs
-        payloads: dict[Any, bytes] = {}
-        for (_pos, ev), ref in zip(self._events, refs):
+
+        extend_from = (
+            prior if prior is not None and prior._is_prefix_of(self._events) else None
+        )
+        start = len(extend_from._events) if extend_from is not None else 0
+        new_tail = list(zip(self._events[start:], refs[start:]))
+
+        if extend_from is not None:
+            payloads = dict(extend_from.payloads)
+        else:
+            payloads = {}
+        for (_pos, ev), ref in new_tail:
             if ref is not None:
                 payloads[ref] = ev.payload
         self.payloads: dict[Any, bytes] = payloads
-        self._by_subject: dict[Any, list[Any]] | None = None
+
+        new_tail_events = [item for item, _ref in new_tail]
+        self._by_subject: dict[Any, list[Any]] | None = (
+            extend_from._extend_by_subject(new_tail_events)
+            if extend_from is not None
+            else None
+        )
         self._vector_view: _FoldView | None = None
+        self._embedding_edges_cache: list[tuple[str, str]] | None = (
+            extend_from._extend_embedding_edges(new_tail_events)
+            if extend_from is not None
+            else None
+        )
+        # Incrementally-extendable (target_refs, float64 matrix) cache for
+        # the numpy-accelerated vector scorer (perf/incremental-fold) --
+        # see :meth:`vector_matrix`. ``_matrix_state`` carries
+        # ``(refs, matrix, edge_count_used)`` so a later extension knows
+        # exactly which suffix of ``embedding_edges()`` is new.
+        self._matrix_state: tuple[list[str], Any, int] | None = (
+            extend_from._matrix_state if extend_from is not None else None
+        )
+        self._vector_matrix_computed = False
+        self._vector_matrix: tuple[list[str], Any] | None = None
+
+    def _is_prefix_of(self, new_events: Any) -> bool:
+        """Whether *new_events* is this fold's own event list with only
+        new events appended at the tail (append-only continuation).
+
+        O(1): compares length and the ``SeqPos`` of this fold's own last
+        event -- the exact append-only-log validation
+        :class:`_CellRefCache` already relies on for the same assumption.
+        A mismatch (a shorter list, or a different SeqPos at the boundary
+        -- compaction, truncation, or simply a different kernel/process)
+        means this fold is NOT a safe extension base; the caller falls
+        back to a full rebuild.
+        """
+        n = len(self._events)
+        if n == 0:
+            return True
+        if len(new_events) < n:
+            return False
+        return bool(new_events[n - 1][0] == self._events[-1][0])
+
+    def _extend_by_subject(
+        self, new_tail_events: list[Any]
+    ) -> dict[Any, list[Any]] | None:
+        """Extend this fold's ``_by_subject`` index with *new_tail_events*,
+        or ``None`` if it was never built (stays lazy -- :meth:`for_subject`
+        builds it from scratch over the full event list on first access,
+        which is still correct, just not extended)."""
+        if self._by_subject is None:
+            return None
+        from amplifier_data.models import RelationshipEvent
+
+        by: dict[Any, list[Any]] = {k: list(v) for k, v in self._by_subject.items()}
+        for item in new_tail_events:
+            ev = item[1]
+            if isinstance(ev, RelationshipEvent):
+                by.setdefault(ev.from_ref, []).append(item)
+        return by
+
+    def _extend_embedding_edges(
+        self, new_tail_events: list[Any]
+    ) -> list[tuple[str, str]] | None:
+        """Extend this fold's cached ``embedding_of`` edge list with
+        *new_tail_events*, or ``None`` if it was never built (stays lazy)."""
+        if self._embedding_edges_cache is None:
+            return None
+        from amplifier_data.lenses.vector import EMBEDDING_OF
+        from amplifier_data.models import RelationshipEvent
+
+        edges = list(self._embedding_edges_cache)
+        for _pos, ev in new_tail_events:
+            if isinstance(ev, RelationshipEvent) and ev.type == EMBEDDING_OF:
+                edges.append((ev.from_ref, ev.to_ref))
+        return edges
 
     def all_events(self) -> Any:
         """The read accessor the fold lenses use (mirrors ``StorageKernel``)."""
@@ -217,6 +326,157 @@ class _SearchFold:
                     keep.append(item)
             self._vector_view = _FoldView(keep, self.payloads)
         return self._vector_view
+
+    def embedding_edges(self) -> list[tuple[str, str]]:
+        """``[(emb_ref, target_ref)]`` for every ``embedding_of`` edge in
+        this fold, in log order. Scans ``self._events`` directly (not
+        :meth:`vector_view`, which additionally carries the embedding
+        cells themselves for ``VectorLens``'s own pass-1 join) -- this
+        class's own payload lookup goes through the always-complete
+        ``self.payloads`` join instead, so no CellWriteEvent membership is
+        needed here. Cached; extended incrementally when built via a
+        *prior* fold (see :meth:`_extend_embedding_edges`)."""
+        if self._embedding_edges_cache is None:
+            from amplifier_data.lenses.vector import EMBEDDING_OF
+            from amplifier_data.models import RelationshipEvent
+
+            self._embedding_edges_cache = [
+                (ev.from_ref, ev.to_ref)
+                for _pos, ev in self._events
+                if isinstance(ev, RelationshipEvent) and ev.type == EMBEDDING_OF
+            ]
+        return self._embedding_edges_cache
+
+    def vector_matrix(self) -> tuple[list[str], Any] | None:
+        """``(target_refs, matrix)`` for the numpy-accelerated vector
+        scorer (perf/incremental-fold), or ``None`` when numpy is
+        unavailable or embeddings have inconsistent dimensions (the caller
+        falls back to the pure-Python ``VectorLens`` path in either case
+        -- this is an accelerator, never the sole implementation).
+
+        ``matrix`` is a ``float64`` 2D array, one row per embedding, built
+        from this fold's own ``payloads`` join (no re-hashing of cell refs
+        -- unlike ``VectorLens.project()``, which folds and hashes
+        independently every call). Row order matches ``target_refs``.
+        Built once per fold instance; when constructed via a *prior* fold
+        whose matrix was already computed, only the NEW embedding rows
+        (identified by the already-incremental :meth:`embedding_edges`
+        suffix) are decoded and appended -- an O(new rows) extension, not
+        an O(all rows) rebuild.
+        """
+        if self._vector_matrix_computed:
+            return self._vector_matrix
+        self._vector_matrix_computed = True
+        try:
+            import numpy as np
+        except ImportError:
+            self._vector_matrix = None
+            return None
+
+        edges = self.embedding_edges()
+        prior_state = self._matrix_state
+        if prior_state is not None and prior_state[2] <= len(edges):
+            prior_refs, prior_mat, prior_edge_count = prior_state
+            new_edges = edges[prior_edge_count:]
+        else:
+            prior_refs, prior_mat, prior_edge_count = [], None, 0
+            new_edges = edges
+
+        new_refs: list[str] = []
+        new_rows: list[tuple[float, ...]] = []
+        dim = (
+            prior_mat.shape[1]
+            if prior_mat is not None and prior_mat.shape[0]
+            else None
+        )
+        for emb_ref, target_ref in new_edges:
+            raw = self.payloads.get(emb_ref)
+            if raw is None:
+                continue  # dangling edge -- matches VectorLens.project()'s skip
+            n = len(raw) // 4
+            if dim is None:
+                dim = n
+            elif n != dim:
+                # Mixed embedding dimensions in the same log (one embedder
+                # model per store in practice) -- bail out to the safe
+                # pure-Python path rather than build a ragged matrix.
+                self._vector_matrix = None
+                return None
+            new_refs.append(target_ref)
+            new_rows.append(struct.unpack(f"<{n}f", raw))
+
+        if new_rows:
+            new_mat = np.asarray(new_rows, dtype=np.float64)
+            mat = (
+                new_mat
+                if prior_mat is None or prior_mat.shape[0] == 0
+                else np.vstack([prior_mat, new_mat])
+            )
+            refs = prior_refs + new_refs
+        else:
+            mat = prior_mat if prior_mat is not None else np.zeros((0, 0))
+            refs = prior_refs
+
+        self._matrix_state = (refs, mat, len(edges))
+        self._vector_matrix = (refs, mat)
+        return self._vector_matrix
+
+
+def _fast_vector_query(
+    fold: _SearchFold, query_vector: list[float], k: int, scope_ref: Any
+) -> list[tuple[str, float]] | None:
+    """Numpy-vectorized top-``k`` cosine search over *fold*'s embeddings
+    (perf/incremental-fold), or ``None`` to signal "fall back to
+    ``VectorLens.query()``" (numpy unavailable, no embeddings, or
+    inconsistent embedding dimensions -- see :meth:`_SearchFold.vector_matrix`).
+
+    Same contract as ``VectorLens.query(...).output``: ``[(target_ref,
+    score)]``, descending score, ties broken by ascending ``target_ref``,
+    truncated to *k*, scope filtering applied BEFORE scoring/top-k (F4).
+    Scores are computed in float64 (matching Python's native float
+    precision as closely as numpy's BLAS-backed reduction allows); they
+    are NOT guaranteed bit-identical to ``cosine_similarity()``'s naive
+    sequential summation -- floating-point addition is not associative,
+    and no summation order is a spec here, only the top-k ranking is.
+    Measured divergence over real embeddings: ~1e-8 (see
+    tests/test_incremental_fold.py), far below anything that could
+    plausibly reorder two distinct results.
+    """
+    result = fold.vector_matrix()
+    if result is None:
+        return None
+    refs, mat = result
+    if mat.shape[0] == 0:
+        return []
+
+    import numpy as np
+
+    if scope_ref is not None:
+        from amplifier_data.lenses._scope import fold_scope
+
+        scope_index = fold_scope(fold.vector_view())
+        keep_idx = [i for i, r in enumerate(refs) if scope_index.is_in_scope(r, scope_ref)]
+        if not keep_idx:
+            return []
+        sub_refs = [refs[i] for i in keep_idx]
+        sub_mat = mat[keep_idx]
+    else:
+        sub_refs, sub_mat = refs, mat
+
+    q = np.asarray(query_vector, dtype=np.float64)
+    if q.shape[0] != sub_mat.shape[1]:
+        raise ValueError(
+            f"dimension mismatch: query has {q.shape[0]}, stored has {sub_mat.shape[1]}"
+        )
+    norms = np.linalg.norm(sub_mat, axis=1)
+    qnorm = float(np.linalg.norm(q))
+    dots = sub_mat @ q
+    with np.errstate(invalid="ignore", divide="ignore"):
+        scores = np.where((norms == 0) | (qnorm == 0), 0.0, dots / (norms * qnorm))
+
+    order = sorted(range(len(sub_refs)), key=lambda i: (-float(scores[i]), sub_refs[i]))
+    top = order[: max(k, 0)]
+    return [(sub_refs[i], float(scores[i])) for i in top]
 
 
 @runtime_checkable
@@ -395,6 +655,15 @@ class NativeMemoryStore:
         self._building: tuple[int, threading.Event] | None = None
         self._snapshot_lock = threading.Lock()
         self._expiry_timer: threading.Timer | None = None
+        # perf/incremental-fold: the most recently built fold, kept as the
+        # extension base ACROSS appends (unlike ``_snapshot``, which is
+        # invalidated by every write) so a busy store paying continuous
+        # concurrent writes still only reprocesses the NEW tail per fold,
+        # not the whole log. Bounded to one fold (same guarantee as
+        # ``_snapshot``): dropped together on true idle expiry, see
+        # ``_expire_snapshot``.
+        self._prior_fold: _SearchFold | None = None
+        self._last_build_at: float = 0.0
         self.filed: list[dict[str, object]] = []
         # T1-MEM-2: ledger of plasticity mutations applied through this seam.
         self.mutations: list[MutationRecord] = []
@@ -752,7 +1021,9 @@ class NativeMemoryStore:
             return None
         kernel = self.store.kernel
         if not self._observe(kernel):
-            return _SearchFold(kernel, self._ref_cache)
+            fold = _SearchFold(kernel, self._ref_cache, prior=self._prior_fold)
+            self._update_prior_fold(fold)
+            return fold
         now = time.monotonic()
         with self._snapshot_lock:
             generation = self._generation
@@ -780,11 +1051,14 @@ class NativeMemoryStore:
                 snap = self._snapshot
                 if snap is not None and snap[0] == generation:
                     return snap[2]
-            return _SearchFold(kernel, self._ref_cache)
+            fold = _SearchFold(kernel, self._ref_cache, prior=self._prior_fold)
+            self._update_prior_fold(fold)
+            return fold
         # generation was read BEFORE materializing: if anything is appended
         # meanwhile the counter moves on and this snapshot is never reused.
         try:
-            fold = _SearchFold(kernel, self._ref_cache)
+            fold = _SearchFold(kernel, self._ref_cache, prior=self._prior_fold)
+            self._update_prior_fold(fold)
             with self._snapshot_lock:
                 # Only publish a snapshot that is still current: one built
                 # across an append could never be reused, so caching it would
@@ -798,6 +1072,22 @@ class NativeMemoryStore:
             done.set()
         self._arm_expiry()
         return fold
+
+    def _update_prior_fold(self, fold: _SearchFold) -> None:
+        """Record *fold* as the extension base for the NEXT fold build
+        (perf/incremental-fold), and mark this store as freshly active so
+        the idle-expiry timer knows a fold is worth retaining.
+
+        Monotonic: never replaces a longer (more current) prior with a
+        shorter one -- a slower concurrent builder that finishes after a
+        faster one must not regress the extension base.
+        """
+        with self._snapshot_lock:
+            prior = self._prior_fold
+            if prior is None or len(fold._events) >= len(prior._events):  # noqa: SLF001
+                self._prior_fold = fold
+            self._last_build_at = time.monotonic()
+        self._arm_expiry()
 
     #: How long a snapshot may serve further reads (absent any append).
     #: Short on purpose: a snapshot pins the materialized log in memory.
@@ -861,16 +1151,28 @@ class NativeMemoryStore:
             store._expire_snapshot()
 
     def _expire_snapshot(self) -> None:
-        """Drop the snapshot once it is older than ``SNAPSHOT_REUSE_S``;
-        re-arm (still a single timer) while a younger one is in the slot."""
+        """Drop the snapshot -- and the incremental-extension base,
+        ``_prior_fold`` -- once neither has been rebuilt for
+        ``SNAPSHOT_REUSE_S``; re-arm (still a single timer) while a
+        younger build is in the slot.
+
+        Keyed off ``_last_build_at`` (set on every successful fold build,
+        including across writes -- see :meth:`_update_prior_fold`) rather
+        than the snapshot's own age: ``_on_append`` nulls ``_snapshot`` on
+        every write, but a store under continuous concurrent writes keeps
+        building fresh (incrementally extended) folds on every read, so
+        gating retention on ``_snapshot``'s age alone would evict
+        ``_prior_fold`` mid-burst, right when incremental extension
+        matters most.
+        """
         with self._snapshot_lock:
             self._expiry_timer = None
-            snap = self._snapshot
-            if snap is None:
-                return
-            age = time.monotonic() - snap[1]
+            if self._last_build_at == 0.0:
+                return  # nothing ever built
+            age = time.monotonic() - self._last_build_at
             if age >= self.SNAPSHOT_REUSE_S:
                 self._snapshot = None
+                self._prior_fold = None
                 return
         self._arm_expiry(max(self.SNAPSHOT_REUSE_S - age, 0.0))
 
@@ -1051,14 +1353,22 @@ class NativeMemoryStore:
         seen_refs: set[Any] = set()
         if query_vector is not None:
             if fold is not None:
-                from amplifier_data.lenses.vector import VectorLens
+                candidates = _fast_vector_query(
+                    fold, list(query_vector), max(1, k * 3), scope_ref
+                )
+                if candidates is None:
+                    # numpy unavailable, or embeddings have inconsistent
+                    # dimensions (see _SearchFold.vector_matrix) -- fall
+                    # back to the pure-Python reference implementation,
+                    # never a hard failure.
+                    from amplifier_data.lenses.vector import VectorLens
 
-                candidates = VectorLens().query(
-                    kernel=fold.vector_view(),
-                    vector=list(query_vector),
-                    k=max(1, k * 3),
-                    scope=scope_ref,
-                ).output
+                    candidates = VectorLens().query(
+                        kernel=fold.vector_view(),
+                        vector=list(query_vector),
+                        k=max(1, k * 3),
+                        scope=scope_ref,
+                    ).output
             else:
                 candidates = s.query_vector(  # type: ignore[attr-defined]
                     list(query_vector), max(1, k * 3), scope=scope_ref

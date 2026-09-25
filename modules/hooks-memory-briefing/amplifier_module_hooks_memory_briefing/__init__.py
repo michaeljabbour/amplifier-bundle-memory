@@ -76,6 +76,7 @@ except ImportError:
 # hard-depends on amplifier-data + fastembed, \u00a78) -- no defensive
 # ImportError fallback; a missing import means the environment is genuinely
 # misconfigured, not something a private duplicate helper should paper over.
+from amplifier_module_tool_memory.automation_gate import automation_opt_out
 from amplifier_module_tool_memory.client import ensure_daemon
 
 try:
@@ -775,6 +776,11 @@ class MemoryBriefingHook:
         # briefing by default: they run a delegated, already-scoped task and
         # would otherwise pay the briefing's tokens on every spawn.
         self.brief_subsessions: bool = bool(self.config.get("brief_subsessions", False))
+        # perf/incremental-fold (part B): automated/non-interactive runs
+        # opt out entirely -- see amplifier_module_tool_memory.automation_gate.
+        self.excluded_working_dirs: list[str] = list(
+            self.config.get("excluded_working_dirs", []) or []
+        )
 
         self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
@@ -806,6 +812,10 @@ class MemoryBriefingHook:
         """Arm delivery for this session; never blocks on memory I/O."""
         self._sid = data.get("session_id")
         if data.get("parent_id") and not self.brief_subsessions:
+            return HookResult(action="continue")
+        # perf/incremental-fold (part B): automated/non-interactive runs
+        # never get armed -- no prefetch, no daemon contact, nothing.
+        if automation_opt_out(excluded_working_dirs=self.excluded_working_dirs):
             return HookResult(action="continue")
         self._armed = True
         self.prefetch()
@@ -1051,10 +1061,20 @@ async def mount(
             name=f"{hook.name}-deliver",
         )
     # Start the daemon lookups now, in the background: in an interactive
-    # session they finish while the user is still typing.
-    hook.prefetch()
+    # session they finish while the user is still typing. perf/incremental-
+    # fold (part B): skipped entirely for an opted-out automated run -- this
+    # early prefetch runs at mount() time, BEFORE session:start, so it is a
+    # second, independent call site that must honor the same opt-out
+    # on_session_start does (mount() has no parent_id to check yet, hence
+    # no subsession skip here -- only the automation opt-out applies).
+    if not automation_opt_out(
+        excluded_working_dirs=list(config.get("excluded_working_dirs", []) or [])
+        if config
+        else []
+    ):
+        hook.prefetch()
     return {
         "name": "hooks-memory-briefing",
-        "version": "2.1.0",
+        "version": "2.1.1",
         "provides": ["memory-briefing"],
     }

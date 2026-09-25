@@ -160,6 +160,7 @@ except ImportError:
 # amplifier-data + fastembed as of B2, \u00a78), so no defensive ImportError
 # fallback here -- a failure to import means the environment is genuinely
 # misconfigured, not something a private duplicate helper should paper over.
+from amplifier_module_tool_memory.automation_gate import automation_opt_out
 from amplifier_module_tool_memory.client import ensure_daemon
 
 
@@ -792,6 +793,11 @@ class MemoryCaptureHook:
         self.emit_events: bool = bool(self.config.get("emit_events", True))
         # Categories to capture (empty list = capture all memory-worthy content)
         self.categories: list[str] = self.config.get("categories", [])
+        # perf/incremental-fold (part B): automated/non-interactive runs opt
+        # out entirely -- see amplifier_module_tool_memory.automation_gate.
+        self.excluded_working_dirs: list[str] = list(
+            self.config.get("excluded_working_dirs", []) or []
+        )
         # Load category signals from the capture manifest (the "knowable list").
         # Resolution order is handled by load_manifest; falls back to the legacy
         # hardcoded table when the manifest module is unavailable or the file is
@@ -820,6 +826,21 @@ class MemoryCaptureHook:
         tool_name: str = data.get("tool_name", "unknown")
         tool_input: dict[str, Any] = data.get("tool_input", {}) or {}
         sid = data.get("session_id")
+
+        # perf/incremental-fold (part B): automated/non-interactive runs
+        # opt out entirely -- no daemon contact, no spool write, nothing.
+        # Checked first, before any other cheap work, so an opted-out
+        # process pays as close to zero cost as this hook can offer.
+        if automation_opt_out(excluded_working_dirs=self.excluded_working_dirs):
+            if self.emit_events:
+                emit_event(
+                    "memory-capture",
+                    "capture_skipped",
+                    ok=False,
+                    data={"reason": "automation_opt_out"},
+                    session_id=sid,
+                )
+            return HookResult(action="continue")
 
         # T1-MEM-1 + orchestrator-contract fix: read the tool outcome BEFORE
         # the worthiness gate so the signal is known regardless of whether the
@@ -1003,6 +1024,6 @@ async def mount(coordinator: Any, config: dict[str, Any] | None = None) -> dict[
 
     return {
         "name": "hooks-memory-capture",
-        "version": "1.2.3",
+        "version": "2.0.1",
         "provides": ["memory-capture"],
     }

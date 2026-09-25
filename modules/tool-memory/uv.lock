@@ -15,11 +15,12 @@ source = { git = "https://github.com/michaeljabbour/amplifier-data?rev=09482f1fa
 
 [[package]]
 name = "amplifier-module-tool-memory"
-version = "2.0.3"
+version = "2.0.4"
 source = { editable = "." }
 dependencies = [
     { name = "amplifier-data" },
     { name = "fastembed" },
+    { name = "numpy" },
 ]
 
 [package.optional-dependencies]
@@ -41,6 +42,7 @@ requires-dist = [
     { name = "amplifier-data", git = "https://github.com/michaeljabbour/amplifier-data?rev=09482f1fa569ba8407894cad3a32f8ab6aecbc3d" },
     { name = "chromadb", marker = "extra == 'migrate'", specifier = ">=0.5" },
     { name = "fastembed", specifier = ">=0.3" },
+    { name = "numpy", specifier = ">=1.24" },
 ]
 provides-extras = ["migrate"]
 
