@@ -14,7 +14,7 @@ This repo is one component of the **behavioral-plasticity suite**, composed by t
 
 **Install the full suite (always-on):**
 ```bash
-amplifier bundle add git+https://github.com/michaeljabbour/amplifier-bundle-behavioral-plasticity@main --app
+amplifier bundle add 'git+https://github.com/michaeljabbour/amplifier-bundle-behavioral-plasticity@main#subdirectory=behaviors/behavioral-plasticity.yaml' --app --name behavioral-plasticity
 amplifier bundle update behavioral-plasticity -y
 ```
 
