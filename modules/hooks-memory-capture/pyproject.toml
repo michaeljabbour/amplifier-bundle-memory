@@ -1,6 +1,6 @@
 [project]
 name = "amplifier-module-hooks-memory-capture"
-version = "2.0.0"
+version = "2.0.1"
 description = "Amplifier hook module — automatically files verbatim tool outputs as memory drawers with auto-detected wing and room"
 readme = "README.md"
 license = { text = "MIT" }

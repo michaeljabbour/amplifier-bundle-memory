@@ -1,6 +1,6 @@
 [project]
 name = "amplifier-module-tool-memory"
-version = "2.0.3"
+version = "2.0.4"
 description = "High-level Amplifier tool module for the native memory daemon (amplifier-data) — search, remember, knowledge graph, traverse, diary, mine, and events operations"
 readme = "README.md"
 license = { text = "MIT" }
@@ -30,6 +30,11 @@ dependencies = [
     # here just means fastembed is importable in the venv, not that every
     # process pays the model-load cost.
     "fastembed>=0.3",
+    # Vectorized cosine search (perf/incremental-fold): already a transitive
+    # dependency via fastembed's onnxruntime, restated explicitly since
+    # store.py imports it directly. Guarded import (ImportError -> None);
+    # never a hard requirement to search at all, only to search fast.
+    "numpy>=1.24",
 ]
 # NOTE: the legacy vendor package is NOT a dependency anymore -- there is no
 # vendor subprocess left in this package. [substrate] extra: DELETED

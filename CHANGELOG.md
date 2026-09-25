@@ -1,5 +1,50 @@
 # Changelog
 
+## [2.0.4] — 2026-09-25
+
+### Changed (behavior -- read before upgrading)
+
+- **Search is faster under continuous writes, but not free.** `_SearchFold`
+  now extends a prior fold's payload join / per-subject index / embedding
+  index with only the newly appended tail instead of rebuilding them from
+  the whole log, and vector scoring runs through a numpy-vectorized cosine
+  search (falls back to the exact pure-Python `VectorLens.query()` path
+  when numpy is unavailable or embeddings have inconsistent dimensions).
+  Measured on the real ~230k-event / 190MB store this closes an issue
+  against: a search that used to cost ~2.4-3.2s per call under continuous
+  concurrent writes now costs ~1.0-1.3s, essentially FLAT regardless of how
+  many writes land between searches (1, 5, or 20 -- all ~1.0-1.3s), proving
+  the incremental extension is doing its job. **The ~1s floor is NOT closed
+  by this change**: `amplifier-data`'s `RustFileKernel.all_events()` (the
+  only way to read the log at all -- confirmed via introspection, no
+  incremental/windowed read API exists) re-marshals the ENTIRE event
+  history into fresh Python objects on every call, and that alone measured
+  0.35-0.85s depending on log size and disk-cache state. Closing that
+  floor requires a change to `amplifier-data` (a separately pinned
+  dependency), not this repo. When NO writes land between searches (the
+  common case once Part B below reduces write volume), warm searches on
+  the SAME fold hit ~0.1-0.2s.
+- **`numpy>=1.24` is now a direct dependency** of `amplifier-module-tool-memory`
+  (was already transitive via `fastembed`'s `onnxruntime`). Guarded import
+  throughout -- never a hard requirement to search at all, only to search
+  fast.
+- **Automated/non-interactive sessions can opt out of memory entirely.** Set
+  `AMPLIFIER_MEMORY_CAPTURE=off` (or `0`/`false`/`no`) in a process's
+  environment, or add glob patterns to a hook's new `excluded_working_dirs`
+  config list, to skip `hooks-memory-capture` (no write, no daemon
+  contact), `hooks-memory-interject` (no search), and `hooks-memory-briefing`
+  (no prefetch) for that process -- see `amplifier_module_tool_memory.
+  automation_gate`. Default behavior for a normal interactive session
+  (neither signal set) is unchanged.
+
+### Fixed
+
+- **`hooks-memory-briefing`'s early `mount()`-time prefetch ignored the new
+  automation opt-out.** `on_session_start` skips correctly, but `mount()`
+  itself unconditionally starts a background prefetch the moment the hook
+  is mounted -- before `session:start` even fires. Both call sites now
+  honor `automation_opt_out`.
+
 ## [2.0.3] — 2026-09-25
 
 ### Fixed
