@@ -25,6 +25,8 @@ primary + shadow -- there is no shadow anymore, the daemon IS the store).
 from __future__ import annotations
 
 import struct
+import threading
+import time
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
@@ -48,6 +50,60 @@ def _resolve_batch_ref(commit_result: Any, ref: Any) -> Any:
     if isinstance(commit_result, dict):
         return commit_result.get(ref, ref)
     return ref
+
+
+class _CellRefCache:
+    """Incremental ``SeqPos-index -> cell_ref`` memo for an append-only log.
+
+    ``CellWriteEvent.cell_ref()`` is an uncached sha256 over canonical JSON;
+    recomputing it for every event on every read was the single largest cost
+    of a search (~220k hashes per call on a ~400k-event store, ~1.5 s). A
+    ref is a pure function of an immutable event, and the log is append-only,
+    so the refs for the prefix already seen never change: only the newly
+    appended tail is hashed. The prefix is re-validated on every call (length
+    and the SeqPos of the last memoized event); any mismatch -- e.g. a
+    compacted/rewritten log -- drops the memo and rebuilds from scratch.
+    Thread-safe (the daemon serves reads concurrently).
+    """
+
+    def __init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self._refs: list[Any] = []
+        self._last_pos: Any = None
+
+    def refs_for(self, events: Any) -> list[Any]:
+        from amplifier_data.models import CellWriteEvent
+
+        with self._lock:
+            n = len(self._refs)
+            if n > len(events) or (n and events[n - 1][0] != self._last_pos):
+                self._refs = []
+                n = 0
+            if len(events) > n:
+                extend = self._refs.append
+                for _pos, ev in events[n:]:
+                    extend(ev.cell_ref() if isinstance(ev, CellWriteEvent) else None)
+                self._last_pos = events[-1][0]
+            return self._refs[: len(events)]
+
+
+class _FoldView:
+    """A read-only slice of a :class:`_SearchFold`'s event list.
+
+    Exposes the same ``all_events()`` / ``payloads`` surface, so the
+    substrate's own lenses run their exact logic over just the events that
+    can affect the answer (see :meth:`_SearchFold.for_subject` and
+    :meth:`_SearchFold.vector_view`).
+    """
+
+    def __init__(self, events: Any, payloads: dict[Any, bytes]) -> None:
+        self._events = events
+        self.payloads = payloads
+
+    def all_events(self) -> Any:
+        return self._events
 
 
 class _SearchFold:
@@ -74,24 +130,92 @@ class _SearchFold:
     payload). Refs defined some other way (interpreter/index cells) are
     absent from the join and fall back to ``regenerate``.
 
+    perf/startup-latency: the per-event refs come from the store's
+    :class:`_CellRefCache` (only new events are hashed), and per-ref lens
+    reads run over :meth:`for_subject` slices -- every event a
+    ``TemporalLens``/``GraphLens`` answer for ``subject=ref`` can depend on
+    has ``from_ref == ref``, so the answer over the slice is identical to the
+    answer over the whole log, without re-scanning ~400k events per hit.
+
     Reads the kernel directly — no AccessEvents (D4 read-vs-fold boundary).
-    Scoped to one call: never cached on the store (D1: lenses stay pure;
-    every search folds a fresh, current view of the log).
+    Lenses stay pure (D1) and every read sees a current view of the log: a
+    snapshot is reused only by :meth:`NativeMemoryStore._fold_snapshot` while
+    NO event has been appended since it was taken (tracked by a kernel
+    observer), and only for a few seconds, so a burst of reads (the session
+    briefing's search + KG + diary, then the first prompt's interject search)
+    pays for one log materialization instead of one each.
     """
 
-    def __init__(self, kernel: Any) -> None:
+    def __init__(self, kernel: Any, ref_cache: _CellRefCache | None = None) -> None:
         from amplifier_data.models import CellWriteEvent
 
         self._events: Any = kernel.all_events()
+        if ref_cache is not None:
+            refs = ref_cache.refs_for(self._events)
+        else:
+            refs = [
+                ev.cell_ref() if isinstance(ev, CellWriteEvent) else None
+                for _pos, ev in self._events
+            ]
+        self.refs: list[Any] = refs
         payloads: dict[Any, bytes] = {}
-        for _pos, ev in self._events:
-            if isinstance(ev, CellWriteEvent):
-                payloads[ev.cell_ref()] = ev.payload
+        for (_pos, ev), ref in zip(self._events, refs):
+            if ref is not None:
+                payloads[ref] = ev.payload
         self.payloads: dict[Any, bytes] = payloads
+        self._by_subject: dict[Any, list[Any]] | None = None
+        self._vector_view: _FoldView | None = None
 
     def all_events(self) -> Any:
         """The read accessor the fold lenses use (mirrors ``StorageKernel``)."""
         return self._events
+
+    def for_subject(self, ref: Any) -> _FoldView:
+        """Only the ``RelationshipEvent``s whose ``from_ref`` is *ref*, in log order.
+
+        ``TemporalLens.query(subject=ref)`` and ``GraphLens.neighbors(ref)``
+        read nothing else, so running them over this view is exact.
+        """
+        if self._by_subject is None:
+            from amplifier_data.models import RelationshipEvent
+
+            by: dict[Any, list[Any]] = {}
+            for item in self._events:
+                ev = item[1]
+                if isinstance(ev, RelationshipEvent):
+                    by.setdefault(ev.from_ref, []).append(item)
+            self._by_subject = by
+        return _FoldView(self._by_subject.get(ref, []), self.payloads)
+
+    def vector_view(self) -> _FoldView:
+        """The events ``VectorLens.query`` can depend on, in log order:
+        ``embedding_of`` and ``scoped_to`` edges plus the embedding cells
+        those edges point from. Every other cell write is dropped from its
+        pass-1 join without changing the index (only embedding refs are ever
+        looked up), so the lens stops re-hashing every cell in the log."""
+        if self._vector_view is None:
+            from amplifier_data.lenses._scope import SCOPED_TO
+            from amplifier_data.lenses.vector import EMBEDDING_OF
+            from amplifier_data.models import RelationshipEvent
+
+            emb_refs = {
+                ev.from_ref
+                for _pos, ev in self._events
+                if isinstance(ev, RelationshipEvent) and ev.type == EMBEDDING_OF
+            }
+            keep: list[Any] = []
+            for item, ref in zip(self._events, self.refs):
+                ev = item[1]
+                if ref is not None:
+                    if ref in emb_refs:
+                        keep.append(item)
+                elif isinstance(ev, RelationshipEvent) and ev.type in (
+                    EMBEDDING_OF,
+                    SCOPED_TO,
+                ):
+                    keep.append(item)
+            self._vector_view = _FoldView(keep, self.payloads)
+        return self._vector_view
 
 
 @runtime_checkable
@@ -259,6 +383,16 @@ class NativeMemoryStore:
                 # we do not want every later read to append AccessEvents (§5).
                 store = AmplifierStore(path=path, record_access=record_access)
         self.store: Any = store
+        # perf/startup-latency: incremental per-event cell-ref memo shared by
+        # every fold snapshot this store takes (see _CellRefCache).
+        self._ref_cache = _CellRefCache()
+        # Append-generation counter (bumped by a kernel observer) + the last
+        # snapshot, for short-lived reuse across a burst of reads.
+        self._generation = 0
+        self._observing: bool | None = None
+        self._snapshot: tuple[int, float, _SearchFold] | None = None
+        self._building: tuple[int, threading.Event] | None = None
+        self._snapshot_lock = threading.Lock()
         self.filed: list[dict[str, object]] = []
         # T1-MEM-2: ledger of plasticity mutations applied through this seam.
         self.mutations: list[MutationRecord] = []
@@ -370,14 +504,42 @@ class NativeMemoryStore:
     # KG facts via anchor cells (§4b)
     # ------------------------------------------------------------------
 
-    def _anchor(self, name: str) -> Any:
+    def _anchor(self, name: str, *, create: bool = True) -> Any:
         """Content-addressed anchor cell for a string KG entity (``entity:{name}``).
 
         KG entities are strings; substrate facts are ``(Hash, str, Hash)``.
         Content addressing makes this mapping deterministic, idempotent, and
         collision-free against the existing ``wing:``/``room:`` scope cells.
+
+        ``create=False`` (read paths) computes the same ref without appending
+        a duplicate cell to the log -- see :meth:`_read_ref`.
         """
-        return self.store.write_cell(f"entity:{name}".encode())  # type: ignore[attr-defined]
+        payload = f"entity:{name}".encode()
+        if not create:
+            return self._read_ref(payload)
+        return self.store.write_cell(payload)  # type: ignore[attr-defined]
+
+    def _read_ref(self, payload: bytes) -> Any:
+        """The content address ``write_cell(payload)`` would return, for READS.
+
+        Read paths only need the ref to look things up; if the cell was never
+        written, nothing can be scoped to / asserted on it, so the lookup is
+        empty either way. Computing it locally (the substrate's own
+        ``CellWriteEvent.cell_ref()``, exactly what ``write_cell`` returns)
+        stops every search / diary / KG read from appending a duplicate cell
+        to the append-only log (which also invalidated nothing but grew the
+        log on every read). Only for a direct foldable kernel; remote
+        backends keep the ``write_cell`` round-trip.
+        """
+        if self._fold_capable():
+            from amplifier_data.models import CellWriteEvent
+
+            return CellWriteEvent(payload=payload).cell_ref()
+        return self.store.write_cell(payload)  # type: ignore[attr-defined]
+
+    def _fold_capable(self) -> bool:
+        kernel = getattr(self.store, "kernel", None)
+        return kernel is not None and callable(getattr(kernel, "all_events", None))
 
     def assert_kg(self, subject: str, predicate: str, object: str) -> None:  # noqa: A002
         """String-keyed KG assert: strings in, anchor-cell fact in the substrate."""
@@ -394,19 +556,28 @@ class NativeMemoryStore:
         """Currently-valid facts; anchor refs resolved back to entity strings
         via ``regenerate(record_access=False)``. Verify-only read surface."""
         s = self.store
-        subj_ref = self._anchor(subject) if subject is not None else None
-        res = s.query_facts(subject=subj_ref, predicate=predicate)  # type: ignore[attr-defined]
+        subj_ref = self._anchor(subject, create=False) if subject is not None else None
+        fold = self._fold_snapshot()
+        if fold is not None:
+            from amplifier_data.lenses.temporal import TemporalLens
+
+            view = fold.for_subject(subj_ref) if subj_ref is not None else fold
+            res = TemporalLens().query(kernel=view, subject=subj_ref, predicate=predicate)
+        else:
+            res = s.query_facts(subject=subj_ref, predicate=predicate)  # type: ignore[attr-defined]
         out: list[tuple[str, str, str]] = []
         for fact in res.output:
-            subj_name = self._resolve_anchor(fact.subject)
-            obj_name = self._resolve_anchor(fact.object)
+            subj_name = self._resolve_anchor(fact.subject, fold)
+            obj_name = self._resolve_anchor(fact.object, fold)
             out.append((subj_name, fact.predicate, obj_name))
         return out
 
-    def _resolve_anchor(self, ref: Any) -> str:
+    def _resolve_anchor(self, ref: Any, fold: _SearchFold | None = None) -> str:
         """Resolve an anchor cell ref back to its ``entity:{name}`` string."""
-        s = self.store
-        payload = s.regenerate(ref, record_access=False).payload.decode("utf-8")  # type: ignore[attr-defined]
+        if fold is not None and ref in fold.payloads:
+            payload = fold.payloads[ref].decode("utf-8")
+        else:
+            payload = self.store.regenerate(ref, record_access=False).payload.decode("utf-8")  # type: ignore[attr-defined]
         prefix = "entity:"
         return payload[len(prefix) :] if payload.startswith(prefix) else payload
 
@@ -414,7 +585,7 @@ class NativeMemoryStore:
         """SeqPos-ordered assert/invalidate history for one entity (wraps
         ``store.timeline(self._anchor(subject))``)."""
         s = self.store
-        entries = s.timeline(self._anchor(subject))  # type: ignore[attr-defined]
+        entries = s.timeline(self._anchor(subject, create=False))  # type: ignore[attr-defined]
         return [
             {
                 "seq_pos": e.seq_pos,
@@ -563,6 +734,10 @@ class NativeMemoryStore:
         """
         return self.store.write_cell(f"{kind}:{name}".encode())  # type: ignore[attr-defined]
 
+    def _read_scope_ref(self, kind: str, name: str) -> Any:
+        """:meth:`_scope_ref` for READ paths: same ref, no log append."""
+        return self._read_ref(f"{kind}:{name}".encode())
+
     def _fold_snapshot(self) -> _SearchFold | None:
         """One :class:`_SearchFold` over the backing kernel, or ``None``.
 
@@ -571,10 +746,82 @@ class NativeMemoryStore:
         path (``regenerate`` / ``query_facts`` / ``graph_neighbors``)
         unchanged.
         """
-        kernel = getattr(self.store, "kernel", None)
-        if kernel is None or not callable(getattr(kernel, "all_events", None)):
+        if not self._fold_capable():
             return None
-        return _SearchFold(kernel)
+        kernel = self.store.kernel
+        if not self._observe(kernel):
+            return _SearchFold(kernel, self._ref_cache)
+        now = time.monotonic()
+        with self._snapshot_lock:
+            generation = self._generation
+            snap = self._snapshot
+            if (
+                snap is not None
+                and snap[0] == generation
+                and now - snap[1] < self.SNAPSHOT_REUSE_S
+            ):
+                return snap[2]
+            # Single-flight: concurrent readers of the same generation wait
+            # for the one build in progress instead of each materializing
+            # the log (they would only serialize on the kernel anyway).
+            building = self._building
+            if building is not None and building[0] == generation:
+                done = building[1]
+                owner = False
+            else:
+                done = threading.Event()
+                self._building = (generation, done)
+                owner = True
+        if not owner:
+            done.wait()
+            with self._snapshot_lock:
+                snap = self._snapshot
+                if snap is not None and snap[0] == generation:
+                    return snap[2]
+            return _SearchFold(kernel, self._ref_cache)
+        # generation was read BEFORE materializing: if anything is appended
+        # meanwhile the counter moves on and this snapshot is never reused.
+        try:
+            fold = _SearchFold(kernel, self._ref_cache)
+            with self._snapshot_lock:
+                self._snapshot = (generation, now, fold)
+        finally:
+            with self._snapshot_lock:
+                if self._building is not None and self._building[1] is done:
+                    self._building = None
+            done.set()
+        timer = threading.Timer(self.SNAPSHOT_REUSE_S, self._expire_snapshot, (fold,))
+        timer.daemon = True
+        timer.start()
+        return fold
+
+    #: How long a snapshot may serve further reads (absent any append).
+    #: Short on purpose: a snapshot pins the materialized log in memory.
+    SNAPSHOT_REUSE_S = 5.0
+
+    def _observe(self, kernel: Any) -> bool:
+        """Subscribe (once) to kernel appends; False when unsupported."""
+        if self._observing is None:
+            subscribe = getattr(kernel, "subscribe", None)
+            if not callable(subscribe):
+                self._observing = False
+            else:
+                try:
+                    subscribe(self._on_append)
+                    self._observing = True
+                except Exception:
+                    self._observing = False
+        return bool(self._observing)
+
+    def _on_append(self, _pos: Any, _event: Any) -> None:
+        with self._snapshot_lock:
+            self._generation += 1
+            self._snapshot = None
+
+    def _expire_snapshot(self, fold: _SearchFold) -> None:
+        with self._snapshot_lock:
+            if self._snapshot is not None and self._snapshot[2] is fold:
+                self._snapshot = None
 
     def _payload_text(self, ref: Any, fold: _SearchFold | None) -> str:
         """Decode ``ref``'s payload, preferring the one-fold snapshot.
@@ -603,7 +850,9 @@ class NativeMemoryStore:
         if fold is not None:
             from amplifier_data.lenses.temporal import TemporalLens
 
-            res = TemporalLens().query(kernel=fold, subject=ref, predicate=predicate)
+            res = TemporalLens().query(
+                kernel=fold.for_subject(ref), subject=ref, predicate=predicate
+            )
         else:
             res = self.store.query_facts(subject=ref, predicate=predicate)  # type: ignore[attr-defined]
         if not res.output:
@@ -618,7 +867,9 @@ class NativeMemoryStore:
         if fold is not None:
             from amplifier_data.lenses.graph import GraphLens
 
-            neighbors = GraphLens().neighbors(fold, ref, rel_type="scoped_to")
+            neighbors = GraphLens().neighbors(
+                fold.for_subject(ref), ref, rel_type="scoped_to"
+            )
         else:
             neighbors = s.graph_neighbors(ref, rel_type="scoped_to")  # type: ignore[attr-defined]
         wing_name: str | None = None
@@ -658,15 +909,18 @@ class NativeMemoryStore:
         """
         from amplifier_data.lenses._scope import fold_scope
 
-        s = self.store
         if room is not None:
-            scope_ref = self._scope_ref("room", room)
+            scope_ref = self._read_scope_ref("room", room)
         elif wing is not None:
-            scope_ref = self._scope_ref("wing", wing)
+            scope_ref = self._read_scope_ref("wing", wing)
         else:
             scope_ref = None
 
-        scope_index = fold_scope(_fold if _fold is not None else s.kernel)  # type: ignore[attr-defined]
+        # perf/startup-latency: a standalone call takes its own one-fold
+        # snapshot too (was: s.kernel folds + one regenerate per read per
+        # drawer -- minutes for the degraded 1000-drawer scan on a big store).
+        fold = _fold if _fold is not None else self._fold_snapshot()
+        scope_index = fold_scope(fold if fold is not None else self.store.kernel)  # type: ignore[attr-defined]
         if scope_ref is not None:
             member_refs = scope_index.cells_in_scope(scope_ref)
         else:
@@ -674,10 +928,10 @@ class NativeMemoryStore:
 
         out: list[dict[str, Any]] = []
         for ref in sorted(member_refs)[: max(0, limit)]:
-            content = self._payload_text(ref, _fold)
-            wing_name, room_name = self._resolve_wing_room(ref, _fold)
-            category = self._first_fact_value(ref, "has_category", _fold)
-            importance_raw = self._first_fact_value(ref, "has_importance", _fold)
+            content = self._payload_text(ref, fold)
+            wing_name, room_name = self._resolve_wing_room(ref, fold)
+            category = self._first_fact_value(ref, "has_category", fold)
+            importance_raw = self._first_fact_value(ref, "has_importance", fold)
             out.append(
                 {
                     "ref": ref,
@@ -716,7 +970,7 @@ class NativeMemoryStore:
         else wing (if given) else global, then
         ``final = 0.85 * cosine + 0.15 * lexical_score`` re-rank, top-``k``.
 
-        Returns ``[{ref, score, content, wing, room, category, source}]``.
+        Returns ``[{ref, score, content, wing, room, category, source, importance}]``.
         Every read in this method goes through ONE log fold per call
         (:class:`_SearchFold`) instead of a ``regenerate`` / lens
         re-materialization per hit — regenerate drops the materialized cache
@@ -734,11 +988,12 @@ class NativeMemoryStore:
         s = self.store
         scope_ref = None
         if room is not None:
-            scope_ref = self._scope_ref("room", room)
+            scope_ref = self._read_scope_ref("room", room)
         elif wing is not None:
-            scope_ref = self._scope_ref("wing", wing)
-        # Snapshot AFTER the scope-cell write above, so the fold sees at least
-        # everything the per-call store-surface folds used to see.
+            scope_ref = self._read_scope_ref("wing", wing)
+        # Snapshot AFTER the scope ref is resolved (for remote backends that
+        # is still a write), so the fold sees at least everything the
+        # per-call store-surface folds used to see.
         fold = self._fold_snapshot()
 
         scored: list[tuple[Any, float]] = []
@@ -748,7 +1003,10 @@ class NativeMemoryStore:
                 from amplifier_data.lenses.vector import VectorLens
 
                 candidates = VectorLens().query(
-                    kernel=fold, vector=list(query_vector), k=max(1, k * 3), scope=scope_ref
+                    kernel=fold.vector_view(),
+                    vector=list(query_vector),
+                    k=max(1, k * 3),
+                    scope=scope_ref,
                 ).output
             else:
                 candidates = s.query_vector(  # type: ignore[attr-defined]
@@ -811,6 +1069,11 @@ class NativeMemoryStore:
             wing_name, room_name = self._resolve_wing_room(ref, fold)
             category = self._first_fact_value(ref, "has_category", fold)
             source = self._first_fact_value(ref, "has_source", fold)
+            importance_raw = self._first_fact_value(ref, "has_importance", fold)
+            try:
+                importance = float(importance_raw) if importance_raw is not None else None
+            except ValueError:
+                importance = None
             results.append(
                 {
                     "ref": ref,
@@ -820,6 +1083,10 @@ class NativeMemoryStore:
                     "room": room_name,
                     "category": category,
                     "source": source,
+                    # perf/startup-latency: the has_importance fact, resolved
+                    # inside this fold, so the briefing's rerank no longer
+                    # needs 2 more round-trips (2 full folds) per hit.
+                    "importance": importance,
                 }
             )
         return results
@@ -831,30 +1098,39 @@ class NativeMemoryStore:
         then orders by each cell's OWN defining ``CellWriteEvent`` position in
         the log (SeqPos) -- the fold does not carry position, so this walks
         ``kernel.all_events()`` once to build a ``ref -> first SeqPos`` map.
+
+        perf/startup-latency: runs over one fold snapshot (memoized refs, the
+        payload join, per-subject lens slices) instead of a scope fold + a
+        full-log walk + a ``regenerate`` and a ``graph_neighbors`` fold per
+        entry. Same membership, same ordering, same bytes.
         """
         from amplifier_data.lenses._scope import fold_scope
         from amplifier_data.models import CellWriteEvent
 
         s = self.store
-        scope_ref = self._scope_ref("agent", agent_name)
-        member_refs = fold_scope(s.kernel).cells_in_scope(scope_ref)  # type: ignore[attr-defined]
+        scope_ref = self._read_scope_ref("agent", agent_name)
+        fold = self._fold_snapshot()
+        member_refs = fold_scope(fold if fold is not None else s.kernel).cells_in_scope(scope_ref)  # type: ignore[attr-defined]
 
         order: dict[Any, int] = {}
-        for pos, ev in s.kernel.all_events():  # type: ignore[attr-defined]
-            if isinstance(ev, CellWriteEvent):
-                ref = ev.cell_ref()
-                if ref in member_refs and ref not in order:
+        if fold is not None:
+            for (pos, _ev), ref in zip(fold.all_events(), fold.refs):
+                if ref is not None and ref in member_refs and ref not in order:
                     order[ref] = pos
+        else:
+            for pos, ev in s.kernel.all_events():  # type: ignore[attr-defined]
+                if isinstance(ev, CellWriteEvent):
+                    ref = ev.cell_ref()
+                    if ref in member_refs and ref not in order:
+                        order[ref] = pos
 
         ordered_refs = sorted(member_refs, key=lambda r: order.get(r, 0))
         tail = ordered_refs[-max(0, last_n) :] if last_n > 0 else []
 
         entries: list[dict[str, Any]] = []
         for ref in tail:
-            entry_text = s.regenerate(ref, record_access=False).payload.decode(  # type: ignore[attr-defined]
-                "utf-8", errors="replace"
-            )
-            _, topic = self._resolve_wing_room(ref)
+            entry_text = self._payload_text(ref, fold)
+            _, topic = self._resolve_wing_room(ref, fold)
             entries.append(
                 {
                     "ref": ref,
