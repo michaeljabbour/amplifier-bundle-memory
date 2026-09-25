@@ -30,6 +30,12 @@
   (reused <= 5 s, only while nothing was appended). On a 178 MB / 403k-event
   store: warm search 3.3 s -> ~1.0 s, `read_diary` 1.4 s -> 0.4 s, degraded
   (embedder-cold) search from >15 s (client timeout) to ~0.5-1.2 s.
+- **A dev checkout or older client no longer shuts down the live daemon.**
+  `ensure_daemon()`'s version-mismatch path retired ANY healthy daemon whose
+  version differed from the client's -- including clients with no package
+  metadata (`0.0.0-dev`: source checkouts, test venvs) -- and then usually
+  failed to spawn a replacement from its own environment, leaving memory
+  down for every session. It now retires only a strictly older daemon.
 - **`hooks-memory-interject` honors `max_inject_chars`.** Once the first
   snippet was truncated to the cap, a negative slice bound kept almost the
   whole next memory (a 7,067-char injection was measured under the 800-char

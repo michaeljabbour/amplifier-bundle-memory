@@ -197,6 +197,37 @@ def _health(url: str, *, timeout: float) -> dict[str, Any] | None:
         return None
 
 
+_DEV_VERSION = "0.0.0-dev"
+
+
+def _numeric_version(v: str) -> tuple[int, ...] | None:
+    """Leading dotted-integer part of *v* (``"2.0.1"`` -> ``(2, 0, 1)``,
+    ``"0.0.0-OLD"`` -> ``(0, 0, 0)``); ``None`` when there is none."""
+    import re
+
+    m = re.match(r"^(\d+(?:\.\d+)*)", v.strip())
+    return tuple(int(x) for x in m.group(1).split(".")) if m else None
+
+
+def _should_retire(theirs: str, mine: str) -> bool:
+    """Retire a healthy daemon only when it is strictly OLDER than this client.
+
+    The upgrade path (\u00a75.2 step 1c) exists so a newly installed client
+    replaces a stale daemon. It must not fire the other way round: a client
+    with no package metadata (``daemon_version()``'s ``0.0.0-dev`` sentinel --
+    a source checkout, a test venv) or an older client used to shut down the
+    user's live daemon on first contact, and then usually failed to spawn a
+    replacement from its own environment, leaving memory down for every
+    session. Unknown/unparsable versions also keep the running daemon.
+    """
+    if mine == _DEV_VERSION:
+        return False
+    t, m = _numeric_version(theirs), _numeric_version(mine)
+    if t is None or m is None:
+        return False
+    return t < m
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -224,7 +255,9 @@ def _discover(home: Path, *, allow_recover: bool = True) -> MemoryClient | None:
     hc = _health(url, timeout=1.0)
 
     if hc is not None:
-        if hc.get("version") == daemon_version():
+        mine = daemon_version()
+        theirs = hc.get("version")
+        if theirs == mine or not _should_retire(str(theirs or ""), mine):
             return _client_from_info(info)
         # Version mismatch (\u00a75.2 step 1c, the upgrade path): ask the old
         # daemon to shut down, wait up to 5s, then fall through to spawn.
