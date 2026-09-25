@@ -195,6 +195,59 @@ def _dispatch_generic(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Rust kernel access serialization
+# ---------------------------------------------------------------------------
+
+
+class _SerializedFileKernel:
+    """Proxy that serializes every call into a ``RustFileKernel``.
+
+    The PyO3 ``RustFileKernel`` is not re-entrant across threads: an
+    ``append`` that lands while another thread is inside ``all_events`` (or
+    vice versa) fails with ``RuntimeError: Already borrowed``.
+    ``DurableKernel`` only locks its own ``append_batch``; ``all_events`` and
+    ``resolve`` call the Rust kernel unlocked. The daemon serves requests on
+    a ThreadingHTTPServer, and its read tools append too (scope/anchor cells),
+    so any two overlapping requests could race -- live event logs show
+    ~1.4k briefing lookups failing with HTTP 400 this way. Serializing on the
+    kernel's OWN re-entrant lock (the one ``append_batch`` already holds)
+    makes every Rust call mutually exclusive without changing results; only
+    the Rust-side read is serialized, the Python-side lens folds still run
+    per request.
+    """
+
+    def __init__(self, inner: Any, lock: Any) -> None:
+        self._inner = inner
+        self._lock = lock
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+        lock = self._lock
+
+        def _locked(*args: Any, **kwargs: Any) -> Any:
+            with lock:
+                return attr(*args, **kwargs)
+
+        return _locked
+
+
+def _serialize_kernel_access(store: Any) -> None:
+    """Wrap *store*'s durable Rust kernel in :class:`_SerializedFileKernel`.
+
+    No-op for in-memory kernels (pure Python, no borrow checking), remote
+    stores, and anything already wrapped. Idempotent.
+    """
+    kernel = getattr(store, "kernel", None)
+    inner = getattr(kernel, "_fk", None)
+    lock = getattr(kernel, "_lock", None)
+    if inner is None or lock is None or isinstance(inner, _SerializedFileKernel):
+        return
+    kernel._fk = _SerializedFileKernel(inner, lock)
+
+
 def make_gateway(
     store: Any,
     host: str,
@@ -205,6 +258,7 @@ def make_gateway(
 ) -> ThreadingHTTPServer:
     """Build (but do not start) an authenticated MCP gateway over ``store``."""
 
+    _serialize_kernel_access(store)
     lock = threading.Lock()
 
     def _dispatch(tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -579,6 +633,7 @@ def make_daemon(
     uses it to close the store; ``daemon.json`` removal is the caller's job
     (it happens once ``serve_forever()`` returns).
     """
+    _serialize_kernel_access(store)
     lock = threading.Lock()
     mem_store = NativeMemoryStore(store=store)
     if embedder is not None:
