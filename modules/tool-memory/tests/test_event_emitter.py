@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -401,3 +402,17 @@ class TestReadEvents:
         monkeypatch.setattr(ee, "_memory_home", lambda: tmp_path / "memory-home-empty")
         events = read_events(session_id="any_session")
         assert events == []
+
+
+def test_suite_never_writes_the_real_events_dir(tmp_path: Path) -> None:
+    """conftest's autouse ``_hermetic_memory_home`` redirects the DEFAULT
+    home, which ``emit_event`` always uses (``client.ensure_daemon`` emits
+    ``daemon_spawned`` there even for an explicit tmp home)."""
+    from amplifier_module_tool_memory.daemon import default_memory_home
+
+    real = Path.home() / ".amplifier" / "memory"
+    assert default_memory_home() == tmp_path / "memory-home"
+    assert ee._memory_home() != real
+    ee.emit_event("test-hook", "probe", session_id="hermetic-probe")
+    assert (tmp_path / "memory-home" / "events" / "hermetic-probe.jsonl").exists()
+    assert not (real / "events" / "hermetic-probe.jsonl").exists()
