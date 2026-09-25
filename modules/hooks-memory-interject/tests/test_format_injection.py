@@ -38,3 +38,17 @@ def test_second_memory_truncated_when_room_remains() -> None:
     )
     assert "x" * 100 in out and out.endswith("…")
     assert len(out) <= 800 + 16
+
+
+def test_cap_is_exact_including_separators() -> None:
+    """Review optional 7: separators/join newlines count against the cap."""
+    import random
+
+    rng = random.Random(7)
+    for cap in (100, 300, 800, 2000):
+        for _ in range(300):
+            mems = [
+                _mem("m" * rng.randint(1, 3000)) for _ in range(rng.randint(1, 6))
+            ]
+            out = interject._format_injection(mems, HookRegistry.PROMPT_SUBMIT, cap)
+            assert len(out) <= cap, (cap, len(out))

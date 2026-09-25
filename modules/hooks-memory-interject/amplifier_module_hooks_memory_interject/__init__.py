@@ -266,21 +266,25 @@ def _format_injection(
     else:  # orchestrator:complete
         header = "⚠️ Memory check — this may be relevant to your current reasoning:"
 
+    # Each snippet costs its text plus the "\n---\n" separator plus the
+    # newline "\n".join() puts before it; count all of it so the cap is exact.
+    overhead = len("\n") + len("\n---\n")
     parts = [header]
     total = len(header)
     for mem in memories:
         snippet = mem["text"].strip()
-        if total + len(snippet) > max_chars:
-            # Room left for this snippet. It can be <= 0 once an earlier
-            # snippet was already truncated to the cap -- slicing with that
-            # negative bound used to keep almost the WHOLE snippet (e.g. a
-            # ~6k-char second memory in an "800-char" injection).
-            room = max_chars - total - 10
+        if total + overhead + len(snippet) > max_chars:
+            # Room left for this snippet (minus the ellipsis). It can be <= 0
+            # once an earlier snippet was already truncated to the cap --
+            # slicing with that negative bound used to keep almost the WHOLE
+            # snippet (e.g. a ~6k-char second memory in an "800-char"
+            # injection).
+            room = max_chars - total - overhead - len("…")
             if room <= 0:
                 break
             snippet = snippet[:room] + "…"
         parts.append(f"\n---\n{snippet}")
-        total += len(snippet)
+        total += overhead + len(snippet)
         if total >= max_chars:
             break
 
