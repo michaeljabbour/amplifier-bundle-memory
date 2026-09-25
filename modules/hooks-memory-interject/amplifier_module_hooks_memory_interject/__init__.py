@@ -271,7 +271,14 @@ def _format_injection(
     for mem in memories:
         snippet = mem["text"].strip()
         if total + len(snippet) > max_chars:
-            snippet = snippet[: max_chars - total - 10] + "…"
+            # Room left for this snippet. It can be <= 0 once an earlier
+            # snippet was already truncated to the cap -- slicing with that
+            # negative bound used to keep almost the WHOLE snippet (e.g. a
+            # ~6k-char second memory in an "800-char" injection).
+            room = max_chars - total - 10
+            if room <= 0:
+                break
+            snippet = snippet[:room] + "…"
         parts.append(f"\n---\n{snippet}")
         total += len(snippet)
         if total >= max_chars:
@@ -905,7 +912,7 @@ async def mount(
 
     return {
         "name": "hooks-memory-interject",
-        "version": "2.0.1",
+        "version": "2.0.2",
         "description": (
             "OR-firing memory interjection hook: surfaces relevant memories "
             "on prompt:submit and orchestrator:complete (tool:pre is opt-in)"
