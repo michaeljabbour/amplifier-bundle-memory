@@ -534,3 +534,72 @@ class TestVersionMismatchRespawn:
             if client is not None:
                 client.shutdown()
             _wait_for_daemon_json_gone(home)
+
+
+class TestRetireOnlyOlderDaemons:
+    """A healthy daemon is retired only by a strictly NEWER client -- never
+    by a dev checkout / test venv (``0.0.0-dev``) or an older client, which
+    used to shut down the user's live daemon and fail to replace it."""
+
+    @pytest.mark.parametrize(
+        ("theirs", "mine", "retire"),
+        [
+            ("0.0.0-OLD", "2.0.2", True),
+            ("2.0.1", "2.0.2", True),
+            ("2.0.2", "2.0.1", False),  # daemon newer than this client
+            ("2.0.1", "0.0.0-dev", False),  # client has no package metadata
+            ("garbage", "2.0.2", False),
+            ("2.0.1", "garbage", False),
+            ("2.0.2", "2.0.2rc1", False),
+        ],
+    )
+    def test_should_retire(self, theirs: str, mine: str, retire: bool) -> None:
+        assert client_mod._should_retire(theirs, mine) is retire  # noqa: SLF001
+
+    def test_dev_client_reuses_running_daemon(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("amplifier_data")
+        import threading
+
+        from amplifier_data import AmplifierStore
+
+        from amplifier_module_tool_memory.daemon import make_daemon
+
+        home = _home(tmp_path)
+        httpd = make_daemon(
+            AmplifierStore(record_access=False),
+            None,
+            "127.0.0.1",
+            0,
+            token="tok",
+            version="2.0.1",
+            durable=False,
+        )
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+        home.mkdir(exist_ok=True)
+        (home / "token").write_text("tok", encoding="utf-8")
+        (home / "daemon.json").write_text(
+            json.dumps(
+                {
+                    "url": f"http://127.0.0.1:{port}",
+                    "port": port,
+                    "pid": os.getpid(),
+                    "version": "2.0.1",
+                    "token_file": str(home / "token"),
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(client_mod, "daemon_version", lambda: "0.0.0-dev")
+        spawned: list[Path] = []
+        monkeypatch.setattr(client_mod, "_spawn_daemon_process", spawned.append)
+        try:
+            client = ensure_daemon(home)
+            assert client is not None and client.base_url.endswith(f":{port}")
+            assert spawned == []
+            assert client_mod._health(f"http://127.0.0.1:{port}", timeout=1.0)  # noqa: SLF001
+        finally:
+            httpd.shutdown()
+            httpd.server_close()

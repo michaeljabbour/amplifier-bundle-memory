@@ -1,5 +1,72 @@
 # Changelog
 
+## [2.0.2] — 2026-09-24
+
+### Changed (behavior -- read before upgrading)
+
+- **The wake-up briefing now reaches the model, which costs tokens.** Before
+  2.0.2 the briefing was built at `session:start`, whose result amplifier-core
+  discards, so nothing was ever delivered. `hooks-memory-briefing` 2.1.0
+  prefetches it in the background from `mount()` and injects it at the first
+  `prompt:submit` (waiting at most `deliver_wait_s`, 2 s; if still running it
+  lands non-blocking at the next `provider:request`/`prompt:submit`). That
+  adds roughly 300-1,500 tokens (`token_budget: 1500`) on turn one.
+- **The briefing is NOT turn-one-only under the default orchestrator.** It is
+  injected with `ephemeral=True`, but `loop-streaming`'s default
+  `ephemeral_injection_mode: persist` stores it as a user message that
+  `context-simple` protects from compaction, so it rides along (cached, but
+  counted against the context window) on every later request of the session.
+  The briefing footer, which used to claim it "will not appear in
+  conversation history", no longer makes any claim about history.
+- **Sub-agent sessions get no briefing by default.** Sessions whose
+  `session:start` carries a `parent_id` are skipped unless
+  `brief_subsessions: true`. (Before 2.0.2 they got nothing either -- nothing
+  was delivered at all -- but the intended behavior changed.)
+- **Memory sections can be up to 5 minutes old.** The prefetched search / KG /
+  diary sections are reused per process for `cache_ttl_s` (300 s), so a second
+  session in the same process within that window gets the first session's
+  memory sections and misses writes made in between. Coordination files
+  (HANDOFF.md etc.) are still re-read at delivery. Results where any lookup
+  failed are never reused.
+- **Upgrading retires a running 2.0.1 daemon automatically.** The first 2.0.2
+  client to contact an older (numerically lower) daemon shuts it down and
+  spawns a 2.0.2 one. Dev/unversioned clients (`0.0.0-dev`) and newer clients
+  never retire a daemon (see Fixed).
+
+### Fixed
+
+- **The session-start briefing no longer blocks the first turn.** Its daemon
+  round-trips (search, KG, diary, plus two per search hit for importance)
+  held up the first prompt: 7.8-9.2 s with a warm daemon on a 178 MB store,
+  30 s+ with a cold one. They now run off the critical path, concurrently, on
+  daemon threads (an unfinished prefetch no longer holds process exit).
+- **Concurrent daemon requests no longer fail with HTTP 400.** The durable
+  Rust kernel raises `Already borrowed` when an append overlaps a read on
+  another thread; the daemon now serializes kernel calls on the kernel's own
+  lock (and logs a warning if a future amplifier-data makes that impossible).
+  Live event logs showed ~1.4k briefing lookups lost this way.
+- **Faster daemon reads, same results.** Search hits now carry `importance`
+  (so the briefing drops 16 extra round-trips); per-event cell refs are
+  memoized incrementally; per-hit lens reads and the vector index run over
+  exact log slices; `read_diary`, `query_kg` and standalone `list_drawers`
+  use the one-fold snapshot; and read paths stop appending duplicate
+  scope/anchor cells to the log; a burst of reads shares one log snapshot
+  (reused <= 5 s, only while nothing was appended; at most one snapshot is
+  retained, so daemon memory stays at the 2.0.1 level). On a 178 MB /
+  403k-event store: warm search 3.0 s -> ~1.0 s (the first search after
+  daemon start is ~1.8 s), `read_diary` 1.3 s -> 0.4 s, `list_drawers` 38 s
+  -> 0.4 s, degraded (embedder-cold) search from minutes to ~0.4 s.
+- **A dev checkout or older client no longer shuts down the live daemon.**
+  `ensure_daemon()`'s version-mismatch path retired ANY healthy daemon whose
+  version differed from the client's -- including clients with no package
+  metadata (`0.0.0-dev`: source checkouts, test venvs) -- and then usually
+  failed to spawn a replacement from its own environment, leaving memory
+  down for every session. It now retires only a strictly older daemon.
+- **`hooks-memory-interject` honors `max_inject_chars`.** Once the first
+  snippet was truncated to the cap, a negative slice bound kept almost the
+  whole next memory (a 7,067-char injection was measured under the 800-char
+  default). Separators now count too, so the cap is exact.
+
 ## [2.0.1] — 2026-08-24
 
 ### Fixed

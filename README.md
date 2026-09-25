@@ -54,8 +54,9 @@ Released 2026-04-17.
 
 ```
 session:start
-  ├── hooks-memory-briefing  →  ephemeral briefing (memory search + KG + diary + HANDOFF.md)
-  │                                 with importance re-ranking (kill switch: briefing_importance_weight=0.0)
+  ├── hooks-memory-briefing  →  arms the wake-up briefing (memory search + KG + diary + HANDOFF.md),
+  │                                 prefetched since mount, delivered at the first prompt:submit;
+  │                                 importance re-ranking (kill switch: briefing_importance_weight=0.0)
   └── hooks-project-context      →  inject Tier 1 coordination files; scaffold if missing
 
 during work
@@ -95,7 +96,7 @@ on-demand
 
 | Module | Type | Description |
 |---|---|---|
-| `hooks-memory-briefing` | hook | Session-start briefing from memory + KG + diary + coordination files. Importance re-ranking (weight=1.0 default, 0.0 disables). Emits `briefing_assembled` / `briefing_skipped`. |
+| `hooks-memory-briefing` | hook | Wake-up briefing from memory + KG + diary + coordination files, prefetched at mount and delivered at the first `prompt:submit` (2.1.0+: ~300-1,500 tokens; kept in history under loop-streaming's default `persist` mode; sub-agent sessions skipped by default; memory sections reused per process up to 5 min -- see the [2.0.2 CHANGELOG](CHANGELOG.md)). Importance re-ranking (weight=1.0 default, 0.0 disables). Emits `briefing_assembled` / `briefing_skipped`. |
 | `hooks-memory-capture` | hook | Verbatim memory capture on tool:post with category detection. Emits `drawer_filed` / `capture_skipped`. |
 | `hooks-memory-interject` | hook | Mid-session memory surfacing (cosine >= 0.72, LLM-judged in uncertain band). Emits `memory_surfaced` / `interject_skipped`. |
 | `hooks-project-context` | hook | Reads Tier 1 coordination files at session:start; delegates HANDOFF update at session:end. Emits `coordination_read` / `coordination_scaffolded` / `curator_delegated`. |
