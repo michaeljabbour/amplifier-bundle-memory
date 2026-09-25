@@ -27,6 +27,7 @@ from __future__ import annotations
 import struct
 import threading
 import time
+import weakref
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
@@ -393,6 +394,7 @@ class NativeMemoryStore:
         self._snapshot: tuple[int, float, _SearchFold] | None = None
         self._building: tuple[int, threading.Event] | None = None
         self._snapshot_lock = threading.Lock()
+        self._expiry_timer: threading.Timer | None = None
         self.filed: list[dict[str, object]] = []
         # T1-MEM-2: ledger of plasticity mutations applied through this seam.
         self.mutations: list[MutationRecord] = []
@@ -784,15 +786,17 @@ class NativeMemoryStore:
         try:
             fold = _SearchFold(kernel, self._ref_cache)
             with self._snapshot_lock:
-                self._snapshot = (generation, now, fold)
+                # Only publish a snapshot that is still current: one built
+                # across an append could never be reused, so caching it would
+                # only pin its materialized log until expiry.
+                if generation == self._generation:
+                    self._snapshot = (generation, now, fold)
         finally:
             with self._snapshot_lock:
                 if self._building is not None and self._building[1] is done:
                     self._building = None
             done.set()
-        timer = threading.Timer(self.SNAPSHOT_REUSE_S, self._expire_snapshot, (fold,))
-        timer.daemon = True
-        timer.start()
+        self._arm_expiry()
         return fold
 
     #: How long a snapshot may serve further reads (absent any append).
@@ -806,8 +810,18 @@ class NativeMemoryStore:
             if not callable(subscribe):
                 self._observing = False
             else:
+                # The kernel (a Rust object the cycle collector cannot
+                # traverse) must not keep this store -- and its snapshot --
+                # alive: subscribe through a weakref.
+                store_ref = weakref.ref(self)
+
+                def _observer(pos: Any, event: Any) -> None:
+                    store = store_ref()
+                    if store is not None:
+                        store._on_append(pos, event)
+
                 try:
-                    subscribe(self._on_append)
+                    subscribe(_observer)
                     self._observing = True
                 except Exception:
                     self._observing = False
@@ -818,10 +832,47 @@ class NativeMemoryStore:
             self._generation += 1
             self._snapshot = None
 
-    def _expire_snapshot(self, fold: _SearchFold) -> None:
+    def _arm_expiry(self, delay: float | None = None) -> None:
+        """Ensure ONE idle-expiry timer is pending for the snapshot slot.
+
+        Retention is bounded by construction: the only strong reference to a
+        fold kept by this store is ``self._snapshot`` (at most one fold).
+        The timer holds neither a fold nor the store -- only a weakref to
+        the store -- and at most one timer is pending per store, so a busy
+        daemon interleaving writes and reads never accumulates folds (each
+        ~hundreds of MB on a real store) or timer threads.
+        """
         with self._snapshot_lock:
-            if self._snapshot is not None and self._snapshot[2] is fold:
+            if self._expiry_timer is not None:
+                return
+            timer = threading.Timer(
+                self.SNAPSHOT_REUSE_S if delay is None else delay,
+                NativeMemoryStore._expire_snapshot_ref,
+                (weakref.ref(self),),
+            )
+            timer.daemon = True
+            self._expiry_timer = timer
+        timer.start()
+
+    @staticmethod
+    def _expire_snapshot_ref(store_ref: weakref.ref[NativeMemoryStore]) -> None:
+        store = store_ref()
+        if store is not None:
+            store._expire_snapshot()
+
+    def _expire_snapshot(self) -> None:
+        """Drop the snapshot once it is older than ``SNAPSHOT_REUSE_S``;
+        re-arm (still a single timer) while a younger one is in the slot."""
+        with self._snapshot_lock:
+            self._expiry_timer = None
+            snap = self._snapshot
+            if snap is None:
+                return
+            age = time.monotonic() - snap[1]
+            if age >= self.SNAPSHOT_REUSE_S:
                 self._snapshot = None
+                return
+        self._arm_expiry(max(self.SNAPSHOT_REUSE_S - age, 0.0))
 
     def _payload_text(self, ref: Any, fold: _SearchFold | None) -> str:
         """Decode ``ref``'s payload, preferring the one-fold snapshot.
