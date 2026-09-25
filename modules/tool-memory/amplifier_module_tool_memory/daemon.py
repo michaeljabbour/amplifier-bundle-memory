@@ -25,6 +25,7 @@ import argparse
 import base64
 import hmac
 import json
+import logging
 import os
 import secrets
 import signal
@@ -243,7 +244,19 @@ def _serialize_kernel_access(store: Any) -> None:
     kernel = getattr(store, "kernel", None)
     inner = getattr(kernel, "_fk", None)
     lock = getattr(kernel, "_lock", None)
-    if inner is None or lock is None or isinstance(inner, _SerializedFileKernel):
+    if inner is None or lock is None:
+        if type(kernel).__name__ == "DurableKernel":
+            # The fix relies on amplifier-data private attributes; if a
+            # future release renames them, say so instead of silently
+            # serving concurrent requests unserialized.
+            logging.getLogger(__name__).warning(
+                "memory daemon: durable kernel %r lacks _fk/_lock; concurrent "
+                "requests are NOT serialized (overlapping reads/appends may "
+                "fail with 'Already borrowed')",
+                type(kernel),
+            )
+        return
+    if isinstance(inner, _SerializedFileKernel):
         return
     kernel._fk = _SerializedFileKernel(inner, lock)
 

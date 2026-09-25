@@ -89,3 +89,20 @@ def test_serialize_is_idempotent_and_noop_for_memory_kernel(tmp_path) -> None:  
     mem = AmplifierStore(record_access=False)  # in-memory kernel: no _fk
     _serialize_kernel_access(mem)  # must not raise
     mem.write_cell(b"x")
+
+
+def test_warns_when_durable_kernel_cannot_be_wrapped(caplog) -> None:  # noqa: ANN001
+    """Review optional 6: a renamed private attribute must not fail silently."""
+    import logging
+    import types
+
+    DurableKernel = type("DurableKernel", (), {})  # noqa: N806 - mimics the class name
+    store = types.SimpleNamespace(kernel=DurableKernel())
+    with caplog.at_level(logging.WARNING):
+        _serialize_kernel_access(store)
+    assert "NOT serialized" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        _serialize_kernel_access(AmplifierStore(record_access=False))
+    assert caplog.text == ""
