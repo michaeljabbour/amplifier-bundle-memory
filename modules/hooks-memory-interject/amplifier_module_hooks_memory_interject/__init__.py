@@ -419,9 +419,45 @@ class MemoryInterjectHook:
 
     # ── Event handlers ────────────────────────────────────────────────────────
 
+    async def _skip_for_subsession(self, sid: Any, trigger: str) -> HookResult:
+        """Sub-agent/child sessions never search memory here.
+
+        This hook fires on prompt:submit, tool:pre, and orchestrator:complete
+        for EVERY session, including sub-agent sessions spawned via
+        ``delegate()`` -- each one paid a full ``ensure_daemon()`` +
+        ``MemoryClient.search()`` round trip (bounded by
+        ``retrieval_timeout_s``) before this fix. Measured 2026-09-25: a
+        heavy user racked up 2,156 child sessions in 30 days, each one
+        paying that cost for a memory injection that is rarely useful in a
+        short-lived delegated task. The coordinator stamps ``parent_id``
+        onto every emitted event via ``set_default_fields``
+        (amplifier_core.session.AmplifierSession), so it's present here
+        exactly as it is on ``session:start`` -- mirrors
+        hooks-memory-briefing's existing ``parent_id``-based sub-session
+        skip for that event.
+        """
+        if self.emit_events:
+            emit_event(
+                "memory-interject",
+                "interject_skipped",
+                ok=False,
+                data={"trigger": trigger, "reason": "sub_session"},
+                session_id=sid,
+            )
+            try:
+                await self._bridge_emit(
+                    "memory:interject_skipped",
+                    {"ok": False, "trigger": trigger, "reason": "sub_session"},
+                )
+            except Exception:
+                pass
+        return HookResult(action="continue")
+
     async def on_prompt_submit(self, event: str, data: dict[str, Any]) -> HookResult:
         """Fire on prompt:submit — inject before the LLM sees the user's prompt."""
         sid = data.get("session_id")
+        if data.get("parent_id") is not None:
+            return await self._skip_for_subsession(sid, "prompt_submit")
 
         if not self.prompt_enabled:
             if self.emit_events:
@@ -539,6 +575,8 @@ class MemoryInterjectHook:
     async def on_tool_pre(self, event: str, data: dict[str, Any]) -> HookResult:
         """Fire on tool:pre — surface prior results for the same tool+input."""
         sid = data.get("session_id")
+        if data.get("parent_id") is not None:
+            return await self._skip_for_subsession(sid, "tool_pre")
 
         if not self.tool_pre_enabled:
             if self.emit_events:
@@ -660,6 +698,8 @@ class MemoryInterjectHook:
         """
         self._turn += 1
         sid = data.get("session_id")
+        if data.get("parent_id") is not None:
+            return await self._skip_for_subsession(sid, "orchestrator_complete")
 
         if not self.orc_enabled:
             if self.emit_events:
@@ -916,7 +956,7 @@ async def mount(
 
     return {
         "name": "hooks-memory-interject",
-        "version": "2.0.2",
+        "version": "2.0.3",
         "description": (
             "OR-firing memory interjection hook: surfaces relevant memories "
             "on prompt:submit and orchestrator:complete (tool:pre is opt-in)"

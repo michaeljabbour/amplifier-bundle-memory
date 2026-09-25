@@ -603,3 +603,177 @@ class TestRetireOnlyOlderDaemons:
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+class TestStaleCodeSameVersionRespawn:
+    """§5.2 step 1c-bis: a daemon reporting the SAME version string as the
+    client, but whose loaded code is demonstrably older (a reinstalled
+    package with no version bump -- the exact incident measured 2026-09-25,
+    both processes reporting ``2.0.2``), still gets retired and replaced.
+    """
+
+    @pytest.mark.parametrize(
+        ("hc", "info", "mine_fp", "expected"),
+        [
+            # Daemon reports a fingerprint older than ours -> retire.
+            ({"code_fingerprint": 100.0}, {}, 200.0, True),
+            # Daemon reports a fingerprint newer than (or equal to) ours -> keep.
+            ({"code_fingerprint": 300.0}, {}, 200.0, False),
+            ({"code_fingerprint": 200.0}, {}, 200.0, False),
+            # No code_fingerprint field (pre-fix daemon): fall back to
+            # started_at vs our fingerprint. Daemon started BEFORE the
+            # newest local .py file was touched -> its code predates ours.
+            ({}, {"started_at": "2020-01-01T00:00:00+00:00"}, 2000000000.0, True),
+            # Daemon started AFTER our newest file mtime -> its code is not
+            # provably stale; keep it.
+            ({}, {"started_at": "2099-01-01T00:00:00+00:00"}, 200.0, False),
+            # Missing started_at and no code_fingerprint -> fail closed (keep).
+            ({}, {}, 200.0, False),
+            # Unparsable started_at -> fail closed (keep).
+            ({}, {"started_at": "not-a-date"}, 2000000000.0, False),
+        ],
+    )
+    def test_should_retire_stale_code(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        hc: dict,
+        info: dict,
+        mine_fp: float,
+        expected: bool,
+    ) -> None:
+        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: mine_fp)
+        assert client_mod._should_retire_stale_code(hc, info) is expected  # noqa: SLF001
+
+    def test_zero_local_fingerprint_never_retires(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A client that can't compute its own fingerprint (scan failure)
+        must never use that as grounds to kill a live daemon."""
+        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: 0.0)
+        assert (
+            client_mod._should_retire_stale_code(  # noqa: SLF001
+                {"code_fingerprint": 1.0}, {"started_at": "2020-01-01T00:00:00+00:00"}
+            )
+            is False
+        )
+
+    def test_stale_code_same_version_shuts_down_old_and_spawns_new(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Integration: SAME version string, older code_fingerprint on
+        /health -> old daemon is retired and a new one spawned."""
+        pytest.importorskip("amplifier_data")
+        import threading
+
+        from amplifier_data import AmplifierStore
+
+        from amplifier_module_tool_memory.daemon import make_daemon
+
+        home = _home(tmp_path)
+        store = AmplifierStore(record_access=False)
+        httpd = make_daemon(
+            store,
+            None,
+            "127.0.0.1",
+            0,
+            token="tok",
+            version="2.0.2",
+            code_fp=100.0,  # deliberately "old" code
+            durable=False,
+        )
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+
+        home.mkdir(exist_ok=True)
+        (home / "token").write_text("tok", encoding="utf-8")
+        (home / "daemon.json").write_text(
+            json.dumps(
+                {
+                    "url": f"http://127.0.0.1:{port}",
+                    "port": port,
+                    "pid": os.getpid(),  # a real, alive pid (this test process)
+                    "version": "2.0.2",
+                    "token_file": str(home / "token"),
+                    "started_at": "2020-01-01T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(client_mod, "daemon_version", lambda: "2.0.2")
+        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: 200.0)
+        monkeypatch.setattr(
+            client_mod, "_spawn_daemon_process", lambda h: _spawn_daemon_ephemeral(h)
+        )
+
+        client = ensure_daemon(home)
+        try:
+            assert client is not None
+            new_info = json.loads((home / "daemon.json").read_text(encoding="utf-8"))
+            assert new_info["port"] != port  # a genuinely new daemon, not the old one
+            deadline = time.monotonic() + 5.0
+            stopped = False
+            while time.monotonic() < deadline:
+                hc = client_mod._health(f"http://127.0.0.1:{port}", timeout=0.5)  # noqa: SLF001
+                if hc is None:
+                    stopped = True
+                    break
+                time.sleep(0.2)
+            assert stopped
+        finally:
+            if client is not None:
+                client.shutdown()
+            _wait_for_daemon_json_gone(home)
+
+    def test_same_version_fresh_code_reuses_running_daemon(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Integration: SAME version, fresh (newer-or-equal) code_fingerprint
+        -> the running daemon is reused, nothing is spawned."""
+        pytest.importorskip("amplifier_data")
+        import threading
+
+        from amplifier_data import AmplifierStore
+
+        from amplifier_module_tool_memory.daemon import make_daemon
+
+        home = _home(tmp_path)
+        httpd = make_daemon(
+            AmplifierStore(record_access=False),
+            None,
+            "127.0.0.1",
+            0,
+            token="tok",
+            version="2.0.2",
+            code_fp=200.0,
+            durable=False,
+        )
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+        home.mkdir(exist_ok=True)
+        (home / "token").write_text("tok", encoding="utf-8")
+        (home / "daemon.json").write_text(
+            json.dumps(
+                {
+                    "url": f"http://127.0.0.1:{port}",
+                    "port": port,
+                    "pid": os.getpid(),
+                    "version": "2.0.2",
+                    "token_file": str(home / "token"),
+                    "started_at": "2020-01-01T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(client_mod, "daemon_version", lambda: "2.0.2")
+        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: 200.0)
+        spawned: list[Path] = []
+        monkeypatch.setattr(client_mod, "_spawn_daemon_process", spawned.append)
+        try:
+            client = ensure_daemon(home)
+            assert client is not None and client.base_url.endswith(f":{port}")
+            assert spawned == []
+            assert client_mod._health(f"http://127.0.0.1:{port}", timeout=1.0)  # noqa: SLF001
+        finally:
+            httpd.shutdown()
+            httpd.server_close()

@@ -24,6 +24,7 @@ from amplifier_module_tool_memory.embedder import (  # noqa: E402
     EmbedderUnavailable,
 )
 from amplifier_module_tool_memory.daemon import (  # noqa: E402
+    code_fingerprint,
     daemon_version,
     make_daemon,
 )
@@ -116,14 +117,64 @@ class TestHealthShape:
             assert hc["version"] == "9.9.9-test"
             assert hc["embedder"] == {"ready": True, "failed": None}
             assert hc["durable"] is False
+            # §5.2 step 1c-bis: the stale-code-same-version fix needs a
+            # fingerprint on every daemon's /health, not just ones that
+            # bumped their version string.
+            assert isinstance(hc["code_fingerprint"], (int, float))
         finally:
             next(gen, None)
+
+    def test_health_reports_explicit_code_fp_override(self) -> None:
+        """make_daemon's ``code_fp`` override (used by tests that simulate a
+        pre-fix or stale daemon) is what /health actually reports -- not a
+        freshly recomputed value."""
+        store = AmplifierStore(record_access=False)
+        httpd = make_daemon(
+            store,
+            None,
+            "127.0.0.1",
+            0,
+            token=_TOKEN,
+            version="9.9.9-test",
+            code_fp=123.0,
+            durable=False,
+        )
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+        try:
+            hc = _health(f"http://127.0.0.1:{port}")
+            assert hc["code_fingerprint"] == 123.0
+        finally:
+            httpd.shutdown()
 
     def test_daemon_version_helper_resolves_something(self) -> None:
         # Editable/dev installs may not have package metadata -- the fallback
         # sentinel is acceptable, but it must never raise.
         assert isinstance(daemon_version(), str)
         assert daemon_version() != ""
+
+    def test_code_fingerprint_is_max_mtime_of_py_files(self, tmp_path) -> None:  # noqa: ANN001
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        old = pkg / "old.py"
+        new = pkg / "new.py"
+        old.write_text("x = 1\n", encoding="utf-8")
+        new.write_text("y = 2\n", encoding="utf-8")
+        import os
+
+        older_time = old.stat().st_mtime - 100
+        os.utime(old, (older_time, older_time))
+        newer_time = new.stat().st_mtime + 100
+        os.utime(new, (newer_time, newer_time))
+        assert code_fingerprint(pkg) == newer_time
+
+    def test_code_fingerprint_empty_dir_is_zero(self, tmp_path) -> None:  # noqa: ANN001
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        assert code_fingerprint(empty) == 0.0
+
+    def test_code_fingerprint_missing_dir_never_raises(self, tmp_path) -> None:  # noqa: ANN001
+        assert code_fingerprint(tmp_path / "does-not-exist") == 0.0
 
 
 class TestDomainToolRoundTrips:
@@ -468,3 +519,80 @@ def _b64(text: str) -> str:
     import base64
 
     return base64.b64encode(text.encode("utf-8")).decode()
+
+
+class TestSearchFoldWarmup:
+    """§5.6 latency fix (measured 2026-09-25): make_daemon() must warm the
+    search fold snapshot in the background so the first REAL search doesn't
+    pay the ~4s materialize cost, and must never block daemon readiness to
+    do it.
+    """
+
+    def test_make_daemon_builds_fold_snapshot_in_background(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time as time_mod
+
+        import amplifier_module_tool_memory.daemon as daemon_mod
+
+        built = threading.Event()
+        orig_fold_snapshot = daemon_mod.NativeMemoryStore._fold_snapshot
+
+        def _spy(self: Any) -> Any:
+            result = orig_fold_snapshot(self)
+            built.set()
+            return result
+
+        monkeypatch.setattr(daemon_mod.NativeMemoryStore, "_fold_snapshot", _spy)
+
+        store = AmplifierStore(record_access=False)
+        start = time_mod.monotonic()
+        httpd = make_daemon(
+            store,
+            None,
+            "127.0.0.1",
+            0,
+            token=_TOKEN,
+            version="9.9.9-test",
+            durable=False,
+        )
+        elapsed = time_mod.monotonic() - start
+        try:
+            # Constructing the daemon must never block on the warm-up build
+            # -- it happens in a background thread.
+            assert elapsed < 2.0
+            assert built.wait(timeout=5.0), (
+                "fold snapshot was never built in the background"
+            )
+        finally:
+            httpd.server_close()
+
+    def test_warmup_is_race_safe_with_a_concurrent_real_search(self) -> None:
+        """A real search racing the warm-up thread must still succeed and
+        must never build two independent, un-cached snapshots (the
+        single-flight generation/lock bookkeeping in
+        NativeMemoryStore._fold_snapshot already covers this; this test
+        only confirms make_daemon's warm-up thread doesn't break it)."""
+        store = AmplifierStore(record_access=False)
+        embedder = _FakeEmbedder(ready=True)
+        url = next(gen := _serve(store, embedder))
+        try:
+            out = _call(
+                url,
+                "remember",
+                {
+                    "wing": "w",
+                    "room": "r",
+                    "content": "warmup race content",
+                    "source": "",
+                    "category": None,
+                    "importance": None,
+                },
+            )
+            assert out["ref"]
+            out = _call(
+                url, "search", {"query": "warmup race content", "k": 5, "wing": None, "room": None}
+            )
+            assert isinstance(out["results"], list)
+        finally:
+            next(gen, None)

@@ -1,5 +1,44 @@
 # Changelog
 
+## [2.0.3] — 2026-09-25
+
+### Fixed
+
+- **A stale daemon reporting the SAME version as the client no longer runs
+  forever.** `client._discover()` only ever compared version *strings*
+  (`_should_retire`); a reinstalled/editable `amplifier-module-tool-memory`
+  package with no version bump left a daemon loaded with pre-optimization
+  code running indefinitely even after the code that would have fixed it
+  landed on disk. Measured 2026-09-25: a daemon started *before* the
+  `_SearchFold`/`_CellRefCache` search optimizations were installed kept
+  serving 2.8-3.4 s searches for a full day because both processes reported
+  `2.0.2`. Every daemon now stamps a `code_fingerprint` (max `.py` mtime
+  across its own installed package) into `/health` and `daemon.json`;
+  `client._should_retire_stale_code()` retires and respawns a same-version
+  daemon whose fingerprint is older than the current client's, falling back
+  to comparing `daemon.json`'s `started_at` against the client's own
+  fingerprint for daemons that predate this field. Retirement still uses the
+  existing graceful `shutdown()`/`SIGTERM` path -- never `kill -9`.
+- **`hooks-memory-interject` no longer searches memory for sub-agent
+  (delegated) sessions.** Its `prompt:submit`/`tool:pre`/
+  `orchestrator:complete` handlers fire for every session, including every
+  `delegate()`-spawned child; a heavy user racked up 2,156 child sessions in
+  30 days, each paying a full `ensure_daemon()` + `MemoryClient.search()`
+  round trip. The coordinator stamps `parent_id` onto every emitted event
+  (`amplifier_core.session.AmplifierSession.coordinator.hooks.
+  set_default_fields`), so all three handlers now skip immediately -- no
+  daemon contact at all -- whenever `data.get("parent_id")` is not `None`,
+  mirroring `hooks-memory-briefing`'s existing `parent_id`-based
+  sub-session skip for `session:start`.
+- **The memory daemon warms its search fold in the background at startup.**
+  Building the first `_SearchFold` snapshot over a large durable log takes
+  several seconds (materializing the whole event log); `make_daemon()` now
+  starts that build in a daemon thread immediately, so the daemon becomes
+  healthy without waiting for it, and a real search racing the warm-up
+  thread is still correct (`NativeMemoryStore._fold_snapshot`'s own
+  single-flight generation/lock bookkeeping already covers concurrent
+  builders).
+
 ## [2.0.2] — 2026-09-24
 
 ### Changed (behavior -- read before upgrading)
