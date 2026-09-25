@@ -28,11 +28,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .daemon import (
     GatewayClient,
+    code_fingerprint,
     daemon_version,
     default_memory_home,
 )
@@ -228,6 +230,59 @@ def _should_retire(theirs: str, mine: str) -> bool:
     return t < m
 
 
+def _should_retire_stale_code(hc: dict[str, Any], info: dict[str, Any]) -> bool:
+    """Retire a daemon reporting the SAME version as this client when its
+    loaded code is nonetheless demonstrably older (§5.2 step 1c-bis).
+
+    ``_should_retire`` only compares version *strings* -- it never fires for
+    a reinstalled/editable package whose files changed without a version
+    bump (the exact scenario that left a stale pre-optimization daemon
+    running for a full day, measured 2026-09-25: both processes reported
+    ``2.0.2``). Two detection paths, in preference order:
+
+    * The daemon's ``/health`` reports ``code_fingerprint`` (current
+      daemons, written by :func:`amplifier_module_tool_memory.daemon.
+      code_fingerprint`): retire when it is strictly older than ours.
+    * It doesn't (a daemon started before this field existed): fall back to
+      comparing daemon.json's ``started_at`` timestamp against our own
+      fingerprint -- if the newest local ``.py`` file was touched AFTER the
+      daemon started, the on-disk package changed underneath it.
+
+    Fails closed toward keeping the running daemon on any missing or
+    unparsable data, mirroring ``_should_retire``'s own bias (never kill a
+    daemon on a guess).
+    """
+    mine_fp = code_fingerprint()
+    if mine_fp <= 0.0:
+        return False
+    theirs_fp = hc.get("code_fingerprint")
+    if isinstance(theirs_fp, (int, float)):
+        return theirs_fp < mine_fp
+    started_at = info.get("started_at")
+    if not started_at:
+        return False
+    try:
+        started_epoch = datetime.fromisoformat(str(started_at)).timestamp()
+    except ValueError:
+        return False
+    return started_epoch < mine_fp
+
+
+def _retire_and_wait(client: MemoryClient, url: str) -> None:
+    """Ask *client*'s daemon to shut down and wait (up to 5s) for its
+    ``/health`` to stop responding, shared by every §5.2 retirement path
+    (version-mismatch and same-version-stale-code) so both wait the same
+    way before the caller falls through to spawn a replacement.
+    """
+    with contextlib.suppress(Exception):
+        client.shutdown()
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if _health(url, timeout=0.5) is None:
+            break
+        time.sleep(0.2)
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -256,18 +311,25 @@ def _discover(home: Path, *, allow_recover: bool = True) -> MemoryClient | None:
 
     if hc is not None:
         mine = daemon_version()
-        theirs = hc.get("version")
-        if theirs == mine or not _should_retire(str(theirs or ""), mine):
+        theirs = str(hc.get("version") or "")
+        # \u00a75.2 step 1c (upgrade path): a different, older version string.
+        version_stale = theirs != mine and _should_retire(theirs, mine)
+        # \u00a75.2 step 1c-bis: SAME version string, but the daemon's loaded
+        # code is demonstrably older than what's installed now (a
+        # reinstalled/editable package with no version bump -- see
+        # _should_retire_stale_code's docstring for the incident this
+        # closes). Only checked when the version string didn't already
+        # decide the matter, so a genuinely newer daemon is never touched.
+        code_stale = (
+            not version_stale
+            and theirs == mine
+            and _should_retire_stale_code(hc, info)
+        )
+        if not (version_stale or code_stale):
             return _client_from_info(info)
-        # Version mismatch (\u00a75.2 step 1c, the upgrade path): ask the old
-        # daemon to shut down, wait up to 5s, then fall through to spawn.
-        with contextlib.suppress(Exception):
-            _client_from_info(info).shutdown()
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            if _health(url, timeout=0.5) is None:
-                break
-            time.sleep(0.2)
+        # Either path: ask the old daemon to shut down, wait up to 5s for
+        # it to actually stop, then fall through to spawn a replacement.
+        _retire_and_wait(_client_from_info(info), url)
         return None
 
     # Unhealthy. Stale pid (process gone) -> immediately treat as gone (KG-N6).

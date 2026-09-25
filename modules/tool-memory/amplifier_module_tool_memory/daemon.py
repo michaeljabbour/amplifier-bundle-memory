@@ -355,6 +355,29 @@ def daemon_version() -> str:
         return "0.0.0-dev"
 
 
+def code_fingerprint(pkg_dir: Path | None = None) -> float:
+    """Max source ``.py`` mtime (epoch seconds) across this installed
+    package, or ``0.0`` when it cannot be scanned.
+
+    ``daemon_version()`` alone cannot detect a reinstalled/upgraded package
+    that did not also bump its version string (e.g. an editable checkout
+    whose files changed, or a release that forgot the bump) -- a running
+    daemon then reports the SAME version as a client whose on-disk code is
+    actually newer, and ``_should_retire`` (version-string comparison only)
+    never fires. Both the daemon's ``/health`` payload and the client's
+    stale-code check (§5.2 step 1c-bis, ``client._should_retire_stale_code``)
+    call this SAME function against the SAME package layout so they can
+    never disagree about what "current" means, mirroring how
+    ``daemon_version()`` already keeps both sides in sync for version
+    strings.
+    """
+    d = pkg_dir if pkg_dir is not None else Path(__file__).resolve().parent
+    try:
+        return max((p.stat().st_mtime for p in d.rglob("*.py")), default=0.0)
+    except OSError:
+        return 0.0
+
+
 def default_memory_home() -> Path:
     """``~/.amplifier/memory`` (§5.1), overridable via ``AMPLIFIER_MEMORY_HOME``
     (tests/DTU isolation knob). This is a NEW home directory, distinct from
@@ -633,6 +656,7 @@ def make_daemon(
     token: str,
     allow_localhost_bypass: bool = True,
     version: str | None = None,
+    code_fp: float | None = None,
     durable: bool = True,
     on_shutdown: Any = None,
 ) -> ThreadingHTTPServer:
@@ -640,7 +664,8 @@ def make_daemon(
 
     Existing generic tools (write_cell ... batch) carry over verbatim via
     :func:`_dispatch_generic`. NEW: the §5.4 domain tools, ``shutdown``, and
-    a ``/health`` payload extended with ``version``/``embedder``/``durable``.
+    a ``/health`` payload extended with
+    ``version``/``code_fingerprint``/``embedder``/``durable``.
     *on_shutdown*, when given, is called (in a background thread, AFTER the
     HTTP response is sent) when the ``shutdown`` tool fires -- ``run_daemon``
     uses it to close the store; ``daemon.json`` removal is the caller's job
@@ -659,7 +684,20 @@ def make_daemon(
             args=(mem_store, embedder, lock),
             daemon=True,
         ).start()
+    # Search-fold warm-up (§5.6 latency fix, measured 2026-09-25): building
+    # the first _SearchFold snapshot over a large durable log takes ~4s
+    # (materializing the whole event log) -- paid here, off the request
+    # path, instead of by whichever real caller's search() happens to hit
+    # an empty snapshot first. Race-safe: _fold_snapshot()'s own
+    # single-flight generation/lock bookkeeping (store.py) means a real
+    # search arriving concurrently either joins this build or (if it wins
+    # the race) builds its own -- never duplicated work, never blocks
+    # daemon startup (this thread is not joined; do_GET/do_POST below start
+    # serving as soon as ThreadingHTTPServer below is constructed and the
+    # caller calls serve_forever()).
+    threading.Thread(target=mem_store._fold_snapshot, daemon=True).start()  # noqa: SLF001
     resolved_version = version if version is not None else daemon_version()
+    resolved_fingerprint = code_fp if code_fp is not None else code_fingerprint()
     httpd_holder: dict[str, ThreadingHTTPServer] = {}
 
     def _dispatch(tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -713,6 +751,7 @@ def make_daemon(
                         "ok": True,
                         "service": "memory-daemon",
                         "version": resolved_version,
+                        "code_fingerprint": resolved_fingerprint,
                         "embedder": (
                             {"ready": embedder.ready, "failed": embedder.failed}
                             if embedder is not None
@@ -1103,6 +1142,7 @@ def _run_owned_daemon(
     resolved_token_path = Path(token_path) if token_path else (resolved_home / "token")
     token = ensure_token(resolved_token_path)
     version = daemon_version()
+    fingerprint = code_fingerprint()
 
     def _close_store() -> None:
         store.close()
@@ -1114,6 +1154,7 @@ def _run_owned_daemon(
         port,
         token=token,
         version=version,
+        code_fp=fingerprint,
         durable=durable,
         on_shutdown=_close_store,
     )
@@ -1126,6 +1167,7 @@ def _run_owned_daemon(
         "port": chosen_port,
         "pid": os.getpid(),
         "version": version,
+        "code_fingerprint": fingerprint,
         "token_file": str(resolved_token_path),
         "started_at": datetime.now(UTC).isoformat(),
         "durable": durable,
