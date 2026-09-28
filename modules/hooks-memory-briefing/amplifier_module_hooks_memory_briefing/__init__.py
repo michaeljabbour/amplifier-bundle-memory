@@ -56,6 +56,16 @@ except ImportError:
 # misconfigured, not something a private duplicate helper should paper over.
 from amplifier_module_tool_memory.client import ensure_daemon
 
+#: P3 (T3.2, D19) -- shared with the store's own staleness gate purely for
+#: display purposes (the "Memory map" section's "(stale)" marker). Reused
+#: rather than duplicated: a single source of truth for the threshold.
+try:
+    from amplifier_module_tool_memory.store import (
+        _INDEX_STALE_AFTER_DEFAULT,
+    )
+except ImportError:  # pragma: no cover - defensive, mirrors other imports here
+    _INDEX_STALE_AFTER_DEFAULT = 10
+
 try:
     # T1-MEM-3: bounded, saturating usage boost for the reranker.
     from amplifier_module_tool_memory.usage import (
@@ -450,6 +460,165 @@ def _build_briefing(
     return briefing, sections, approx_tokens, results_fetched, results_after_rerank
 
 
+# -- Layered briefing (T3.2, D19) --------------------------------------------
+
+
+def _build_layered_briefing(
+    project: str,
+    opening_query: str,
+    token_budget: int,
+    include_project_context: bool = True,
+) -> tuple[str, list[str], int, list[dict[str, Any]], dict[str, int]]:
+    """Assemble the P3 layered briefing: project-context coordination files
+    (unchanged from legacy) -> Memory map (L3 index) -> Standing answers ->
+    Known facts (L2) -> Relevant evidence (L1 drawers), within *token_budget*.
+
+    Only reached when the daemon client exposes ``index`` (capability
+    probe, T3.1 -- see :class:`MemoryBriefingHook.__call__`'s mode
+    resolution); ``_build_briefing`` (legacy) stays byte-identical to the
+    pre-P3 behavior for stores that predate the L3 index/standing ops.
+
+    The coordination-files section is rendered by the SAME
+    ``_read_coordination_files`` legacy uses, byte-identical content --
+    only its POSITION differs (first here, last in legacy) and therefore
+    which budget remainder later sections compete for.
+
+    Returns ``(briefing_text, sections, token_estimate, evidence_hits,
+    section_counts)``. ``evidence_hits`` carries ``{"id": ref}`` dicts (the
+    only layer this mode's drawer_ids event field can report) for the
+    "Relevant evidence" section's hits.
+    """
+    wing = f"wing_{project}"
+    sections: list[str] = []
+    approx_tokens = 0
+    section_counts: dict[str, int] = {
+        "coordination": 0,
+        "map_rooms": 0,
+        "standing_answered": 0,
+        "standing_stale": 0,
+        "facts": 0,
+        "evidence": 0,
+    }
+    evidence_hits: list[dict[str, Any]] = []
+
+    # 0. project-context Tier 1 coordination files -- FIRST in layered mode
+    # (legacy renders this last; content/budgeting logic is identical,
+    # only position moves). Never skipped just because layered mode is on.
+    if include_project_context:
+        pc_dir = _find_project_context_dir()
+        if pc_dir:
+            remaining_budget = token_budget - approx_tokens
+            coord_section = _read_coordination_files(pc_dir, remaining_budget)
+            if coord_section:
+                sections.append(coord_section)
+                approx_tokens += len(coord_section) // 4
+                section_counts["coordination"] = 1
+
+    # 1. Memory map -- one line per room from the L3 index.
+    index_rows = _call_client("index", wing=wing) or []
+    if isinstance(index_rows, list) and index_rows:
+        lines = [f"**Memory map -- `{project}`:**"]
+        for row in index_rows:
+            if not isinstance(row, dict):
+                continue
+            scope = row.get("scope", "") or ""
+            room_name = scope.removeprefix("room:")
+            abstract = (row.get("abstract", "") or "").strip()
+            pending = row.get("pending_changes", 0) or 0
+            marker = " (stale)" if pending > _INDEX_STALE_AFTER_DEFAULT else ""
+            lines.append(f"- {room_name}: {abstract}{marker}")
+        section = "\n".join(lines)
+        sections.append(section)
+        approx_tokens += len(section) // 4
+        section_counts["map_rooms"] = len(index_rows)
+
+    # 2. Standing answers -- non-stale answers, plus one line of stale questions.
+    if approx_tokens < token_budget:
+        standing_rows = _call_client("standing", wing=wing) or []
+        if isinstance(standing_rows, list) and standing_rows:
+            answered_lines: list[str] = []
+            stale_questions: list[str] = []
+            for row in standing_rows:
+                if not isinstance(row, dict):
+                    continue
+                question = row.get("question", "") or ""
+                if row.get("stale"):
+                    stale_questions.append(question)
+                    continue
+                answer = row.get("answer", "") or ""
+                answered_lines.append(f"- Q: {question} A: {answer}")
+            if answered_lines or stale_questions:
+                lines = [f"**Standing answers -- `{project}`:**", *answered_lines]
+                if stale_questions:
+                    lines.append(
+                        f"- (stale, needs refresh: {'; '.join(stale_questions)})"
+                    )
+                section = "\n".join(lines)
+                sections.append(section)
+                approx_tokens += len(section) // 4
+                section_counts["standing_answered"] = len(answered_lines)
+                section_counts["standing_stale"] = len(stale_questions)
+
+    # 3. Known facts -- top current L2 facts for the wing.
+    if approx_tokens < token_budget:
+        facts_rows = _call_client("facts", wing=wing, k=8) or []
+        if isinstance(facts_rows, list) and facts_rows:
+            lines = [f"**Known facts -- `{project}`:**"]
+            for f in facts_rows[:8]:
+                if not isinstance(f, dict):
+                    continue
+                text = (f.get("text") or "").strip()
+                proof = f.get("proof_count", 0) or 0
+                lines.append(f"- {text} [proof {proof}]")
+            section = "\n".join(lines)
+            sections.append(section)
+            approx_tokens += len(section) // 4
+            section_counts["facts"] = len(facts_rows)
+
+    # 4. Relevant evidence -- L1 drawers as short cited snippets, whatever
+    # token budget remains.
+    if approx_tokens < token_budget:
+        remaining = max(0, token_budget - approx_tokens)
+        k = max(1, min(8, remaining // 40 + 1))
+        search_result = (
+            _call_client(
+                "search",
+                query=opening_query or f"recent work on {project}",
+                k=k,
+                wing=wing,
+                layers=["drawer"],
+            )
+            or {}
+        )
+        raw_hits = (
+            search_result.get("results", []) if isinstance(search_result, dict) else []
+        )
+        if raw_hits:
+            lines = [f"**Relevant evidence -- `{project}`:**"]
+            for h in raw_hits:
+                if not isinstance(h, dict):
+                    continue
+                ref = str(h.get("ref", ""))
+                room = h.get("room", "") or ""
+                text = (h.get("content", "") or "").strip()[:300]
+                lines.append(f"- [{room}] {text}")
+                evidence_hits.append({"id": ref})
+            section = "\n".join(lines)
+            sections.append(section)
+            approx_tokens += len(section) // 4
+            section_counts["evidence"] = len(raw_hits)
+
+    if not sections:
+        return "", [], 0, [], section_counts
+
+    header = f"## Memory Briefing -- `{project}`\n"
+    footer = (
+        "\n*This briefing is ephemeral and will not appear in conversation history.*"
+    )
+    briefing = header + "\n\n".join(sections) + footer
+    return briefing, sections, approx_tokens, evidence_hits, section_counts
+
+
 # -- Hook class --------------------------------------------------------------
 
 
@@ -476,6 +645,13 @@ class MemoryBriefingHook:
         self.briefing_importance_weight: float = float(
             self.config.get("briefing_importance_weight", 1.0)
         )
+        # P3 (T3.2, D19): "layered" builds the Memory map / Standing answers /
+        # Known facts / Relevant evidence briefing; "legacy" is the pre-P3
+        # behavior, byte-identical. Configured default is "layered", but the
+        # daemon client is probed via hasattr("index") at call time (T3.1
+        # capability check, not a hard dependency) -- an older pinned daemon
+        # without the L3 ops degrades to legacy automatically.
+        self.briefing_mode: str = self.config.get("briefing_mode", "layered")
 
         self._bridge_emit: AsyncBridge = bridge_emit or NOOP_ASYNC_BRIDGE
 
@@ -485,7 +661,8 @@ class MemoryBriefingHook:
         # Check if the memory daemon is reachable/spawnable -- skip the
         # memory-derived sections silently if not (native cutover: replaces
         # the old vendor CLI version probe).
-        if ensure_daemon() is None:
+        client = ensure_daemon()
+        if client is None:
             if self.emit_events:
                 emit_event(
                     "memory-briefing",
@@ -521,8 +698,34 @@ class MemoryBriefingHook:
         project = _detect_project_name()
         opening_query = data.get("opening_prompt", "") or data.get("prompt", "")
 
-        briefing, sections, token_estimate, results_fetched, results_after_rerank = (
-            _build_briefing(
+        # P3 (T3.2, D19): capability probe, not a hard dependency -- an older
+        # pinned daemon missing the L3 ops (no `index` method on the client)
+        # degrades to legacy automatically, same pattern as
+        # hooks-memory-reflect's hasattr checks.
+        effective_mode = self.briefing_mode
+        if effective_mode == "layered" and not hasattr(client, "index"):
+            effective_mode = "legacy"
+
+        section_counts: dict[str, int] = {}
+        if effective_mode == "layered":
+            briefing, sections, token_estimate, evidence_hits, section_counts = (
+                _build_layered_briefing(
+                    project=project,
+                    opening_query=opening_query,
+                    token_budget=self.token_budget,
+                    include_project_context=self.include_project_context,
+                )
+            )
+            results_fetched: list[dict[str, Any]] = []
+            results_after_rerank = evidence_hits
+        else:
+            (
+                briefing,
+                sections,
+                token_estimate,
+                results_fetched,
+                results_after_rerank,
+            ) = _build_briefing(
                 project=project,
                 opening_query=opening_query,
                 token_budget=self.token_budget,
@@ -531,7 +734,6 @@ class MemoryBriefingHook:
                 include_project_context=self.include_project_context,
                 importance_weight=self.briefing_importance_weight,
             )
-        )
 
         # Derive drawer_ids from results_after_rerank (list of dicts)
         drawer_ids = [
@@ -554,6 +756,8 @@ class MemoryBriefingHook:
                         "results_fetched": len(results_fetched or []),
                         "results_after_rerank": len(results_after_rerank or []),
                         "importance_weight": self.briefing_importance_weight,
+                        "mode": effective_mode,
+                        **section_counts,
                     },
                     session_id=sid,
                 )
