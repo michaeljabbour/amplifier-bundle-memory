@@ -162,6 +162,9 @@ except ImportError:
 # misconfigured, not something a private duplicate helper should paper over.
 from amplifier_module_tool_memory.client import ensure_daemon
 
+from .gitinfo import resolve_commit
+from .redact import redact
+
 
 def _detect_wing(cwd: str | None = None) -> str:
     """Detect the active project wing from git remote or directory name."""
@@ -292,7 +295,9 @@ def _extract_outcome(data: dict[str, Any]) -> tuple[str, bool]:
         tool_output = _coerce_output(getattr(result, "output", None))
         success_attr = getattr(result, "success", None)
         error_attr = getattr(result, "error", None)
-        tool_success = bool(success_attr if success_attr is not None else not error_attr)
+        tool_success = bool(
+            success_attr if success_attr is not None else not error_attr
+        )
         return tool_output, tool_success
 
     # Legacy/direct-caller shape -- flat keys directly on the payload.
@@ -302,7 +307,16 @@ def _extract_outcome(data: dict[str, Any]) -> tuple[str, bool]:
     return tool_output, tool_success
 
 
-def _file_drawer(wing: str, room: str, content: str, source: str, category: str | None) -> None:
+def _file_drawer(
+    wing: str,
+    room: str,
+    content: str,
+    source: str,
+    category: str | None,
+    *,
+    session_id: str | None = None,
+    commit: str | None = None,
+) -> None:
     """File a verbatim drawer via the native memory daemon (client.remember).
 
     Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md):
@@ -312,11 +326,31 @@ def _file_drawer(wing: str, room: str, content: str, source: str, category: str 
     ``_process_job``'s existing ``except Exception`` branch continues to do
     its job: emit ``capture_failed`` and leave the spool entry in place for
     a future replay -- unchanged contract, native transport.
+
+    ``session_id``/``commit`` (T0.3 + D8 provenance) are passed through to
+    ``MemoryClient.remember()`` as keyword-only extras. Another in-flight
+    change adds these params to the store's ``file()``/``remember`` path;
+    until that lands (or against an older pinned daemon), a plain
+    ``TypeError`` from an unexpected-keyword-argument mismatch triggers a
+    single retry without them, so this hook works against either version.
     """
     client = ensure_daemon()
     if client is None:
         raise RuntimeError("memory daemon unavailable")
-    client.remember(wing=wing, room=room, content=content, source=source, category=category)
+    try:
+        client.remember(
+            wing=wing,
+            room=room,
+            content=content,
+            source=source,
+            category=category,
+            session_id=session_id,
+            commit=commit,
+        )
+    except TypeError:
+        client.remember(
+            wing=wing, room=room, content=content, source=source, category=category
+        )
 
 
 # Category keyword signals (absorbed from hooks-memory-capture)
@@ -351,7 +385,9 @@ _CATEGORY_SIGNALS: dict[str, list[str]] = {
 }
 
 
-def _detect_category(text: str, signals: dict[str, list[str]] | None = None) -> str | None:
+def _detect_category(
+    text: str, signals: dict[str, list[str]] | None = None
+) -> str | None:
     """Heuristically detect a memory category from text content.
 
     ``signals`` maps category id -> list of lowercase keyword seeds. When None,
@@ -651,11 +687,24 @@ def _drain_loop() -> None:
 def _process_job(job: _CaptureJob) -> None:
     """Do one capture's slow work: detect wing, file drawer, emit completion."""
     wing = _detect_wing() if job.auto_wing else job.config_wing
-    base_room = _detect_room(job.tool_name, job.tool_input) if job.auto_room else job.config_room
+    base_room = (
+        _detect_room(job.tool_name, job.tool_input)
+        if job.auto_room
+        else job.config_room
+    )
     room = f"{base_room}-{job.category}" if job.category else base_room
+    commit = resolve_commit()
 
     try:
-        _file_drawer(wing, room, job.tool_output, job.source, job.category)
+        _file_drawer(
+            wing,
+            room,
+            job.tool_output,
+            job.source,
+            job.category,
+            session_id=job.session_id,
+            commit=commit,
+        )
         if job.emit_events:
             emit_event(
                 "memory-capture",
@@ -804,6 +853,10 @@ class MemoryCaptureHook:
             except Exception:
                 signals = dict(_CATEGORY_SIGNALS)
         self._signals: dict[str, list[str]] = signals
+        # T0.3 / D14: redact known secret shapes before anything (preview,
+        # event data, or the filed drawer itself) is built from the content.
+        # Default true -- this is a privacy floor, not an opt-in feature.
+        self.redact_secrets: bool = bool(self.config.get("redact_secrets", True))
         # Coordinator bridge \u2014 no-op default keeps the drain thread safe in tests
         self._bridge_emit: SyncBridge = bridge_emit or NOOP_SYNC_BRIDGE
 
@@ -828,6 +881,27 @@ class MemoryCaptureHook:
         # with a legacy flat-shape fallback -- see its docstring for the full
         # contract and why the fallback exists.
         tool_output, tool_success = _extract_outcome(data)
+
+        # T0.3 / D14: scrub known secret shapes BEFORE anything -- the
+        # worthiness gate, category detection, previews, event payloads, or
+        # the filed drawer -- is built from this content.
+        if self.redact_secrets and tool_output:
+            tool_output, redaction_counts = redact(tool_output)
+            if redaction_counts and self.emit_events:
+                emit_event(
+                    "memory-capture",
+                    "capture_redacted",
+                    ok=True,
+                    data={"counts": redaction_counts},
+                    session_id=sid,
+                )
+                try:
+                    self._bridge_emit(
+                        "memory:capture_redacted",
+                        {"counts": redaction_counts, "ok": True},
+                    )
+                except Exception:
+                    pass
 
         if not _is_memory_worthy(tool_name, tool_output):
             reason = _skip_reason(tool_name, tool_output)
@@ -965,7 +1039,9 @@ class MemoryCaptureHook:
         return HookResult(action="continue")
 
 
-async def mount(coordinator: Any, config: dict[str, Any] | None = None) -> dict[str, Any]:
+async def mount(
+    coordinator: Any, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Mount the memory-capture hook into the Amplifier coordinator.
 
     Side effect: registers the contributor, wires the coordinator bridge,
@@ -981,7 +1057,12 @@ async def mount(coordinator: Any, config: dict[str, Any] | None = None) -> dict[
     register_events(
         coordinator,
         "memory-capture",
-        ["memory:drawer_filed", "memory:capture_failed", "memory:capture_skipped"],
+        [
+            "memory:drawer_filed",
+            "memory:capture_failed",
+            "memory:capture_skipped",
+            "memory:capture_redacted",
+        ],
     )
 
     bridge_emit = make_sync_bridge(coordinator)

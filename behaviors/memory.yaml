@@ -34,6 +34,13 @@ hooks:
       auto_room: true
       silent: true
       emit_events: true           # false to disable JSONL event emission
+      # T0.3 / D14 (PROVENANCE.md): scrub known secret shapes (provider API
+      # keys, GitHub/AWS/Slack/Google tokens, JWTs, PEM private-key blocks,
+      # bearer headers, NAME=secret-shaped env assignments) from tool output
+      # before it is filed, previewed, or put in any event payload. Default
+      # true -- this is a privacy floor, not an opt-in feature. Set false
+      # only for trusted, already-scrubbed pipelines.
+      redact_secrets: true
       # The capture manifest is the "knowable list" of what memory captures.
       # Leave manifest_path unset to use the resolution order:
       #   <project>/project-context/memory-manifest.yaml  (per-project)
