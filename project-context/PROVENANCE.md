@@ -226,3 +226,28 @@ spawn the curator (D10 path) or delete the event (T2.6).
 exists anywhere, so session-end curation described in docs never runs.
 **Evidence:** `hooks-project-context/__init__.py:380-405`; grep of bundle.
 **Status:** derived. **Unblocks:** T2.6.
+
+### D16 — P0 as built (T0.1–T0.4): deviations and choices
+**Decision / facts recorded:**
+- T0.1: pin moved to `3ef751b6fac7f6899824b78774b74809f09bcd81` in **all six**
+  module pyprojects (lockstep rule — uv `--no-sources` rejects transitive URL
+  deps). Re-lock removed stale transitive packages (fastembed/onnx) from the
+  briefing/project-context locks; those modules only declare amplifier-data, so
+  this corrects pre-existing drift rather than changing behavior.
+- T0.2: `filed_at` is **earliest-wins** per ref (content addressing means a
+  re-filed identical drawer shares a ref; first-seen is the meaningful time).
+  Folded in the existing `_SearchFold` pass — no per-hit regenerate.
+  Legacy drawers without `filed_at` are **included** by garden's lookback and
+  reported as `undated` (conservative: never silently drop pre-v2.1 memory).
+- T0.3: redaction runs before the worthiness gate, previews and every event, so
+  a secret cannot leak through `capture_skipped`/`capture_queued` previews
+  either. `at_commit` is resolved without a subprocess (reads `.git`, worktree
+  `gitdir:` files, loose refs, packed-refs) on the drain thread, cached per
+  HEAD mtime. The capture hook tolerates an older store `file()` signature
+  (TypeError retry) so module activation order cannot break capture.
+- T0.4: AMB's CLI flag is `--split` (not `--domain`); splits are
+  `longmemeval:s`, `locomo:locomo10`, `precisionmembench:single-turn`;
+  `GEMINI_API_KEY`/`GOOGLE_API_KEY` is required by the AMB CLI regardless of
+  judge. The adapter subclasses AMB types at runtime and injects into its
+  `REGISTRY`; no AMB code is in this repo (AMB has no license).
+**Status:** derived. **Unblocks:** baseline run (needs keys) → D13 ratification.
