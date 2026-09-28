@@ -6,7 +6,7 @@ Amplifier hook that surfaces relevant memories mid-session at the right moment.
 
 This hook reads memory exclusively through the native memory daemon's
 supported surface -- `MemoryClient.search()` over the daemon's HTTP
-JSON-RPC-over-stdio server. It does **not** open ChromaDB directly and does
+JSON-RPC-over-stdio server. It does **not** open any store directly and does
 **not** hardcode any store path or collection name, so it structurally
 cannot drift from wherever the daemon itself is actually configured to
 read and write.

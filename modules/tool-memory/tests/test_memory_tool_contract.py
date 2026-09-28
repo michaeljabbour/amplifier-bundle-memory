@@ -13,7 +13,7 @@ These tests pin the real contract across every operation branch of
 ``success=False`` with a non-empty ``error``, and a successful call must
 produce ``success=True`` with real (non-null) ``output``.
 
-Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md): every
+Native cutover (B2, the native-cutover design history): every
 operation now routes through ``_call_client`` (MemoryClient via
 ``ensure_daemon()``) instead of a vendor subprocess. Tests
 patch ``tm._call_client`` directly -- the ONE transport seam -- for both the

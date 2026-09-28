@@ -1,7 +1,7 @@
 """Integration test fixtures for the amplifier-bundle-memory DTU.
 
-These tests run INSIDE the memory-native-e2e (or memory-migration-e2e) DTU
-container. On the host machine they are automatically skipped -- see
+These tests run INSIDE the memory-native-e2e DTU container. On the host
+machine they are automatically skipped -- see
 pytest_collection_modifyitems.
 
 Fixtures designed to run inside the DTU container:
@@ -33,10 +33,10 @@ from pathlib import Path
 
 import pytest
 
-#: Marker touched by the memory-native-e2e / memory-migration-e2e DTU
-#: profiles during provision -- the native-cutover replacement for the old
-#: sentinel (replaces the pre-cutover "does the legacy vendor directory
-#: exist" check -- there is no such directory to key off of anymore).
+#: Marker touched by the memory-native-e2e DTU profile during provision --
+#: the native-cutover replacement for the old sentinel (replaces the
+#: pre-cutover "does the legacy store directory exist" check -- there is
+#: no such directory to key off of anymore).
 _DTU_SENTINEL = Path("/root/.dtu-memory-native")
 
 #: The git clone of this bundle inside the DTU container -- amplifier is
@@ -73,8 +73,8 @@ def pytest_collection_modifyitems(config, items):
 def reset_memory_store():
     """Best-effort reset of the native memory store before each test module.
 
-    Unlike the pre-cutover fixture (which shelled out to a legacy reset
-    script), the native store is a durable amplifier-data log with no
+    Unlike the pre-cutover fixture (which shelled out to a legacy store's
+    reset script), the native store is a durable amplifier-data log with no
     equivalent CLI reset tool shipped by this bundle. This fixture is a
     best-effort no-op placeholder: if a future DTU profile provisions a
     reset script it can be wired in here. Tests should not assume a clean

@@ -250,7 +250,7 @@ class TestMountAndDispatch:
 
 
 class TestToolProtocol:
-    def test_palace_tool_exposes_input_schema(self) -> None:
+    def test_memory_tool_exposes_input_schema(self) -> None:
         """The orchestrator reads tool.input_schema — it must have type:object
         at the root or Anthropic rejects the whole request."""
         from amplifier_module_tool_memory import MemoryTool
@@ -264,7 +264,7 @@ class TestToolProtocol:
         )
         assert "properties" in schema, "input_schema should have 'properties'"
 
-    def test_palace_tool_has_required_attributes(self) -> None:
+    def test_memory_tool_has_required_attributes(self) -> None:
         """Tool protocol requires name, description, input_schema, execute."""
         from amplifier_module_tool_memory import MemoryTool
 

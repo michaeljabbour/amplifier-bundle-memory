@@ -1,9 +1,9 @@
 """
 Tests for MemoryTool `garden` operation and garden.py helpers.
 
-Section 8.3 of spec-v1.2.0-gene-transfer.md
+Section 8.3 of the v1.2.0 design spec
 
-Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md): garden's
+Native cutover (B2, the native-cutover design history): garden's
 drawer enumeration, near-duplicate detection, KG edges, and diary writes all
 route through a fake ``MemoryClient``-shaped stub (patched via
 ``garden.ensure_daemon``) instead of a vendor subprocess.

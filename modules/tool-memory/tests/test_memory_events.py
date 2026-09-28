@@ -1,7 +1,7 @@
 """
 Tests for MemoryTool `events` operation.
 
-Section 8.2 of spec-v1.2.0-gene-transfer.md
+Section 8.2 of the v1.2.0 design spec
 """
 
 from __future__ import annotations
