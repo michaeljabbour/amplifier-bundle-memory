@@ -10,3 +10,10 @@ Six module pyprojects restate the pin (tool-memory, capture, briefing,
 interject, project-context, behavioral-write). After any bump:
 `grep -rl <old-sha> --include=pyproject.toml --include=uv.lock . | grep -v .venv`
 must print nothing.
+
+## Shared dev venv carries an UNPUSHED amplifier-data (2026-09-28)
+`~/dev/.venv` now has amplifier-data 0.2.0 installed from the local
+`feat/bm25-lens` working tree (`uv pip install --python ~/dev/.venv/bin/python
+~/dev/amplifier-data`). Tests there exercise the RRF path; production installs
+follow the pin and run legacy until the pin moves. Re-run the install after any
+upstream edit; revert with a pin-matching install if another repo needs 0.1.0.

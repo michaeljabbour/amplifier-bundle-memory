@@ -251,3 +251,23 @@ exists anywhere, so session-end curation described in docs never runs.
   judge. The adapter subclasses AMB types at runtime and injects into its
   `REGISTRY`; no AMB code is in this repo (AMB has no license).
 **Status:** derived. **Unblocks:** baseline run (needs keys) → D13 ratification.
+
+### D17 — P1 as built (T1.1–T1.4): hybrid retrieval
+- **Upstream:** `amplifier-data` branch `feat/bm25-lens` adds `lenses/bm25.py`
+  (`tokenize`, incremental `BM25Index`, `BM25Lens`); pure Python, no kernel
+  change; tokenizer emits whole identifier runs AND their snake/camel sub-tokens
+  so `ERR_4417` matches exactly (high IDF) and partially. Not re-exported from
+  `lenses/__init__.py` (no concrete lens is). 10k docs build 55 ms, query 0.55 ms.
+- **Consumer:** `store.search` defaults to `fusion="rrf"` (k=60, arms semantic +
+  BM25, top N=max(3k,50) each); `fusion="legacy"` reproduces v2.0.1 byte-for-byte
+  and the v2.0.1 equivalence tests are pinned to it. `score` keeps its legacy
+  meaning so the interject cosine gate (0.72) and briefing rerank are unchanged;
+  new fields `rrf`, `arms`. Persistent incremental BM25 index on the store
+  instance (correct because the daemon is the single writer of an append-only log).
+- **Capability check:** without `amplifier_data.lenses.bm25` the store silently
+  runs legacy — so the current pin (3ef751b, no bm25) is safe to ship.
+- **Temporal:** `since`/`until` filter on earliest `filed_at`; undated drawers are
+  excluded when a bound is given (cannot prove they are in range).
+- **Measured:** 5k-drawer p95 search: rrf 160.8 ms, legacy 157.0 ms (budget 300).
+- **Pending owner action:** push `feat/bm25-lens` → merge → bump pin (T1.5).
+**Status:** derived.
