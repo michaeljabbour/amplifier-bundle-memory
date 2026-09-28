@@ -104,6 +104,15 @@ _MEMORY_PREDICATE = "@memory:predicate"
 _MEMORY_JOB_STATE = "@memory:job_state"
 _MEMORY_JOB_PRODUCED = "@memory:job_produced"
 
+#: Scale-defect-1 fix (see docstring on ``_SearchFold``/``_resolve_filing``):
+#: content addressing makes identical drawer text filed in different
+#: wings/rooms share ONE ref, so per-filer facts (``has_source`` etc.)
+#: resolved arbitrarily regardless of query scope. Every :meth:`file` /
+#: :meth:`reflection_job_add` call now ALSO writes one small
+#: content-addressed FILING cell recording THAT ONE filing's own
+#: wing/room/source/category/filed_at/session/commit, linked via this edge.
+_MEMORY_FILED_AS = "@memory:filed_as"
+
 #: P3 (T3.1/T3.3, D19 -- index is mechanism-first) reserved ``@memory:``
 #: predicates. ``_MEMORY_CURRENT_INDEX`` lives on the ROOM SCOPE CELL
 #: (subject) pointing at the currently-curated index cell for that room --
@@ -192,6 +201,9 @@ class _SearchFold:
     """
 
     def __init__(self, kernel: Any) -> None:
+        from amplifier_data.lenses._scope import SCOPED_TO
+        from amplifier_data.lenses.temporal import INVALIDATE_PREFIX
+        from amplifier_data.lenses.vector import EMBEDDING_OF
         from amplifier_data.models import CellWriteEvent, RelationshipEvent
 
         self._events: Any = kernel.all_events()
@@ -207,6 +219,8 @@ class _SearchFold:
         # re-filed under a different `filed_at` carries multiple assertions,
         # so "first-seen" is the lexicographically (== chronologically,
         # ISO-8601) smallest value. See NativeMemoryStore.drawer_times.
+        # Kept as the LEGACY (pre-filing) fallback -- see `filings` below,
+        # which is scope-aware and preferred whenever it exists.
         filed_at: dict[Any, str] = {}
         for _pos, ev in self._events:
             if isinstance(ev, RelationshipEvent) and ev.type == _FILED_AT_PREDICATE:
@@ -219,9 +233,106 @@ class _SearchFold:
                     filed_at[ev.from_ref] = value
         self.filed_at: dict[Any, str] = filed_at
 
+        # Scale fix (perf/attribution-and-fold-once): a THIRD pass over the
+        # SAME materialized event list precomputes everything else a
+        # per-hit metadata lookup used to re-fold the log for:
+        #   - scope_membership: ref -> {scope_ref, ...}, the exact data
+        #     `fold_scope`/`GraphLens.neighbors(rel_type="scoped_to")` used
+        #     to recompute from scratch on every call.
+        #   - triple_history / by_subject_predicate / by_predicate_object:
+        #     mirrors TemporalLens's own fold exactly (assert/invalidate per
+        #     (subject, predicate, object) triple, SeqPos-ordered), so
+        #     `current_objects`/`objects_pointing_to` below reproduce
+        #     TemporalLens.current_facts() without a second event-log walk.
+        #   - filings: drawer ref -> [(filing_ref, filing_body), ...], the
+        #     new per-filing attribution record (see module-level
+        #     `_MEMORY_FILED_AS`) written by `file()`/`reflection_job_add`.
+        scope_membership: dict[Any, set[Any]] = {}
+        triple_history: dict[tuple[Any, str, Any], list[tuple[Any, str]]] = {}
+        by_subject_predicate: dict[tuple[Any, str], list[Any]] = {}
+        by_predicate_object: dict[tuple[str, Any], list[Any]] = {}
+        filed_as_edges: list[tuple[Any, Any]] = []
+        for seq_pos, ev in self._events:
+            if not isinstance(ev, RelationshipEvent):
+                continue
+            etype = ev.type
+            if etype == SCOPED_TO:
+                scope_membership.setdefault(ev.from_ref, set()).add(ev.to_ref)
+                continue
+            if etype == EMBEDDING_OF:
+                continue
+            if etype == _MEMORY_FILED_AS:
+                filed_as_edges.append((ev.from_ref, ev.to_ref))
+            if etype.startswith(INVALIDATE_PREFIX):
+                predicate = etype[len(INVALIDATE_PREFIX) :]
+                op = "invalidate"
+            else:
+                predicate = etype
+                op = "assert"
+            triple_history.setdefault((ev.from_ref, predicate, ev.to_ref), []).append(
+                (seq_pos, op)
+            )
+            sp_objs = by_subject_predicate.setdefault((ev.from_ref, predicate), [])
+            if ev.to_ref not in sp_objs:
+                sp_objs.append(ev.to_ref)
+            po_subs = by_predicate_object.setdefault((predicate, ev.to_ref), [])
+            if ev.from_ref not in po_subs:
+                po_subs.append(ev.from_ref)
+        self.scope_membership: dict[Any, set[Any]] = scope_membership
+        self._triple_history = triple_history
+        self._by_subject_predicate = by_subject_predicate
+        self._by_predicate_object = by_predicate_object
+
+        filings: dict[Any, list[tuple[Any, dict[str, Any]]]] = {}
+        for drawer_ref, filing_ref in filed_as_edges:
+            raw = payloads.get(filing_ref)
+            if raw is None:
+                continue
+            try:
+                body = json.loads(raw.decode("utf-8", errors="replace"))
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(body, dict) or body.get("kind") != "filing":
+                continue
+            filings.setdefault(drawer_ref, []).append((filing_ref, body))
+        self.filings: dict[Any, list[tuple[Any, dict[str, Any]]]] = filings
+
     def all_events(self) -> Any:
         """The read accessor the fold lenses use (mirrors ``StorageKernel``)."""
         return self._events
+
+    def scope_index(self) -> Any:
+        """A :class:`ScopeIndex`-shaped view over the precomputed
+        ``scope_membership`` -- callers that used to call
+        ``fold_scope(fold)`` (itself a full re-walk of the event list) get
+        the same shape from data this fold already built once."""
+        from amplifier_data.lenses._scope import ScopeIndex
+
+        return ScopeIndex(
+            membership={k: frozenset(v) for k, v in self.scope_membership.items()}
+        )
+
+    def current_objects(self, subject: Any, predicate: str) -> list[Any]:
+        """Currently-valid objects of (*subject*, *predicate*), sorted --
+        reproduces ``TemporalLens.current_facts(kernel, subject, predicate)``
+        exactly, without re-walking the event list a second time."""
+        out: list[Any] = []
+        for obj in self._by_subject_predicate.get((subject, predicate), []):
+            events = self._triple_history[(subject, predicate, obj)]
+            if max(events, key=lambda e: e[0])[1] == "assert":
+                out.append(obj)
+        return sorted(out)
+
+    def objects_pointing_to(self, obj: Any, predicate: str) -> list[Any]:
+        """Currently-valid subjects of (*subject*, *predicate*, *obj*) --
+        the reverse of :meth:`current_objects`, used for e.g.
+        ``@memory:supersedes`` lookups by object."""
+        out: list[Any] = []
+        for subj in self._by_predicate_object.get((predicate, obj), []):
+            events = self._triple_history[(subj, predicate, obj)]
+            if max(events, key=lambda e: e[0])[1] == "assert":
+                out.append(subj)
+        return sorted(out)
 
 
 @runtime_checkable
@@ -493,7 +604,31 @@ class NativeMemoryStore:
                 vec = list(embedding)
                 emb_ref = b.write_cell(struct.pack(f"<{len(vec)}f", *vec))
                 b.relate(emb_ref, ref, EMBEDDING_OF)
-            ref = _resolve_batch_ref(b.commit(), ref)
+            # Scale-defect-1 fix (D-scale-1, _MEMORY_FILED_AS): staged in the
+            # SAME batch/commit as the drawer -- one append_batch per file()
+            # call, same as before this fix. The filing payload's "drawer"
+            # field is write-only bookkeeping (never read back by any
+            # resolution path in this module; attribution reads travel the
+            # `ref -> filing` edge, never the reverse), so embedding the
+            # PRE-commit `ref` here is safe even on a backend where the
+            # pre-commit token differs from the final content address
+            # (GatewayClient) -- unlike a field this module actually reads
+            # back, which would require a second post-commit write.
+            filing_ref = b.write_cell(
+                self._filing_payload(
+                    drawer_ref=ref,
+                    wing=wing,
+                    room=room,
+                    source=source,
+                    category=category,
+                    filed_at=filed_at,
+                    session_id=session_id,
+                    commit=commit,
+                )
+            )
+            b.assert_fact(ref, _MEMORY_FILED_AS, filing_ref)
+            commit_result = b.commit()
+            ref = _resolve_batch_ref(commit_result, ref)
         else:
             ref = s.write_cell(content.encode("utf-8"))  # type: ignore[attr-defined]
             # wing/room scoping — content-addressed scope cells (idempotent refs).
@@ -524,6 +659,22 @@ class NativeMemoryStore:
             if embedding is not None:
                 # Sequential path: the substrate's own add_embedding (dim-agnostic).
                 s.add_embedding(ref, list(embedding))  # type: ignore[attr-defined]
+            # Scale-defect-1 fix: same FILING cell as the atomic branch above
+            # (see its comment) -- the sequential path is already one call
+            # per write, so this adds no extra commit round-trip either.
+            filing_ref = s.write_cell(  # type: ignore[attr-defined]
+                self._filing_payload(
+                    drawer_ref=ref,
+                    wing=wing,
+                    room=room,
+                    source=source,
+                    category=category,
+                    filed_at=filed_at,
+                    session_id=session_id,
+                    commit=commit,
+                )
+            )
+            s.assert_fact(ref, _MEMORY_FILED_AS, filing_ref)  # type: ignore[attr-defined]
         self.filed.append(
             {
                 "ref": ref,
@@ -540,6 +691,89 @@ class NativeMemoryStore:
             }
         )
         return ref
+
+    @staticmethod
+    def _filing_payload(
+        *,
+        drawer_ref: Any,
+        wing: str,
+        room: str,
+        source: str,
+        category: str | None,
+        filed_at: str,
+        session_id: str | None,
+        commit: str | None,
+    ) -> bytes:
+        """Content-addressed FILING cell payload for one filing of
+        *drawer_ref* (scale defect 1 fix, see ``_MEMORY_FILED_AS`` /
+        :meth:`_resolve_filing`). ``source``/``category`` are normalized the
+        same way the drawer's own has_source/has_category facts are (empty
+        ``source`` -> ``None``, so the legacy-fallback path sees the
+        identical value either way).
+
+        ``drawer`` is write-only bookkeeping: no resolution path in this
+        module reads it back (attribution always travels the ``ref ->
+        filing`` edge, never the reverse), so it is safe to embed a
+        PRE-commit ref value here even on a backend where the pre-commit
+        token differs from the final content address (GatewayClient) --
+        letting every caller stage this cell in the SAME batch/commit as
+        the drawer itself, one append_batch per write, same as before this
+        fix (a field this module actually read back would need a second,
+        post-commit write instead -- see :meth:`_file_filing`, used only by
+        :meth:`reflection_job_add`, whose span ref is already resolved).
+        """
+        body = {
+            "kind": "filing",
+            "drawer": drawer_ref,
+            "wing": wing,
+            "room": room,
+            "source": source or None,
+            "category": category,
+            "filed_at": filed_at,
+            "session": session_id,
+            "commit": commit,
+        }
+        return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def _file_filing(
+        self,
+        *,
+        drawer_ref: Any,
+        wing: str,
+        room: str,
+        source: str,
+        category: str | None,
+        filed_at: str,
+        session_id: str | None,
+        commit: str | None,
+    ) -> Any:
+        """Write the FILING cell + ``@memory:filed_as`` edge for one filing
+        of an ALREADY-resolved *drawer_ref* -- used by
+        :meth:`reflection_job_add`, whose span ref must be resolved first (a
+        second small commit; see :meth:`_filing_payload`'s docstring for why
+        :meth:`file` itself instead folds this into the drawer's own batch).
+        """
+        payload = self._filing_payload(
+            drawer_ref=drawer_ref,
+            wing=wing,
+            room=room,
+            source=source,
+            category=category,
+            filed_at=filed_at,
+            session_id=session_id,
+            commit=commit,
+        )
+        s = self.store
+        if self._supports_atomic_update():
+            b = s.write_batch()  # type: ignore[attr-defined]
+            filing_ref = b.write_cell(payload)
+            b.assert_fact(drawer_ref, _MEMORY_FILED_AS, filing_ref)
+            commit_result = b.commit()
+            filing_ref = _resolve_batch_ref(commit_result, filing_ref)
+        else:
+            filing_ref = s.write_cell(payload)  # type: ignore[attr-defined]
+            s.assert_fact(drawer_ref, _MEMORY_FILED_AS, filing_ref)  # type: ignore[attr-defined]
+        return filing_ref
 
     def search_vectors(
         self, vector: Sequence[float], k: int, *, wing: str | None = None
@@ -790,37 +1024,45 @@ class NativeMemoryStore:
         to, minus the per-call log re-materialization.
         """
         if fold is not None:
-            from amplifier_data.lenses.temporal import TemporalLens
-
-            res = TemporalLens().query(kernel=fold, subject=ref, predicate=predicate)
+            out = fold.current_objects(ref, predicate)
         else:
             res = self.store.query_facts(subject=ref, predicate=predicate)  # type: ignore[attr-defined]
-        if not res.output:
+            out = [f.object for f in res.output]
+        if not out:
             return None
-        return self._payload_text(res.output[0].object, fold)
+        return self._payload_text(out[0], fold)
 
     def drawer_times(
-        self, refs: Sequence[Any], *, _fold: _SearchFold | None = None
+        self,
+        refs: Sequence[Any],
+        *,
+        _fold: _SearchFold | None = None,
+        wing: str | None = None,
     ) -> dict[Any, str | None]:
-        """Earliest ``filed_at`` per ref (T0.2), read from the one-fold snapshot.
+        """``filed_at`` per ref, scope-aware when *wing* is given (T0.2, scale
+        fix: drawer_times per-wing earliest).
 
-        Reuses the SAME shared :class:`_SearchFold` a caller may already hold
-        (``_fold``, mirroring :meth:`list_drawers`'s private perf seam) --
-        never a per-ref ``regenerate``/re-fold (perf rationale: lines 53-95).
-        When no ``_fold`` is supplied, computes its own snapshot (still ONE
-        fold for the whole batch of *refs*, not one per ref). Falls back to a
-        per-ref ``query_facts`` walk only for backends with no foldable
-        kernel (RemoteStore/GatewayClient). A ref with no ``filed_at`` fact
-        (legacy drawer, pre-T0.2) maps to ``None``.
+        Prefers the filing matching *wing* (see :meth:`_resolve_filing`) --
+        identical content filed into several wings/rooms shares ONE ref, so
+        the GLOBAL earliest ``filed_at`` used before this fix could report a
+        time from a different wing's filing entirely. Falls back to the
+        legacy global-earliest-fact value for a drawer with no filing cell
+        (pre-fix content). Reuses the SAME shared :class:`_SearchFold` a
+        caller may already hold (``_fold``) -- never a per-ref
+        ``regenerate``/re-fold. A ref with neither a filing nor a
+        ``filed_at`` fact (legacy drawer, pre-T0.2) maps to ``None``.
         """
         fold = _fold if _fold is not None else self._fold_snapshot()
         out: dict[Any, str | None] = {}
-        if fold is not None:
-            for ref in refs:
-                out[ref] = fold.filed_at.get(ref)
-            return out
-        s = self.store
         for ref in refs:
+            filing = self._resolve_filing(ref, fold, wing=wing, room=None)
+            if filing is not None:
+                out[ref] = filing.get("filed_at")
+                continue
+            if fold is not None:
+                out[ref] = fold.filed_at.get(ref)
+                continue
+            s = self.store
             res = s.query_facts(subject=ref, predicate=_FILED_AT_PREDICATE)  # type: ignore[attr-defined]
             if not res.output:
                 out[ref] = None
@@ -834,16 +1076,112 @@ class NativeMemoryStore:
             out[ref] = min(values)
         return out
 
+    def _filings_for(
+        self, ref: Any, fold: _SearchFold | None
+    ) -> list[tuple[Any, dict[str, Any]]]:
+        """Every ``{"kind": "filing", ...}`` cell linked from *ref* via
+        ``@memory:filed_as``, as ``[(filing_ref, body), ...]``."""
+        if fold is not None:
+            return fold.filings.get(ref, [])
+        s = self.store
+        res = s.query_facts(subject=ref, predicate=_MEMORY_FILED_AS)  # type: ignore[attr-defined]
+        out: list[tuple[Any, dict[str, Any]]] = []
+        for f in res.output:
+            try:
+                body = json.loads(self._payload_text(f.object, None))
+            except (ValueError, TypeError):
+                continue
+            if isinstance(body, dict) and body.get("kind") == "filing":
+                out.append((f.object, body))
+        return out
+
+    def _resolve_filing(
+        self,
+        ref: Any,
+        fold: _SearchFold | None,
+        *,
+        wing: str | None,
+        room: str | None,
+    ) -> dict[str, Any] | None:
+        """Scale-defect-1 fix: resolve *ref*'s attribution (source/wing/room/
+        category/filed_at/session/commit) to the ONE filing matching the
+        query's scope, instead of an arbitrary per-predicate fact shared
+        across every wing that ever filed this content.
+
+        Scoped query (*wing* given): among filings whose wing matches (and
+        room too, when *room* is given), picks the EARLIEST ``filed_at``
+        (filing ref ascending breaks ties). Returns ``None`` -- never a
+        wrong-scope filing -- when *ref* has filings but none match this
+        scope (a legacy drawer scoped here before this fix landed, now also
+        filed elsewhere); callers fall back to the pre-fix per-predicate
+        resolution in that case. Unscoped query: the globally earliest
+        filing. Returns ``None`` when *ref* carries no filing cell at all
+        (a legacy drawer, pre-scale-fix).
+        """
+        filings = self._filings_for(ref, fold)
+        if not filings:
+            return None
+        if wing is not None:
+            scoped = [
+                (fref, body)
+                for fref, body in filings
+                if body.get("wing") == wing
+                and (room is None or body.get("room") == room)
+            ]
+            if not scoped:
+                return None
+            pool = scoped
+        else:
+            pool = filings
+        _fref, body = min(
+            pool, key=lambda item: (item[1].get("filed_at") or "", item[0])
+        )
+        return body
+
+    def _resolve_hit_meta(
+        self,
+        ref: Any,
+        fold: _SearchFold | None,
+        *,
+        wing: str | None,
+        room: str | None,
+    ) -> dict[str, Any]:
+        """``{"wing","room","source","category","filed_at"}`` for one drawer
+        hit (search/list_drawers), scope-aware (see :meth:`_resolve_filing`);
+        falls back to the pre-fix per-predicate facts + first-matching scope
+        edge for a legacy drawer with no filing."""
+        filing = self._resolve_filing(ref, fold, wing=wing, room=room)
+        if filing is not None:
+            return {
+                "wing": filing.get("wing"),
+                "room": filing.get("room"),
+                "source": filing.get("source"),
+                "category": filing.get("category"),
+                "filed_at": filing.get("filed_at"),
+            }
+        wing_name, room_name = self._resolve_wing_room(ref, fold)
+        return {
+            "wing": wing_name,
+            "room": room_name,
+            "source": self._first_fact_value(ref, "has_source", fold),
+            "category": self._first_fact_value(ref, "has_category", fold),
+            "filed_at": self.drawer_times([ref], _fold=fold, wing=wing).get(ref),
+        }
+
     def _resolve_wing_room(
         self, ref: Any, fold: _SearchFold | None = None
     ) -> tuple[str | None, str | None]:
-        """(wing, room) for a drawer ref, resolved from its direct ``scoped_to`` edges."""
-        s = self.store
+        """(wing, room) for a drawer ref, resolved from its direct ``scoped_to``
+        edges. LEGACY/fallback path only: a ref shared by multiple wings (content
+        addressing) has multiple wing/room edges and this picks one
+        deterministically, but not scope-aware -- see :meth:`_resolve_filing`
+        for the scope-aware attribution used by search/list_drawers hits."""
         if fold is not None:
-            from amplifier_data.lenses.graph import GraphLens
-
-            neighbors = GraphLens().neighbors(fold, ref, rel_type="scoped_to")
+            # Precomputed once per request (perf/attribution-and-fold-once) --
+            # no GraphLens re-fold of the whole event list per ref.
+            neighbors: Any = sorted(fold.scope_membership.get(ref, ()))
         else:
+            s = self.store
             neighbors = s.graph_neighbors(ref, rel_type="scoped_to")  # type: ignore[attr-defined]
         wing_name: str | None = None
         room_name: str | None = None
@@ -890,32 +1228,32 @@ class NativeMemoryStore:
         else:
             scope_ref = None
 
-        scope_index = fold_scope(_fold if _fold is not None else s.kernel)  # type: ignore[attr-defined]
+        scope_index = (
+            _fold.scope_index() if _fold is not None else fold_scope(s.kernel)  # type: ignore[attr-defined]
+        )
         if scope_ref is not None:
             member_refs = scope_index.cells_in_scope(scope_ref)
         else:
             member_refs = set(scope_index.membership.keys())
 
         selected_refs = sorted(member_refs)[: max(0, limit)]
-        times = self.drawer_times(selected_refs, _fold=_fold)
 
         out: list[dict[str, Any]] = []
         for ref in selected_refs:
             content = self._payload_text(ref, _fold)
-            wing_name, room_name = self._resolve_wing_room(ref, _fold)
-            category = self._first_fact_value(ref, "has_category", _fold)
+            meta = self._resolve_hit_meta(ref, _fold, wing=wing, room=room)
             importance_raw = self._first_fact_value(ref, "has_importance", _fold)
             out.append(
                 {
                     "ref": ref,
                     "content": content,
-                    "wing": wing_name,
-                    "room": room_name,
-                    "category": category,
+                    "wing": meta["wing"],
+                    "room": meta["room"],
+                    "category": meta["category"],
                     "importance": float(importance_raw)
                     if importance_raw is not None
                     else None,
-                    "filed_at": times.get(ref),
+                    "filed_at": meta["filed_at"],
                 }
             )
         return out
@@ -1035,7 +1373,9 @@ class NativeMemoryStore:
         if since is not None or until is not None:
             from amplifier_data.lenses._scope import fold_scope
 
-            scope_index = fold_scope(fold if fold is not None else s.kernel)  # type: ignore[attr-defined]
+            scope_index = (
+                fold.scope_index() if fold is not None else fold_scope(s.kernel)  # type: ignore[attr-defined]
+            )
             universe = (
                 set(scope_index.cells_in_scope(scope_ref))
                 if scope_ref is not None
@@ -1073,14 +1413,14 @@ class NativeMemoryStore:
             if layer not in layer_set:
                 continue
             if layer == "fact":
-                if not self._is_current(hit["ref"]):
+                if not self._is_current(hit["ref"], fold):
                     continue
                 try:
                     body = json.loads(hit["content"])
                 except (ValueError, TypeError):
                     body = {}
                 hit = {**hit, "content": body.get("text", "")}
-                hit["derived_from"] = self._derived_from_refs(hit["ref"])
+                hit["derived_from"] = self._derived_from_refs(hit["ref"], fold)
             hit["layer"] = layer
             filtered.append(hit)
             if len(filtered) >= max(0, k):
@@ -1215,23 +1555,20 @@ class NativeMemoryStore:
 
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
         top = scored[: max(0, k)]
-        times = self.drawer_times([ref for ref, _score in top], _fold=fold)
         results: list[dict[str, Any]] = []
         for ref, score in top:
             content = self._payload_text(ref, fold)
-            wing_name, room_name = self._resolve_wing_room(ref, fold)
-            category = self._first_fact_value(ref, "has_category", fold)
-            source = self._first_fact_value(ref, "has_source", fold)
+            meta = self._resolve_hit_meta(ref, fold, wing=wing, room=room)
             results.append(
                 {
                     "ref": ref,
                     "score": score,
                     "content": content,
-                    "wing": wing_name,
-                    "room": room_name,
-                    "category": category,
-                    "source": source,
-                    "filed_at": times.get(ref),
+                    "wing": meta["wing"],
+                    "room": meta["room"],
+                    "category": meta["category"],
+                    "source": meta["source"],
+                    "filed_at": meta["filed_at"],
                 }
             )
         return results
@@ -1334,13 +1671,10 @@ class NativeMemoryStore:
         fused.sort(key=lambda pair: (-pair[1], pair[0]))
         top = fused[: max(0, k)]
 
-        times = self.drawer_times([ref for ref, _rrf in top], _fold=fold)
         results: list[dict[str, Any]] = []
         for ref, rrf in top:
             content = self._payload_text(ref, fold)
-            wing_name, room_name = self._resolve_wing_room(ref, fold)
-            category = self._first_fact_value(ref, "has_category", fold)
-            source = self._first_fact_value(ref, "has_source", fold)
+            meta = self._resolve_hit_meta(ref, fold, wing=wing, room=room)
             if ref in cosine_by_ref:
                 blended = 0.85 * cosine_by_ref[ref] + 0.15 * lexical_score(
                     lexical_query or "", content
@@ -1357,11 +1691,11 @@ class NativeMemoryStore:
                         "bm25": bm25_rank.get(ref),
                     },
                     "content": content,
-                    "wing": wing_name,
-                    "room": room_name,
-                    "category": category,
-                    "source": source,
-                    "filed_at": times.get(ref),
+                    "wing": meta["wing"],
+                    "room": meta["room"],
+                    "category": meta["category"],
+                    "source": meta["source"],
+                    "filed_at": meta["filed_at"],
                 }
             )
         return results
@@ -1505,17 +1839,18 @@ class NativeMemoryStore:
         never trigger a second ``kernel.all_events()`` materialization.
         """
         if fold is not None:
-            from amplifier_data.lenses.temporal import TemporalLens
-
-            res = TemporalLens().query(
-                kernel=fold, subject=ref, predicate=_MEMORY_CURRENT
-            )
-            return bool(res.output)
+            # perf/attribution-and-fold-once: reuse the fold's own precomputed
+            # triple history -- no second TemporalLens re-fold of the log.
+            return bool(fold.current_objects(ref, _MEMORY_CURRENT))
         s = self.store
         res = s.query_facts(subject=ref, predicate=_MEMORY_CURRENT)  # type: ignore[attr-defined]
         return bool(res.output)
 
-    def _derived_from_refs(self, ref: Any) -> list[Any]:
+    def _derived_from_refs(
+        self, ref: Any, fold: _SearchFold | None = None
+    ) -> list[Any]:
+        if fold is not None:
+            return fold.current_objects(ref, _MEMORY_DERIVED_FROM)
         s = self.store
         res = s.query_facts(subject=ref, predicate=_MEMORY_DERIVED_FROM)  # type: ignore[attr-defined]
         return [f.object for f in res.output]
@@ -1532,15 +1867,14 @@ class NativeMemoryStore:
         ``@memory:cites``.
         """
         if fold is not None:
-            from amplifier_data.lenses.temporal import TemporalLens
-
-            res = TemporalLens().query(kernel=fold, subject=ref, predicate=predicate)
-        else:
-            res = self.store.query_facts(subject=ref, predicate=predicate)  # type: ignore[attr-defined]
+            return fold.current_objects(ref, predicate)
+        res = self.store.query_facts(subject=ref, predicate=predicate)  # type: ignore[attr-defined]
         return [f.object for f in res.output]
 
-    def _superseded_by(self, ref: Any) -> list[Any]:
+    def _superseded_by(self, ref: Any, fold: _SearchFold | None = None) -> list[Any]:
         """Facts whose ``@memory:supersedes`` currently points AT *ref*."""
+        if fold is not None:
+            return fold.objects_pointing_to(ref, _MEMORY_SUPERSEDES)
         s = self.store
         res = s.query_facts(predicate=_MEMORY_SUPERSEDES)  # type: ignore[attr-defined]
         return [f.subject for f in res.output if f.object == ref]
@@ -1841,7 +2175,9 @@ class NativeMemoryStore:
             scope_ref = self._scope_ref("wing", wing)
         fold = self._fold_snapshot()
 
-        scope_index = fold_scope(fold if fold is not None else s.kernel)  # type: ignore[attr-defined]
+        scope_index = (
+            fold.scope_index() if fold is not None else fold_scope(s.kernel)  # type: ignore[attr-defined]
+        )
         universe = (
             set(scope_index.cells_in_scope(scope_ref))
             if scope_ref is not None
@@ -1884,11 +2220,11 @@ class NativeMemoryStore:
             "predicate": body.get("predicate"),
             "valid_at": body.get("valid_at"),
             "invalid_at": body.get("invalid_at"),
-            "proof_count": len(self._derived_from_refs(ref)),
-            "derived_from": self._derived_from_refs(ref),
+            "proof_count": len(self._derived_from_refs(ref, fold)),
+            "derived_from": self._derived_from_refs(ref, fold),
             "recorded_at": self._first_fact_value(ref, _RECORDED_AT_PREDICATE, fold),
-            "current": self._is_current(ref),
-            "superseded_by": self._superseded_by(ref),
+            "current": self._is_current(ref, fold),
+            "superseded_by": self._superseded_by(ref, fold),
         }
 
     # ------------------------------------------------------------------
@@ -1955,6 +2291,17 @@ class NativeMemoryStore:
                     _IN_SESSION_PREDICATE,
                     s.write_cell(session_id.encode()),
                 )
+
+        self._file_filing(
+            drawer_ref=span_ref,
+            wing=wing,
+            room=room_resolved,
+            source="reflection",
+            category="conversation",
+            filed_at=filed_at,
+            session_id=session_id,
+            commit=None,
+        )
 
         job_payload = json.dumps(
             {
@@ -2128,7 +2475,9 @@ class NativeMemoryStore:
         from amplifier_data.lenses._scope import fold_scope
 
         room_scope_ref = self._scope_ref("room", room)
-        scope_index = fold_scope(fold if fold is not None else self.store.kernel)  # type: ignore[attr-defined]
+        scope_index = (
+            fold.scope_index() if fold is not None else fold_scope(self.store.kernel)  # type: ignore[attr-defined]
+        )
         member_refs = scope_index.cells_in_scope(room_scope_ref)
         facts: list[Any] = []
         drawers: list[Any] = []
@@ -2147,7 +2496,9 @@ class NativeMemoryStore:
         from amplifier_data.lenses._scope import fold_scope
 
         wing_scope_ref = self._scope_ref("wing", wing)
-        scope_index = fold_scope(fold if fold is not None else self.store.kernel)  # type: ignore[attr-defined]
+        scope_index = (
+            fold.scope_index() if fold is not None else fold_scope(self.store.kernel)  # type: ignore[attr-defined]
+        )
         member_refs = scope_index.cells_in_scope(wing_scope_ref)
         rooms: set[str] = set()
         for ref in member_refs:
@@ -2476,7 +2827,9 @@ class NativeMemoryStore:
 
         fold = self._fold_snapshot()
         wing_scope_ref = self._scope_ref("wing", wing)
-        scope_index = fold_scope(fold if fold is not None else self.store.kernel)  # type: ignore[attr-defined]
+        scope_index = (
+            fold.scope_index() if fold is not None else fold_scope(self.store.kernel)  # type: ignore[attr-defined]
+        )
         member_refs = scope_index.cells_in_scope(wing_scope_ref)
 
         rows: list[dict[str, Any]] = []
