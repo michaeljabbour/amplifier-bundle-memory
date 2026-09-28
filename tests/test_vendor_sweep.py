@@ -49,6 +49,7 @@ _ALLOWLISTED_MEMPALACE_FILES = {
     REPO_ROOT / "modules/hooks-memory-briefing/tests/conftest.py",
     REPO_ROOT / "modules/hooks-memory-capture/tests/conftest.py",
     REPO_ROOT / "modules/hooks-memory-interject/tests/conftest.py",
+    REPO_ROOT / "modules/hooks-memory-reflect/tests/conftest.py",
     REPO_ROOT / "tests/integration/test_native_smoke.py",
     # KG-N5 migration test: must seed a legacy-shaped chromadb collection
     # (collection name "mempalace_drawers") to prove the importer works.
