@@ -1084,6 +1084,6 @@ async def mount(
 
     return {
         "name": "hooks-memory-capture",
-        "version": "1.2.3",
+        "version": "2.1.0",
         "provides": ["memory-capture"],
     }

@@ -15,7 +15,7 @@ source = { git = "https://github.com/michaeljabbour/amplifier-data?rev=3ef751b6f
 
 [[package]]
 name = "amplifier-module-hooks-memory-interject"
-version = "2.0.1"
+version = "2.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "amplifier-data" },

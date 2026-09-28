@@ -1,6 +1,6 @@
 bundle:
   name: memory-behavior
-  version: 2.0.1
+  version: 2.1.0
   description: |
     Wires the full memory stack: native semantic storage (amplifier-data +
     local embedder, via the auto-started memory daemon), project-context
@@ -28,7 +28,7 @@ hooks:
   # memory daemon (client.remember(), no vendor subprocess).
   - module: hooks-memory-capture
     source: ../modules/hooks-memory-capture
-    version: 2.0.0
+    version: 2.1.0
     config:
       auto_wing: true
       auto_room: true
@@ -61,7 +61,7 @@ hooks:
   # Session end: Curator agent handles HANDOFF.md update and memory curation.
   - module: hooks-memory-briefing
     source: ../modules/hooks-memory-briefing
-    version: 2.0.0
+    version: 2.1.0
     config:
       token_budget: 1500
       include_kg: true
@@ -75,7 +75,7 @@ hooks:
   # HANDOFF.md at session:end. Integrates the project-context system natively.
   - module: hooks-project-context
     source: ../modules/hooks-project-context
-    version: 1.1.0
+    version: 2.1.0
     config:
       tier1_always: true              # always read PROJECT_CONTEXT.md + GLOSSARY.md
       handoff_on_end: true            # update HANDOFF.md at session:end
@@ -103,7 +103,7 @@ hooks:
   # OpenAI (gpt-4.1-nano) using OPENAI_API_KEY for uncertain-band scoring.
   - module: hooks-memory-interject
     source: ../modules/hooks-memory-interject
-    version: 2.0.1
+    version: 2.1.0
     config:
       cosine_threshold: 0.72
       uncertain_band: 0.10
@@ -131,7 +131,7 @@ tools:
   # memory daemon -- no vendor dependency, no subprocess.
   - module: tool-memory
     source: ../modules/tool-memory
-    version: 2.0.1
+    version: 2.1.0
     config:
       home: "~/.amplifier/memory"     # override: AMPLIFIER_MEMORY_HOME
       garden_max_drawers: 200         # budget cap for garden analysis

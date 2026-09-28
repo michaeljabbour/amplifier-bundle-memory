@@ -1,6 +1,81 @@
 # Changelog
 
-## [Unreleased]
+## [2.1.0] — 2026-09-28
+
+Three-layer memory (design: `docs/plans/2026-09-27-memory-layers-design.md`;
+decisions: `project-context/PROVENANCE.md` D6–D20). L1 evidence (drawers)
+is joined by L2 facts (derived, auditable, provenance-mandatory) and L3
+index (room/wing navigation + standing questions), with hybrid retrieval,
+opt-in cold-path reflection, and a mechanism-only retrieval-outcome event
+pair that a separate conductor (behavioral-plasticity) consumes.
+
+### Added
+
+- **L2 facts** (D12): tool ops `fact_add`, `fact_supersede` (implicit via
+  `supersedes`), `facts` (query, `current_only`). Add-only, provenance-
+  mandatory (a fact cannot be written without ≥1 source drawer), supersede-
+  never-delete. Single-valued predicates resolve newest-wins without an LLM;
+  unresolved contradictions become amplifier-data integrity tensions (D12).
+- **Reflection jobs, `hooks-memory-reflect`, `memory:distiller`,
+  `context/reflection-rubric.md`** (D10, D18): opt-in
+  `behaviors/memory-reflect.yaml` watermarks the conversation span since the
+  last reflection on `context:compaction` / `context:pre_compact` /
+  `session:end`, files it as a durable `reflection_job` cell, and spawns the
+  distiller agent (`model_role: [fast, general]`) via the app-layer
+  `session.spawn` capability — absence of that capability is a no-op (job
+  stays queued), never an error.
+- **L3 index + standing questions** (D19, T3.1/T3.3): tool ops `index`,
+  `index_set`, `standing_add`, `standing_answer`, `standing`. Mechanism-first:
+  `index()`/`standing()` are deterministic, LLM-free reads computed from
+  current facts/drawers; the curator (opt-in `behaviors/memory-index.yaml`)
+  supersedes the derived view with curated prose, served until
+  `pending_changes > 10`. Standing answers go stale when a cited fact is no
+  longer current.
+- **Layered briefing** (D20, T3.2): coordination files → Memory map (L3) →
+  Standing answers → Known facts `[proof N]` → Relevant evidence, within the
+  existing token budget. Legacy briefing stays byte-identical and is pinned
+  in its own tests; layered is the new default, with automatic fallback to
+  legacy for daemons predating the L3 ops (capability probe, not a hard
+  dependency).
+- **RRF hybrid search + `since`/`until`** (D9, D17): a new `amplifier-data`
+  BM25 lens fused with the existing semantic lens by rank fusion (k=60),
+  reported per-hit as `rrf` + `arms` (rank per arm). Temporal `since`/`until`
+  filters on earliest `filed_at`; undated drawers are excluded when a bound
+  is given.
+- **`filed_at` / `in_session` / `at_commit`** (D6, T0.2): drawer time and
+  provenance facts, earliest-wins per content-addressed ref; `garden`'s
+  `lookback_days` now filters by real age.
+- **Secret redaction** (D14, T0.3): `hooks-memory-capture` and `fact_add`
+  share one scrubber (`redact.py`) for provider API keys, GitHub/AWS/Slack/
+  Google tokens, JWTs, PEM private-key blocks, bearer headers, and
+  `NAME=secret`-shaped env assignments — applied before capture, previews,
+  and event payloads alike.
+- **Retrieval events, `memory:retrieved` / `memory:injected`** (T4.1): every
+  memory retrieval (tool `search`/`facts`/`index`, `hooks-memory-interject`,
+  `hooks-memory-briefing`) emits `memory:retrieved` (source, op, redacted
+  query, wing, up to 20 content-free hit summaries, latency); content
+  actually entering the model context additionally emits `memory:injected`
+  (refs, per-ref layer, char count). Refs are content addresses — stable
+  across sessions — closing the "stable memory ids + memory_outcome event"
+  backlog item. Memory stays event-only by design (constellation rule,
+  `AGENTS.md`): a separate conductor (behavioral-plasticity) is the only
+  component that joins these events with its own outcome signal.
+- **AMB adapter** (`benchmarks/amb/`, T0.4): registers this store as an AMB
+  provider at runtime for LongMemEval-S / LoCoMo / PrecisionMemBench —
+  dev tooling only, no AMB code vendored (AMB has no license).
+
+### Changed
+
+- `search` defaults to `fusion="rrf"` whenever the installed `amplifier-data`
+  exposes `lenses.bm25` (capability check, not a hard dependency);
+  `fusion="legacy"` reproduces v2.0.1 byte-for-byte and stays pinned in its
+  own equivalence tests (D17).
+- `hooks-memory-briefing` defaults to `briefing_mode="layered"`; legacy mode
+  is retained (byte-identical output, own pinned tests) and is what an older
+  daemon without the L3 index ops automatically falls back to (D20).
+- `amplifier-data` pin moved to `3ef751b6fac7f6899824b78774b74809f09bcd81`
+  across every module pyproject (lockstep rule — `uv --no-sources` rejects
+  transitive URL deps across mismatched pins) (D16, T0.1).
 
 ### Removed
 
