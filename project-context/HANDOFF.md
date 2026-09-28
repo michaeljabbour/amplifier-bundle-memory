@@ -1,6 +1,6 @@
 # Handoff
 
-*Last updated: 2026-09-28 -- v2.1.0 three-layer memory on `feat/memory-layers` (local, not pushed)*
+*Last updated: 2026-09-28 -- merged origin/main (18 commits: v2.0.2 release, incremental fold caching + numpy vector search + automation opt-out, stale-daemon retirement, sub-session skip) into `feat/memory-layers`'s three-layer memory (D26). See PROVENANCE.md for the merge resolution notes.*
 
 ## TL;DR for Michael (2026-09-28 -- three layers built, gene-transferred, Amplifier-shaped)
 
@@ -28,18 +28,21 @@ in PROVENANCE.
 - `context-sleep` retired (D11). AMB adapter in `benchmarks/amb/`.
 
 **Needs you (in order):**
-1. Push amplifier-data `feat/bm25-lens` (5d7c301, 9b993a1) -> merge -> bump the pin
-   in all six module pyprojects (T1.5). Until then production runs legacy
-   search (capability check -- safe).
+1. ~~Push amplifier-data `feat/bm25-lens` -> merge -> bump the pin~~ DONE (D22):
+   `feat/bm25-lens` merged to `amplifier-data` `main`; pin now
+   `2ecdce3e5c81e30fdab139d7f5d73a070a63af76` in lockstep across all seven
+   module pyprojects (tool-memory, capture/briefing/interject/reflect,
+   project-context, behavioral-write).
 2. Ratify D13's measurement bar, then provide `GEMINI_API_KEY` (+ `GROQ_API_KEY`)
    so the AMB baseline can run (`benchmarks/amb/README.md`). No "better" claim
    until those numbers exist.
-3. Push `feat/memory-layers` and validate in a DTU (amplifier-tester) -- the
+3. Merge this branch (`feat/memory-layers`, now carrying origin/main's
+   perf/automation work too) and validate in a DTU (amplifier-tester) -- the
    spawn path (`session.spawn` -> distiller) is unit-tested with fakes only.
-4. T4.2 lives in behavioral-plasticity: consume `memory:injected`.
+4. T4.2 lives in behavioral-plasticity: consume `memory:injected` (now also
+   emitted by the legacy AND layered briefing paths, not just interject/search).
 
-**Environment note:** `~/dev/.venv` has amplifier-data 0.2.0 from the unpushed
-local branch (see WAYSOFWORKING).
+**Environment note:** `~/dev/.venv` has amplifier-data installed from the pushed pin `2ecdce3` (see WAYSOFWORKING).
 
 **Known limits:** concurrent drains may double-process a job (dedup makes it
 harmless); T2.6 curator-handoff event still informational; standing questions

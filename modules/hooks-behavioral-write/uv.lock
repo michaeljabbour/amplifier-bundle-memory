@@ -8,7 +8,7 @@ version = "0.2.0"
 source = { git = "https://github.com/michaeljabbour/amplifier-data?rev=2ecdce3e5c81e30fdab139d7f5d73a070a63af76#2ecdce3e5c81e30fdab139d7f5d73a070a63af76" }
 
 [[package]]
-name = "amplifier-module-hooks-memory-capture"
+name = "amplifier-module-hooks-behavioral-write"
 version = "2.2.0"
 source = { editable = "." }
 dependencies = [

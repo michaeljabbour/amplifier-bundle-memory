@@ -130,6 +130,7 @@ except ImportError:
 # amplifier-data + fastembed as of B2, §8) -- no defensive ImportError
 # fallback; a missing import means the environment is genuinely
 # misconfigured, not something a private duplicate helper should paper over.
+from amplifier_module_tool_memory.automation_gate import automation_opt_out
 from amplifier_module_tool_memory.client import ensure_daemon
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -277,14 +278,25 @@ def _format_injection(
     else:  # orchestrator:complete
         header = "⚠️ Memory check — this may be relevant to your current reasoning:"
 
+    # Each snippet costs its text plus the "\n---\n" separator plus the
+    # newline "\n".join() puts before it; count all of it so the cap is exact.
+    overhead = len("\n") + len("\n---\n")
     parts = [header]
     total = len(header)
     for mem in memories:
         snippet = mem["text"].strip()
-        if total + len(snippet) > max_chars:
-            snippet = snippet[: max_chars - total - 10] + "…"
+        if total + overhead + len(snippet) > max_chars:
+            # Room left for this snippet (minus the ellipsis). It can be <= 0
+            # once an earlier snippet was already truncated to the cap --
+            # slicing with that negative bound used to keep almost the WHOLE
+            # snippet (e.g. a ~6k-char second memory in an "800-char"
+            # injection).
+            room = max_chars - total - overhead - len("…")
+            if room <= 0:
+                break
+            snippet = snippet[:room] + "…"
         parts.append(f"\n---\n{snippet}")
-        total += len(snippet)
+        total += overhead + len(snippet)
         if total >= max_chars:
             break
 
@@ -334,6 +346,11 @@ class MemoryInterjectHook:
         # See module docstring "Privacy" section.
         self.llm_judge_enabled: bool = bool(config.get("llm_judge_enabled", False))
         self.emit_events: bool = bool(config.get("emit_events", True))
+        # perf/incremental-fold (part B): automated/non-interactive runs
+        # opt out entirely -- see amplifier_module_tool_memory.automation_gate.
+        self.excluded_working_dirs: list[str] = list(
+            config.get("excluded_working_dirs", []) or []
+        )
 
         # Per-turn guard flag: prevents re-injection in the same orchestrator run
         self._injected_this_turn: bool = False
@@ -474,9 +491,51 @@ class MemoryInterjectHook:
 
     # ── Event handlers ────────────────────────────────────────────────────────
 
+    async def _skip(self, sid: Any, trigger: str, reason: str) -> HookResult:
+        """Skip retrieval entirely -- no daemon contact -- for *reason*.
+
+        Two callers share this path:
+
+        * Sub-agent/child sessions (``reason="sub_session"``): this hook
+          fires on prompt:submit, tool:pre, and orchestrator:complete for
+          EVERY session, including sub-agent sessions spawned via
+          ``delegate()`` -- each one paid a full ``ensure_daemon()`` +
+          ``MemoryClient.search()`` round trip (bounded by
+          ``retrieval_timeout_s``) before this fix. Measured 2026-09-25: a
+          heavy user racked up 2,156 child sessions in 30 days. The
+          coordinator stamps ``parent_id`` onto every emitted event via
+          ``set_default_fields`` (amplifier_core.session.AmplifierSession),
+          so it's present here exactly as it is on ``session:start`` --
+          mirrors hooks-memory-briefing's existing sub-session skip.
+        * Automated/non-interactive runs (``reason="automation_opt_out"``):
+          see ``amplifier_module_tool_memory.automation_gate`` -- a bench
+          harness or CI runner opted this process out via
+          ``AMPLIFIER_MEMORY_CAPTURE`` or ``excluded_working_dirs``.
+        """
+        if self.emit_events:
+            emit_event(
+                "memory-interject",
+                "interject_skipped",
+                ok=False,
+                data={"trigger": trigger, "reason": reason},
+                session_id=sid,
+            )
+            try:
+                await self._bridge_emit(
+                    "memory:interject_skipped",
+                    {"ok": False, "trigger": trigger, "reason": reason},
+                )
+            except Exception:
+                pass
+        return HookResult(action="continue")
+
     async def on_prompt_submit(self, event: str, data: dict[str, Any]) -> HookResult:
         """Fire on prompt:submit — inject before the LLM sees the user's prompt."""
         sid = data.get("session_id")
+        if data.get("parent_id") is not None:
+            return await self._skip(sid, "prompt_submit", "sub_session")
+        if automation_opt_out(excluded_working_dirs=self.excluded_working_dirs):
+            return await self._skip(sid, "prompt_submit", "automation_opt_out")
 
         if not self.prompt_enabled:
             if self.emit_events:
@@ -597,6 +656,10 @@ class MemoryInterjectHook:
     async def on_tool_pre(self, event: str, data: dict[str, Any]) -> HookResult:
         """Fire on tool:pre — surface prior results for the same tool+input."""
         sid = data.get("session_id")
+        if data.get("parent_id") is not None:
+            return await self._skip(sid, "tool_pre", "sub_session")
+        if automation_opt_out(excluded_working_dirs=self.excluded_working_dirs):
+            return await self._skip(sid, "tool_pre", "automation_opt_out")
 
         if not self.tool_pre_enabled:
             if self.emit_events:
@@ -719,6 +782,10 @@ class MemoryInterjectHook:
         """
         self._turn += 1
         sid = data.get("session_id")
+        if data.get("parent_id") is not None:
+            return await self._skip(sid, "orchestrator_complete", "sub_session")
+        if automation_opt_out(excluded_working_dirs=self.excluded_working_dirs):
+            return await self._skip(sid, "orchestrator_complete", "automation_opt_out")
 
         if not self.orc_enabled:
             if self.emit_events:
@@ -983,7 +1050,7 @@ async def mount(
 
     return {
         "name": "hooks-memory-interject",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "description": (
             "OR-firing memory interjection hook: surfaces relevant memories "
             "on prompt:submit and orchestrator:complete (tool:pre is opt-in)"

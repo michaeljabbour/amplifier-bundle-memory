@@ -437,3 +437,24 @@ single-writer daemon instead of a full-log fold per query).
 to run (no base class; directory passed as store path; scores-only raw
 response scored 0%) — fixed before any number was recorded.
 **Status:** derived; D13 remains the bar.
+
+### D27 — Integrated origin/main (v2.0.2–2.0.4) under the layers; release is 2.2.0
+**Decision:** merged origin/main (18 commits since the branch's base) into
+`feat/memory-layers`: main's reviewed mechanisms are the base (incremental fold
+caching, numpy vector search, serialized kernel access, bounded snapshot
+retention, briefing prefetch + once-per-session delivery at the first
+`prompt:submit`, sub-session skip, strictly-older daemon retirement); the
+layers were grafted on. Lockstep modules → 2.2.0 (main shipped briefing 2.1.0).
+**Why:** the branch was cut from a stale local main. The DTU showed our
+briefing listened only on `session:start`, whose HookResult the kernel discards
+— main already delivered at `prompt:submit`. Taking main's chassis fixed that.
+**Results:** ~851 tests pass; product-name gate clean; rrf p95 94–100 ms,
+legacy 75–79 ms at 5k drawers (was 232–297 / 225–236 before merging main).
+The scope-aware attribution dicts are now extended incrementally inside main's
+fold cache (D26 item 2, partly). Also caught: our search had dropped main's
+`importance` hit field — restored.
+**Still open:** scoped p95 grows linearly with UNRELATED corpus size
+(6 → 173 → 603 ms at 0/20/60 noise wings × 200 drawers) because the vector and
+BM25 arms still fold the whole log; the next substrate step is scope-partitioned
+indexes maintained from the kernel's `subscribe` stream.
+**Status:** derived.

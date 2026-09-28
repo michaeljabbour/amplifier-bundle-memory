@@ -270,7 +270,7 @@ class TestCoordinationFilesSection:
         # (from its header to end-of-briefing footer) to compare byte-for-byte.
         coord_start = legacy_text.index("### Coordination Files")
         legacy_coord_section = legacy_text[coord_start:].split(
-            "\n*This briefing is ephemeral"
+            "\n*Injected from memory for orientation"
         )[0]
 
         # -- Layered --

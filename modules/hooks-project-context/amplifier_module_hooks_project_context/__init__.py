@@ -430,6 +430,6 @@ async def mount(
             coordinator.hooks.register(evt, hook, name=hook.name)
     return {
         "name": "hooks-project-context",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "provides": ["project-context-start", "project-context-end"],
     }

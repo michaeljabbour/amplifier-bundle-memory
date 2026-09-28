@@ -1,6 +1,6 @@
 [project]
 name = "amplifier-module-hooks-behavioral-write"
-version = "2.1.0"
+version = "2.2.0"
 description = "Amplifier hook module — T1-HOOK-1: salience-gated, post-session behavioral write that recomputes drawer importance from session outcome and applies a reversible update through the amplifier-data seam"
 readme = "README.md"
 license = { text = "MIT" }

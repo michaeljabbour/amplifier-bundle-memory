@@ -25,6 +25,7 @@ import argparse
 import base64
 import hmac
 import json
+import logging
 import os
 import secrets
 import signal
@@ -195,6 +196,71 @@ def _dispatch_generic(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Rust kernel access serialization
+# ---------------------------------------------------------------------------
+
+
+class _SerializedFileKernel:
+    """Proxy that serializes every call into a ``RustFileKernel``.
+
+    The PyO3 ``RustFileKernel`` is not re-entrant across threads: an
+    ``append`` that lands while another thread is inside ``all_events`` (or
+    vice versa) fails with ``RuntimeError: Already borrowed``.
+    ``DurableKernel`` only locks its own ``append_batch``; ``all_events`` and
+    ``resolve`` call the Rust kernel unlocked. The daemon serves requests on
+    a ThreadingHTTPServer, and its read tools append too (scope/anchor cells),
+    so any two overlapping requests could race -- live event logs show
+    ~1.4k briefing lookups failing with HTTP 400 this way. Serializing on the
+    kernel's OWN re-entrant lock (the one ``append_batch`` already holds)
+    makes every Rust call mutually exclusive without changing results; only
+    the Rust-side read is serialized, the Python-side lens folds still run
+    per request.
+    """
+
+    def __init__(self, inner: Any, lock: Any) -> None:
+        self._inner = inner
+        self._lock = lock
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+        lock = self._lock
+
+        def _locked(*args: Any, **kwargs: Any) -> Any:
+            with lock:
+                return attr(*args, **kwargs)
+
+        return _locked
+
+
+def _serialize_kernel_access(store: Any) -> None:
+    """Wrap *store*'s durable Rust kernel in :class:`_SerializedFileKernel`.
+
+    No-op for in-memory kernels (pure Python, no borrow checking), remote
+    stores, and anything already wrapped. Idempotent.
+    """
+    kernel = getattr(store, "kernel", None)
+    inner = getattr(kernel, "_fk", None)
+    lock = getattr(kernel, "_lock", None)
+    if inner is None or lock is None:
+        if type(kernel).__name__ == "DurableKernel":
+            # The fix relies on amplifier-data private attributes; if a
+            # future release renames them, say so instead of silently
+            # serving concurrent requests unserialized.
+            logging.getLogger(__name__).warning(
+                "memory daemon: durable kernel %r lacks _fk/_lock; concurrent "
+                "requests are NOT serialized (overlapping reads/appends may "
+                "fail with 'Already borrowed')",
+                type(kernel),
+            )
+        return
+    if isinstance(inner, _SerializedFileKernel):
+        return
+    kernel._fk = _SerializedFileKernel(inner, lock)
+
+
 def make_gateway(
     store: Any,
     host: str,
@@ -205,6 +271,7 @@ def make_gateway(
 ) -> ThreadingHTTPServer:
     """Build (but do not start) an authenticated MCP gateway over ``store``."""
 
+    _serialize_kernel_access(store)
     lock = threading.Lock()
 
     def _dispatch(tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -286,6 +353,29 @@ def daemon_version() -> str:
         return _pkg_version("amplifier-module-tool-memory")
     except Exception:
         return "0.0.0-dev"
+
+
+def code_fingerprint(pkg_dir: Path | None = None) -> float:
+    """Max source ``.py`` mtime (epoch seconds) across this installed
+    package, or ``0.0`` when it cannot be scanned.
+
+    ``daemon_version()`` alone cannot detect a reinstalled/upgraded package
+    that did not also bump its version string (e.g. an editable checkout
+    whose files changed, or a release that forgot the bump) -- a running
+    daemon then reports the SAME version as a client whose on-disk code is
+    actually newer, and ``_should_retire`` (version-string comparison only)
+    never fires. Both the daemon's ``/health`` payload and the client's
+    stale-code check (§5.2 step 1c-bis, ``client._should_retire_stale_code``)
+    call this SAME function against the SAME package layout so they can
+    never disagree about what "current" means, mirroring how
+    ``daemon_version()`` already keeps both sides in sync for version
+    strings.
+    """
+    d = pkg_dir if pkg_dir is not None else Path(__file__).resolve().parent
+    try:
+        return max((p.stat().st_mtime for p in d.rglob("*.py")), default=0.0)
+    except OSError:
+        return 0.0
 
 
 def default_memory_home() -> Path:
@@ -742,6 +832,7 @@ def make_daemon(
     token: str,
     allow_localhost_bypass: bool = True,
     version: str | None = None,
+    code_fp: float | None = None,
     durable: bool = True,
     on_shutdown: Any = None,
 ) -> ThreadingHTTPServer:
@@ -749,12 +840,14 @@ def make_daemon(
 
     Existing generic tools (write_cell ... batch) carry over verbatim via
     :func:`_dispatch_generic`. NEW: the §5.4 domain tools, ``shutdown``, and
-    a ``/health`` payload extended with ``version``/``embedder``/``durable``.
+    a ``/health`` payload extended with
+    ``version``/``code_fingerprint``/``embedder``/``durable``.
     *on_shutdown*, when given, is called (in a background thread, AFTER the
     HTTP response is sent) when the ``shutdown`` tool fires -- ``run_daemon``
     uses it to close the store; ``daemon.json`` removal is the caller's job
     (it happens once ``serve_forever()`` returns).
     """
+    _serialize_kernel_access(store)
     lock = threading.Lock()
     mem_store = NativeMemoryStore(store=store)
     if embedder is not None:
@@ -767,7 +860,20 @@ def make_daemon(
             args=(mem_store, embedder, lock),
             daemon=True,
         ).start()
+    # Search-fold warm-up (§5.6 latency fix, measured 2026-09-25): building
+    # the first _SearchFold snapshot over a large durable log takes ~4s
+    # (materializing the whole event log) -- paid here, off the request
+    # path, instead of by whichever real caller's search() happens to hit
+    # an empty snapshot first. Race-safe: _fold_snapshot()'s own
+    # single-flight generation/lock bookkeeping (store.py) means a real
+    # search arriving concurrently either joins this build or (if it wins
+    # the race) builds its own -- never duplicated work, never blocks
+    # daemon startup (this thread is not joined; do_GET/do_POST below start
+    # serving as soon as ThreadingHTTPServer below is constructed and the
+    # caller calls serve_forever()).
+    threading.Thread(target=mem_store._fold_snapshot, daemon=True).start()  # noqa: SLF001
     resolved_version = version if version is not None else daemon_version()
+    resolved_fingerprint = code_fp if code_fp is not None else code_fingerprint()
     httpd_holder: dict[str, ThreadingHTTPServer] = {}
 
     def _dispatch(tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -821,6 +927,7 @@ def make_daemon(
                         "ok": True,
                         "service": "memory-daemon",
                         "version": resolved_version,
+                        "code_fingerprint": resolved_fingerprint,
                         "embedder": (
                             {"ready": embedder.ready, "failed": embedder.failed}
                             if embedder is not None
@@ -1211,6 +1318,7 @@ def _run_owned_daemon(
     resolved_token_path = Path(token_path) if token_path else (resolved_home / "token")
     token = ensure_token(resolved_token_path)
     version = daemon_version()
+    fingerprint = code_fingerprint()
 
     def _close_store() -> None:
         store.close()
@@ -1222,6 +1330,7 @@ def _run_owned_daemon(
         port,
         token=token,
         version=version,
+        code_fp=fingerprint,
         durable=durable,
         on_shutdown=_close_store,
     )
@@ -1234,6 +1343,7 @@ def _run_owned_daemon(
         "port": chosen_port,
         "pid": os.getpid(),
         "version": version,
+        "code_fingerprint": fingerprint,
         "token_file": str(resolved_token_path),
         "started_at": datetime.now(UTC).isoformat(),
         "durable": durable,

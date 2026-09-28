@@ -27,6 +27,9 @@ from __future__ import annotations
 import json
 import logging
 import struct
+import threading
+import time
+import weakref
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
@@ -171,6 +174,58 @@ def _resolve_batch_ref(commit_result: Any, ref: Any) -> Any:
     return ref
 
 
+class _CellRefCache:
+    """Incremental ``SeqPos-index -> cell_ref`` memo for an append-only log.
+
+    ``CellWriteEvent.cell_ref()`` is an uncached sha256 over canonical JSON;
+    recomputing it for every event on every read was the single largest cost
+    of a search (~220k hashes per call on a ~400k-event store, ~1.5 s). A
+    ref is a pure function of an immutable event, and the log is append-only,
+    so the refs for the prefix already seen never change: only the newly
+    appended tail is hashed. The prefix is re-validated on every call (length
+    and the SeqPos of the last memoized event); any mismatch -- e.g. a
+    compacted/rewritten log -- drops the memo and rebuilds from scratch.
+    Thread-safe (the daemon serves reads concurrently).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._refs: list[Any] = []
+        self._last_pos: Any = None
+
+    def refs_for(self, events: Any) -> list[Any]:
+        from amplifier_data.models import CellWriteEvent
+
+        with self._lock:
+            n = len(self._refs)
+            if n > len(events) or (n and events[n - 1][0] != self._last_pos):
+                self._refs = []
+                n = 0
+            if len(events) > n:
+                extend = self._refs.append
+                for _pos, ev in events[n:]:
+                    extend(ev.cell_ref() if isinstance(ev, CellWriteEvent) else None)
+                self._last_pos = events[-1][0]
+            return self._refs[: len(events)]
+
+
+class _FoldView:
+    """A read-only slice of a :class:`_SearchFold`'s event list.
+
+    Exposes the same ``all_events()`` / ``payloads`` surface, so the
+    substrate's own lenses run their exact logic over just the events that
+    can affect the answer (see :meth:`_SearchFold.for_subject` and
+    :meth:`_SearchFold.vector_view`).
+    """
+
+    def __init__(self, events: Any, payloads: dict[Any, bytes]) -> None:
+        self._events = events
+        self.payloads = payloads
+
+    def all_events(self) -> Any:
+        return self._events
+
+
 class _SearchFold:
     """ONE materialized ``kernel.all_events()`` pass, shared across every lens
     read inside a single :meth:`NativeMemoryStore.search` call.
@@ -178,11 +233,11 @@ class _SearchFold:
     Perf seam (perf/search-no-regenerate): the old search path called
     ``store.regenerate(ref)`` per candidate/hit, and each store-surface lens
     read (``query_vector``/``query_facts``/``graph_neighbors``) re-materialized
-    the whole event log — O(reads × log) per query (~12s on a ~38k-event
+    the whole event log -- O(reads x log) per query (~12s on a ~38k-event
     durable store). This class pays for the materialization ONCE and exposes
     the only kernel surface the substrate's pure-fold lenses consume
     (``all_events()``), so ``VectorLens``/``TemporalLens``/``GraphLens``/
-    ``fold_scope`` run their EXACT own logic over one cached event list —
+    ``fold_scope`` run their EXACT own logic over one cached event list --
     reuse of amplifier-data primitives, not a reimplementation.
 
     It also carries the ``ref -> payload`` join for every ``CellWriteEvent``
@@ -190,39 +245,202 @@ class _SearchFold:
     per-hit payload reads need no ``regenerate`` full-log re-fold. Content
     addressing makes the join exact: a ref defined by a ``CellWriteEvent`` is
     the content address of ``(payload, interpreters)``, so every defining
-    event for that ref carries an identical payload — precisely what
+    event for that ref carries an identical payload -- precisely what
     ``regenerate(ref).payload`` returns (replay.py folds to the last defining
     payload). Refs defined some other way (interpreter/index cells) are
     absent from the join and fall back to ``regenerate``.
 
-    Reads the kernel directly — no AccessEvents (D4 read-vs-fold boundary).
-    Scoped to one call: never cached on the store (D1: lenses stay pure;
-    every search folds a fresh, current view of the log).
+    perf/startup-latency + perf/incremental-fold: the per-event refs come
+    from the store's :class:`_CellRefCache` (only new events are hashed),
+    and this fold itself may be built by EXTENDING a *prior* fold (an
+    append-only continuation, see :meth:`_is_prefix_of`) instead of
+    rescanning the whole log -- the payload join, the per-subject/vector
+    indexes, the numpy vector matrix (:meth:`vector_matrix`), AND (scale
+    fix / D26) the scope-membership, current-facts triple history and
+    filing-cell attribution below are all extended from only the newly
+    appended tail on a store dominated by continuous writes.
+
+    Reads the kernel directly -- no AccessEvents (D4 read-vs-fold boundary).
+    Lenses stay pure (D1) and every read sees a current view of the log: a
+    snapshot is reused only by :meth:`NativeMemoryStore._fold_snapshot` while
+    NO event has been appended since it was taken (tracked by a kernel
+    observer), and only for a few seconds, so a burst of reads (the session
+    briefing's search + KG + diary, then the first prompt's interject search)
+    pays for one log materialization instead of one each.
     """
 
-    def __init__(self, kernel: Any) -> None:
-        from amplifier_data.lenses._scope import SCOPED_TO
-        from amplifier_data.lenses.temporal import INVALIDATE_PREFIX
-        from amplifier_data.lenses.vector import EMBEDDING_OF
-        from amplifier_data.models import CellWriteEvent, RelationshipEvent
+    def __init__(
+        self,
+        kernel: Any,
+        ref_cache: _CellRefCache | None = None,
+        *,
+        prior: _SearchFold | None = None,
+    ) -> None:
+        """Build over *kernel*, or, when *prior* is a valid append-only
+        ancestor of the resulting event list (perf/incremental-fold),
+        EXTEND its already-computed payload join / per-subject index /
+        embedding index / scope-and-facts attribution index with only the
+        newly appended tail instead of rescanning the whole log for each of
+        them.
+
+        ``kernel.all_events()`` itself (the Rust-to-Python event
+        marshaling) has no cheaper incremental form in amplifier-data's
+        current API, so that one call is paid unconditionally, exactly as
+        before. Everything this class itself does with the result is what
+        incremental extension actually saves.
+        """
+        from amplifier_data.models import CellWriteEvent
 
         self._events: Any = kernel.all_events()
-        payloads: dict[Any, bytes] = {}
-        for _pos, ev in self._events:
-            if isinstance(ev, CellWriteEvent):
-                payloads[ev.cell_ref()] = ev.payload
+        if ref_cache is not None:
+            refs = ref_cache.refs_for(self._events)
+        else:
+            refs = [
+                ev.cell_ref() if isinstance(ev, CellWriteEvent) else None
+                for _pos, ev in self._events
+            ]
+        self.refs: list[Any] = refs
+
+        extend_from = (
+            prior if prior is not None and prior._is_prefix_of(self._events) else None
+        )
+        start = len(extend_from._events) if extend_from is not None else 0
+        new_tail = list(zip(self._events[start:], refs[start:]))
+
+        if extend_from is not None:
+            payloads = dict(extend_from.payloads)
+        else:
+            payloads = {}
+        for (_pos, ev), ref in new_tail:
+            if ref is not None:
+                payloads[ref] = ev.payload
         self.payloads: dict[Any, bytes] = payloads
 
-        # T0.2: earliest `filed_at` per subject ref, in a second O(log) pass
-        # over the SAME materialized event list (still no per-hit re-fold).
-        # `filed_at` is never invalidated (append-only provenance); a ref
-        # re-filed under a different `filed_at` carries multiple assertions,
-        # so "first-seen" is the lexicographically (== chronologically,
-        # ISO-8601) smallest value. See NativeMemoryStore.drawer_times.
-        # Kept as the LEGACY (pre-filing) fallback -- see `filings` below,
-        # which is scope-aware and preferred whenever it exists.
-        filed_at: dict[Any, str] = {}
-        for _pos, ev in self._events:
+        new_tail_events = [item for item, _ref in new_tail]
+        self._by_subject: dict[Any, list[Any]] | None = (
+            extend_from._extend_by_subject(new_tail_events)
+            if extend_from is not None
+            else None
+        )
+        self._vector_view: _FoldView | None = None
+        self._embedding_edges_cache: list[tuple[str, str]] | None = (
+            extend_from._extend_embedding_edges(new_tail_events)
+            if extend_from is not None
+            else None
+        )
+        # Incrementally-extendable (target_refs, float64 matrix) cache for
+        # the numpy-accelerated vector scorer (perf/incremental-fold) --
+        # see :meth:`vector_matrix`.
+        self._matrix_state: tuple[list[str], Any, int] | None = (
+            extend_from._matrix_state if extend_from is not None else None
+        )
+        self._vector_matrix_computed = False
+        self._vector_matrix: tuple[list[str], Any] | None = None
+
+        # T0.2 / scale-defect-1 fix (D26 -- cross-request incrementality):
+        # filed_at earliest-wins, scope membership, currently-valid-facts
+        # triple history and filing-cell attribution, extended from *prior*
+        # exactly like the caches above instead of re-walked on every fold.
+        base_filed_at = extend_from.filed_at if extend_from is not None else {}
+        self.filed_at: dict[Any, str] = self._merge_filed_at(
+            base_filed_at, new_tail_events, self.payloads
+        )
+
+        if extend_from is not None:
+            base_scope = extend_from.scope_membership
+            base_history = extend_from._triple_history
+            base_sp = extend_from._by_subject_predicate
+            base_po = extend_from._by_predicate_object
+            base_filed_as = extend_from._filed_as_edges
+        else:
+            base_scope, base_history, base_sp, base_po, base_filed_as = (
+                {},
+                {},
+                {},
+                {},
+                [],
+            )
+        (
+            self.scope_membership,
+            self._triple_history,
+            self._by_subject_predicate,
+            self._by_predicate_object,
+            self._filed_as_edges,
+        ) = self._merge_triples(
+            base_scope, base_history, base_sp, base_po, base_filed_as, new_tail_events
+        )
+
+        filings: dict[Any, list[tuple[Any, dict[str, Any]]]] = {}
+        for drawer_ref, filing_ref in self._filed_as_edges:
+            raw = self.payloads.get(filing_ref)
+            if raw is None:
+                continue
+            try:
+                body = json.loads(raw.decode("utf-8", errors="replace"))
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(body, dict) or body.get("kind") != "filing":
+                continue
+            filings.setdefault(drawer_ref, []).append((filing_ref, body))
+        self.filings: dict[Any, list[tuple[Any, dict[str, Any]]]] = filings
+
+    def _is_prefix_of(self, new_events: Any) -> bool:
+        """Whether *new_events* is this fold's own event list with only
+        new events appended at the tail (append-only continuation)."""
+        n = len(self._events)
+        if n == 0:
+            return True
+        if len(new_events) < n:
+            return False
+        return bool(new_events[n - 1][0] == self._events[-1][0])
+
+    def _extend_by_subject(
+        self, new_tail_events: list[Any]
+    ) -> dict[Any, list[Any]] | None:
+        """Extend this fold's ``_by_subject`` index with *new_tail_events*,
+        or ``None`` if it was never built (stays lazy)."""
+        if self._by_subject is None:
+            return None
+        from amplifier_data.models import RelationshipEvent
+
+        by: dict[Any, list[Any]] = {k: list(v) for k, v in self._by_subject.items()}
+        for item in new_tail_events:
+            ev = item[1]
+            if isinstance(ev, RelationshipEvent):
+                by.setdefault(ev.from_ref, []).append(item)
+        return by
+
+    def _extend_embedding_edges(
+        self, new_tail_events: list[Any]
+    ) -> list[tuple[str, str]] | None:
+        """Extend this fold's cached ``embedding_of`` edge list with
+        *new_tail_events*, or ``None`` if it was never built (stays lazy)."""
+        if self._embedding_edges_cache is None:
+            return None
+        from amplifier_data.lenses.vector import EMBEDDING_OF
+        from amplifier_data.models import RelationshipEvent
+
+        edges = list(self._embedding_edges_cache)
+        for _pos, ev in new_tail_events:
+            if isinstance(ev, RelationshipEvent) and ev.type == EMBEDDING_OF:
+                edges.append((ev.from_ref, ev.to_ref))
+        return edges
+
+    @staticmethod
+    def _merge_filed_at(
+        base: dict[Any, str], new_tail_events: list[Any], payloads: dict[Any, bytes]
+    ) -> dict[Any, str]:
+        """Earliest-``filed_at``-per-ref, extended from *base* over only
+        *new_tail_events* (perf/incremental-fold; T0.2's original full-log
+        pass, made incremental). ``filed_at`` is never invalidated
+        (append-only provenance); "first-seen" is the lexicographically
+        (== chronologically, ISO-8601) smallest value. Kept as the LEGACY
+        (pre-filing) fallback -- see ``filings``, which is scope-aware and
+        preferred whenever it exists."""
+        from amplifier_data.models import RelationshipEvent
+
+        filed_at = dict(base)
+        for _pos, ev in new_tail_events:
             if isinstance(ev, RelationshipEvent) and ev.type == _FILED_AT_PREDICATE:
                 raw = payloads.get(ev.to_ref)
                 if raw is None:
@@ -231,28 +449,59 @@ class _SearchFold:
                 existing = filed_at.get(ev.from_ref)
                 if existing is None or value < existing:
                     filed_at[ev.from_ref] = value
-        self.filed_at: dict[Any, str] = filed_at
+        return filed_at
 
-        # Scale fix (perf/attribution-and-fold-once): a THIRD pass over the
-        # SAME materialized event list precomputes everything else a
-        # per-hit metadata lookup used to re-fold the log for:
-        #   - scope_membership: ref -> {scope_ref, ...}, the exact data
-        #     `fold_scope`/`GraphLens.neighbors(rel_type="scoped_to")` used
-        #     to recompute from scratch on every call.
-        #   - triple_history / by_subject_predicate / by_predicate_object:
-        #     mirrors TemporalLens's own fold exactly (assert/invalidate per
-        #     (subject, predicate, object) triple, SeqPos-ordered), so
-        #     `current_objects`/`objects_pointing_to` below reproduce
-        #     TemporalLens.current_facts() without a second event-log walk.
-        #   - filings: drawer ref -> [(filing_ref, filing_body), ...], the
-        #     new per-filing attribution record (see module-level
-        #     `_MEMORY_FILED_AS`) written by `file()`/`reflection_job_add`.
-        scope_membership: dict[Any, set[Any]] = {}
-        triple_history: dict[tuple[Any, str, Any], list[tuple[Any, str]]] = {}
-        by_subject_predicate: dict[tuple[Any, str], list[Any]] = {}
-        by_predicate_object: dict[tuple[str, Any], list[Any]] = {}
-        filed_as_edges: list[tuple[Any, Any]] = []
-        for seq_pos, ev in self._events:
+    @staticmethod
+    def _merge_triples(
+        base_scope: dict[Any, set[Any]],
+        base_history: dict[tuple[Any, str, Any], list[tuple[Any, str]]],
+        base_sp: dict[tuple[Any, str], list[Any]],
+        base_po: dict[tuple[str, Any], list[Any]],
+        base_filed_as: list[tuple[Any, Any]],
+        new_tail_events: list[Any],
+    ) -> tuple[
+        dict[Any, set[Any]],
+        dict[tuple[Any, str, Any], list[tuple[Any, str]]],
+        dict[tuple[Any, str], list[Any]],
+        dict[tuple[str, Any], list[Any]],
+        list[tuple[Any, Any]],
+    ]:
+        """Scale fix (perf/attribution-and-fold-once, made incremental for
+        D26): extend, from the base_* args, everything a per-hit metadata lookup
+        used to re-fold the log for:
+          - scope_membership: ref -> {scope_ref, ...}, the exact data
+            `fold_scope`/`GraphLens.neighbors(rel_type="scoped_to")` used
+            to recompute from scratch on every call.
+          - triple_history / by_subject_predicate / by_predicate_object:
+            mirrors TemporalLens's own fold exactly (assert/invalidate per
+            (subject, predicate, object) triple, SeqPos-ordered), so
+            `current_objects`/`objects_pointing_to` reproduce
+            TemporalLens.current_facts() without a second event-log walk.
+          - filed_as edges: drawer ref -> filing ref, resolved into
+            `filings` by the caller (needs the completed payload join).
+        Only *new_tail_events* is scanned; the base_* args already reflect
+        every earlier event (mirrors :meth:`_extend_by_subject`'s
+        copy-then-mutate style).
+        """
+        from amplifier_data.lenses._scope import SCOPED_TO
+        from amplifier_data.lenses.temporal import INVALIDATE_PREFIX
+        from amplifier_data.lenses.vector import EMBEDDING_OF
+        from amplifier_data.models import RelationshipEvent
+
+        scope_membership: dict[Any, set[Any]] = {
+            k: set(v) for k, v in base_scope.items()
+        }
+        triple_history: dict[tuple[Any, str, Any], list[tuple[Any, str]]] = {
+            k: list(v) for k, v in base_history.items()
+        }
+        by_subject_predicate: dict[tuple[Any, str], list[Any]] = {
+            k: list(v) for k, v in base_sp.items()
+        }
+        by_predicate_object: dict[tuple[str, Any], list[Any]] = {
+            k: list(v) for k, v in base_po.items()
+        }
+        filed_as_edges: list[tuple[Any, Any]] = list(base_filed_as)
+        for seq_pos, ev in new_tail_events:
             if not isinstance(ev, RelationshipEvent):
                 continue
             etype = ev.type
@@ -278,28 +527,133 @@ class _SearchFold:
             po_subs = by_predicate_object.setdefault((predicate, ev.to_ref), [])
             if ev.from_ref not in po_subs:
                 po_subs.append(ev.from_ref)
-        self.scope_membership: dict[Any, set[Any]] = scope_membership
-        self._triple_history = triple_history
-        self._by_subject_predicate = by_subject_predicate
-        self._by_predicate_object = by_predicate_object
-
-        filings: dict[Any, list[tuple[Any, dict[str, Any]]]] = {}
-        for drawer_ref, filing_ref in filed_as_edges:
-            raw = payloads.get(filing_ref)
-            if raw is None:
-                continue
-            try:
-                body = json.loads(raw.decode("utf-8", errors="replace"))
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(body, dict) or body.get("kind") != "filing":
-                continue
-            filings.setdefault(drawer_ref, []).append((filing_ref, body))
-        self.filings: dict[Any, list[tuple[Any, dict[str, Any]]]] = filings
+        return (
+            scope_membership,
+            triple_history,
+            by_subject_predicate,
+            by_predicate_object,
+            filed_as_edges,
+        )
 
     def all_events(self) -> Any:
         """The read accessor the fold lenses use (mirrors ``StorageKernel``)."""
         return self._events
+
+    def for_subject(self, ref: Any) -> _FoldView:
+        """Only the ``RelationshipEvent``s whose ``from_ref`` is *ref*, in log order."""
+        if self._by_subject is None:
+            from amplifier_data.models import RelationshipEvent
+
+            by: dict[Any, list[Any]] = {}
+            for item in self._events:
+                ev = item[1]
+                if isinstance(ev, RelationshipEvent):
+                    by.setdefault(ev.from_ref, []).append(item)
+            self._by_subject = by
+        return _FoldView(self._by_subject.get(ref, []), self.payloads)
+
+    def vector_view(self) -> _FoldView:
+        """The events ``VectorLens.query`` can depend on, in log order:
+        ``embedding_of`` and ``scoped_to`` edges plus the embedding cells
+        those edges point from."""
+        if self._vector_view is None:
+            from amplifier_data.lenses._scope import SCOPED_TO
+            from amplifier_data.lenses.vector import EMBEDDING_OF
+            from amplifier_data.models import RelationshipEvent
+
+            emb_refs = {
+                ev.from_ref
+                for _pos, ev in self._events
+                if isinstance(ev, RelationshipEvent) and ev.type == EMBEDDING_OF
+            }
+            keep: list[Any] = []
+            for item, ref in zip(self._events, self.refs):
+                ev = item[1]
+                if ref is not None:
+                    if ref in emb_refs:
+                        keep.append(item)
+                elif isinstance(ev, RelationshipEvent) and ev.type in (
+                    EMBEDDING_OF,
+                    SCOPED_TO,
+                ):
+                    keep.append(item)
+            self._vector_view = _FoldView(keep, self.payloads)
+        return self._vector_view
+
+    def embedding_edges(self) -> list[tuple[str, str]]:
+        """``[(emb_ref, target_ref)]`` for every ``embedding_of`` edge in
+        this fold, in log order. Cached; extended incrementally when built
+        via a *prior* fold (see :meth:`_extend_embedding_edges`)."""
+        if self._embedding_edges_cache is None:
+            from amplifier_data.lenses.vector import EMBEDDING_OF
+            from amplifier_data.models import RelationshipEvent
+
+            self._embedding_edges_cache = [
+                (ev.from_ref, ev.to_ref)
+                for _pos, ev in self._events
+                if isinstance(ev, RelationshipEvent) and ev.type == EMBEDDING_OF
+            ]
+        return self._embedding_edges_cache
+
+    def vector_matrix(self) -> tuple[list[str], Any] | None:
+        """``(target_refs, matrix)`` for the numpy-accelerated vector
+        scorer (perf/incremental-fold), or ``None`` when numpy is
+        unavailable or embeddings have inconsistent dimensions (the caller
+        falls back to the pure-Python ``VectorLens`` path in either case).
+        """
+        if self._vector_matrix_computed:
+            return self._vector_matrix
+        self._vector_matrix_computed = True
+        try:
+            import numpy as np
+        except ImportError:
+            self._vector_matrix = None
+            return None
+
+        edges = self.embedding_edges()
+        prior_state = self._matrix_state
+        if prior_state is not None and prior_state[2] <= len(edges):
+            prior_refs, prior_mat, prior_edge_count = prior_state
+            new_edges = edges[prior_edge_count:]
+        else:
+            prior_refs, prior_mat, prior_edge_count = [], None, 0
+            new_edges = edges
+
+        new_refs: list[str] = []
+        new_rows: list[tuple[float, ...]] = []
+        dim = (
+            prior_mat.shape[1] if prior_mat is not None and prior_mat.shape[0] else None
+        )
+        for emb_ref, target_ref in new_edges:
+            raw = self.payloads.get(emb_ref)
+            if raw is None:
+                continue  # dangling edge -- matches VectorLens.project()'s skip
+            n = len(raw) // 4
+            if dim is None:
+                dim = n
+            elif n != dim:
+                # Mixed embedding dimensions in the same log -- bail out to
+                # the safe pure-Python path rather than build a ragged matrix.
+                self._vector_matrix = None
+                return None
+            new_refs.append(target_ref)
+            new_rows.append(struct.unpack(f"<{n}f", raw))
+
+        if new_rows:
+            new_mat = np.asarray(new_rows, dtype=np.float64)
+            mat = (
+                new_mat
+                if prior_mat is None or prior_mat.shape[0] == 0
+                else np.vstack([prior_mat, new_mat])
+            )
+            refs = prior_refs + new_refs
+        else:
+            mat = prior_mat if prior_mat is not None else np.zeros((0, 0))
+            refs = prior_refs
+
+        self._matrix_state = (refs, mat, len(edges))
+        self._vector_matrix = (refs, mat)
+        return self._vector_matrix
 
     def scope_index(self) -> Any:
         """A :class:`ScopeIndex`-shaped view over the precomputed
@@ -333,6 +687,56 @@ class _SearchFold:
             if max(events, key=lambda e: e[0])[1] == "assert":
                 out.append(subj)
         return sorted(out)
+
+
+def _fast_vector_query(
+    fold: _SearchFold, query_vector: list[float], k: int, scope_ref: Any
+) -> list[tuple[str, float]] | None:
+    """Numpy-accelerated top-``k`` cosine search over *fold*'s embeddings
+    (perf/incremental-fold), or ``None`` to signal "fall back to
+    ``VectorLens.query()``" (numpy unavailable, no embeddings, or
+    inconsistent embedding dimensions -- see :meth:`_SearchFold.vector_matrix`).
+
+    Same contract as ``VectorLens.query(...).output``: ``[(target_ref,
+    score)]``, descending score, ties broken by ascending ``target_ref``,
+    truncated to *k*, scope filtering applied BEFORE scoring/top-k.
+    """
+    result = fold.vector_matrix()
+    if result is None:
+        return None
+    refs, mat = result
+    if mat.shape[0] == 0:
+        return []
+
+    import numpy as np
+
+    if scope_ref is not None:
+        keep_idx = [
+            i
+            for i, r in enumerate(refs)
+            if scope_ref in fold.scope_membership.get(r, ())
+        ]
+        if not keep_idx:
+            return []
+        sub_refs = [refs[i] for i in keep_idx]
+        sub_mat = mat[keep_idx]
+    else:
+        sub_refs, sub_mat = refs, mat
+
+    q = np.asarray(query_vector, dtype=np.float64)
+    if q.shape[0] != sub_mat.shape[1]:
+        raise ValueError(
+            f"dimension mismatch: query has {q.shape[0]}, stored has {sub_mat.shape[1]}"
+        )
+    norms = np.linalg.norm(sub_mat, axis=1)
+    qnorm = float(np.linalg.norm(q))
+    dots = sub_mat @ q
+    with np.errstate(invalid="ignore", divide="ignore"):
+        scores = np.where((norms == 0) | (qnorm == 0), 0.0, dots / (norms * qnorm))
+
+    order = sorted(range(len(sub_refs)), key=lambda i: (-scores[i], sub_refs[i]))
+    top = order[: max(k, 0)]
+    return [(sub_refs[i], float(scores[i])) for i in top]
 
 
 @runtime_checkable
@@ -515,6 +919,26 @@ class NativeMemoryStore:
                 # we do not want every later read to append AccessEvents (§5).
                 store = AmplifierStore(path=path, record_access=record_access)
         self.store: Any = store
+        # perf/startup-latency: incremental per-event cell-ref memo shared by
+        # every fold snapshot this store takes (see _CellRefCache).
+        self._ref_cache = _CellRefCache()
+        # Append-generation counter (bumped by a kernel observer) + the last
+        # snapshot, for short-lived reuse across a burst of reads.
+        self._generation = 0
+        self._observing: bool | None = None
+        self._snapshot: tuple[int, float, _SearchFold] | None = None
+        self._building: tuple[int, threading.Event] | None = None
+        self._snapshot_lock = threading.Lock()
+        self._expiry_timer: threading.Timer | None = None
+        # perf/incremental-fold: the most recently built fold, kept as the
+        # extension base ACROSS appends (unlike ``_snapshot``, which is
+        # invalidated by every write) so a busy store paying continuous
+        # concurrent writes still only reprocesses the NEW tail per fold,
+        # not the whole log. Bounded to one fold (same guarantee as
+        # ``_snapshot``): dropped together on true idle expiry, see
+        # ``_expire_snapshot``.
+        self._prior_fold: _SearchFold | None = None
+        self._last_build_at: float = 0.0
         self.filed: list[dict[str, object]] = []
         # T1-MEM-2: ledger of plasticity mutations applied through this seam.
         self.mutations: list[MutationRecord] = []
@@ -793,14 +1217,40 @@ class NativeMemoryStore:
     # KG facts via anchor cells (§4b)
     # ------------------------------------------------------------------
 
-    def _anchor(self, name: str) -> Any:
+    def _anchor(self, name: str, *, create: bool = True) -> Any:
         """Content-addressed anchor cell for a string KG entity (``entity:{name}``).
 
         KG entities are strings; substrate facts are ``(Hash, str, Hash)``.
         Content addressing makes this mapping deterministic, idempotent, and
         collision-free against the existing ``wing:``/``room:`` scope cells.
+
+        ``create=False`` (read paths) computes the same ref without appending
+        a duplicate cell to the log -- see :meth:`_read_ref`.
         """
-        return self.store.write_cell(f"entity:{name}".encode())  # type: ignore[attr-defined]
+        payload = f"entity:{name}".encode()
+        if not create:
+            return self._read_ref(payload)
+        return self.store.write_cell(payload)  # type: ignore[attr-defined]
+
+    def _read_ref(self, payload: bytes) -> Any:
+        """The content address ``write_cell(payload)`` would return, for READS.
+
+        Read paths only need the ref to look things up; if the cell was never
+        written, nothing can be scoped to / asserted on it, so the lookup is
+        empty either way. Computing it locally stops every search / diary /
+        KG read from appending a duplicate cell to the append-only log. Only
+        for a direct foldable kernel; remote backends keep the ``write_cell``
+        round-trip.
+        """
+        if self._fold_capable():
+            from amplifier_data.models import CellWriteEvent
+
+            return CellWriteEvent(payload=payload).cell_ref()
+        return self.store.write_cell(payload)  # type: ignore[attr-defined]
+
+    def _fold_capable(self) -> bool:
+        kernel = getattr(self.store, "kernel", None)
+        return kernel is not None and callable(getattr(kernel, "all_events", None))
 
     def assert_kg(self, subject: str, predicate: str, object: str) -> None:
         """String-keyed KG assert: strings in, anchor-cell fact in the substrate."""
@@ -814,22 +1264,36 @@ class NativeMemoryStore:
     def query_kg(
         self, subject: str | None = None, predicate: str | None = None
     ) -> list[tuple[str, str, str]]:
-        """Currently-valid facts; anchor refs resolved back to entity strings
-        via ``regenerate(record_access=False)``. Verify-only read surface."""
+        """Currently-valid facts; anchor refs resolved back to entity strings.
+        Verify-only read surface -- runs over the one-fold snapshot when a
+        foldable kernel is available (perf/startup-latency)."""
         s = self.store
-        subj_ref = self._anchor(subject) if subject is not None else None
-        res = s.query_facts(subject=subj_ref, predicate=predicate)  # type: ignore[attr-defined]
+        subj_ref = self._anchor(subject, create=False) if subject is not None else None
+        fold = self._fold_snapshot()
+        if fold is not None:
+            from amplifier_data.lenses.temporal import TemporalLens
+
+            view = fold.for_subject(subj_ref) if subj_ref is not None else fold
+            res = TemporalLens().query(
+                kernel=view, subject=subj_ref, predicate=predicate
+            )
+        else:
+            res = s.query_facts(subject=subj_ref, predicate=predicate)  # type: ignore[attr-defined]
         out: list[tuple[str, str, str]] = []
         for fact in res.output:
-            subj_name = self._resolve_anchor(fact.subject)
-            obj_name = self._resolve_anchor(fact.object)
+            subj_name = self._resolve_anchor(fact.subject, fold)
+            obj_name = self._resolve_anchor(fact.object, fold)
             out.append((subj_name, fact.predicate, obj_name))
         return out
 
-    def _resolve_anchor(self, ref: Any) -> str:
+    def _resolve_anchor(self, ref: Any, fold: _SearchFold | None = None) -> str:
         """Resolve an anchor cell ref back to its ``entity:{name}`` string."""
-        s = self.store
-        payload = s.regenerate(ref, record_access=False).payload.decode("utf-8")  # type: ignore[attr-defined]
+        if fold is not None and ref in fold.payloads:
+            payload = fold.payloads[ref].decode("utf-8")
+        else:
+            payload = self.store.regenerate(ref, record_access=False).payload.decode(
+                "utf-8"
+            )  # type: ignore[attr-defined]
         prefix = "entity:"
         return payload.removeprefix(prefix)
 
@@ -837,7 +1301,7 @@ class NativeMemoryStore:
         """SeqPos-ordered assert/invalidate history for one entity (wraps
         ``store.timeline(self._anchor(subject))``)."""
         s = self.store
-        entries = s.timeline(self._anchor(subject))  # type: ignore[attr-defined]
+        entries = s.timeline(self._anchor(subject, create=False))  # type: ignore[attr-defined]
         return [
             {
                 "seq_pos": e.seq_pos,
@@ -986,6 +1450,10 @@ class NativeMemoryStore:
         """
         return self.store.write_cell(f"{kind}:{name}".encode())  # type: ignore[attr-defined]
 
+    def _read_scope_ref(self, kind: str, name: str) -> Any:
+        """:meth:`_scope_ref` for READ paths: same ref, no log append."""
+        return self._read_ref(f"{kind}:{name}".encode())
+
     def _fold_snapshot(self) -> _SearchFold | None:
         """One :class:`_SearchFold` over the backing kernel, or ``None``.
 
@@ -993,11 +1461,163 @@ class NativeMemoryStore:
         GatewayClient), signalling callers to keep the per-ref store-surface
         path (``regenerate`` / ``query_facts`` / ``graph_neighbors``)
         unchanged.
+
+        perf/incremental-fold + perf/startup-latency: a short-lived snapshot
+        (:data:`SNAPSHOT_REUSE_S`) is reused across a burst of reads while no
+        event has been appended (tracked by a kernel observer); otherwise (or
+        when observation is unsupported) a fresh fold is built by EXTENDING
+        the last-built fold (``_prior_fold``) over only the newly appended
+        tail (perf/incremental-fold) instead of rescanning the whole log.
         """
-        kernel = getattr(self.store, "kernel", None)
-        if kernel is None or not callable(getattr(kernel, "all_events", None)):
+        if not self._fold_capable():
             return None
-        return _SearchFold(kernel)
+        kernel = self.store.kernel
+        if not self._observe(kernel):
+            fold = _SearchFold(kernel, self._ref_cache, prior=self._prior_fold)
+            self._update_prior_fold(fold)
+            return fold
+        now = time.monotonic()
+        with self._snapshot_lock:
+            generation = self._generation
+            snap = self._snapshot
+            if (
+                snap is not None
+                and snap[0] == generation
+                and now - snap[1] < self.SNAPSHOT_REUSE_S
+            ):
+                return snap[2]
+            # Single-flight: concurrent readers of the same generation wait
+            # for the one build in progress instead of each materializing
+            # the log (they would only serialize on the kernel anyway).
+            building = self._building
+            if building is not None and building[0] == generation:
+                done = building[1]
+                owner = False
+            else:
+                done = threading.Event()
+                self._building = (generation, done)
+                owner = True
+        if not owner:
+            done.wait()
+            with self._snapshot_lock:
+                snap = self._snapshot
+                if snap is not None and snap[0] == generation:
+                    return snap[2]
+            fold = _SearchFold(kernel, self._ref_cache, prior=self._prior_fold)
+            self._update_prior_fold(fold)
+            return fold
+        # generation was read BEFORE materializing: if anything is appended
+        # meanwhile the counter moves on and this snapshot is never reused.
+        try:
+            fold = _SearchFold(kernel, self._ref_cache, prior=self._prior_fold)
+            self._update_prior_fold(fold)
+            with self._snapshot_lock:
+                # Only publish a snapshot that is still current: one built
+                # across an append could never be reused, so caching it would
+                # only pin its materialized log until expiry.
+                if generation == self._generation:
+                    self._snapshot = (generation, now, fold)
+        finally:
+            with self._snapshot_lock:
+                if self._building is not None and self._building[1] is done:
+                    self._building = None
+            done.set()
+        self._arm_expiry()
+        return fold
+
+    def _update_prior_fold(self, fold: _SearchFold) -> None:
+        """Record *fold* as the extension base for the NEXT fold build
+        (perf/incremental-fold), and mark this store as freshly active so
+        the idle-expiry timer knows a fold is worth retaining.
+
+        Monotonic: never replaces a longer (more current) prior with a
+        shorter one -- a slower concurrent builder that finishes after a
+        faster one must not regress the extension base.
+        """
+        with self._snapshot_lock:
+            prior = self._prior_fold
+            if prior is None or len(fold._events) >= len(prior._events):
+                self._prior_fold = fold
+            self._last_build_at = time.monotonic()
+        self._arm_expiry()
+
+    #: How long a snapshot may serve further reads (absent any append).
+    #: Short on purpose: a snapshot pins the materialized log in memory.
+    SNAPSHOT_REUSE_S = 5.0
+
+    def _observe(self, kernel: Any) -> bool:
+        """Subscribe (once) to kernel appends; False when unsupported."""
+        if self._observing is None:
+            subscribe = getattr(kernel, "subscribe", None)
+            if not callable(subscribe):
+                self._observing = False
+            else:
+                # The kernel (a Rust object the cycle collector cannot
+                # traverse) must not keep this store -- and its snapshot --
+                # alive: subscribe through a weakref.
+                store_ref = weakref.ref(self)
+
+                def _observer(pos: Any, event: Any) -> None:
+                    store = store_ref()
+                    if store is not None:
+                        store._on_append(pos, event)
+
+                try:
+                    subscribe(_observer)
+                    self._observing = True
+                except Exception:
+                    self._observing = False
+        return bool(self._observing)
+
+    def _on_append(self, _pos: Any, _event: Any) -> None:
+        with self._snapshot_lock:
+            self._generation += 1
+            self._snapshot = None
+
+    def _arm_expiry(self, delay: float | None = None) -> None:
+        """Ensure ONE idle-expiry timer is pending for the snapshot slot.
+
+        Retention is bounded by construction: the only strong reference to a
+        fold kept by this store is ``self._snapshot`` (at most one fold).
+        The timer holds neither a fold nor the store -- only a weakref to
+        the store -- and at most one timer is pending per store, so a busy
+        daemon interleaving writes and reads never accumulates folds or
+        timer threads.
+        """
+        with self._snapshot_lock:
+            if self._expiry_timer is not None:
+                return
+            timer = threading.Timer(
+                self.SNAPSHOT_REUSE_S if delay is None else delay,
+                NativeMemoryStore._expire_snapshot_ref,
+                (weakref.ref(self),),
+            )
+            timer.daemon = True
+            self._expiry_timer = timer
+        timer.start()
+
+    @staticmethod
+    def _expire_snapshot_ref(store_ref: weakref.ref[NativeMemoryStore]) -> None:
+        store = store_ref()
+        if store is not None:
+            store._expire_snapshot()
+
+    def _expire_snapshot(self) -> None:
+        """Drop the snapshot -- and the incremental-extension base,
+        ``_prior_fold`` -- once neither has been rebuilt for
+        ``SNAPSHOT_REUSE_S``; re-arm (still a single timer) while a
+        younger build is in the slot.
+        """
+        with self._snapshot_lock:
+            self._expiry_timer = None
+            if self._last_build_at == 0.0:
+                return  # nothing ever built
+            age = time.monotonic() - self._last_build_at
+            if age >= self.SNAPSHOT_REUSE_S:
+                self._snapshot = None
+                self._prior_fold = None
+                return
+        self._arm_expiry(max(self.SNAPSHOT_REUSE_S - age, 0.0))
 
     def _payload_text(self, ref: Any, fold: _SearchFold | None) -> str:
         """Decode ``ref``'s payload, preferring the one-fold snapshot.
@@ -1146,10 +1766,19 @@ class NativeMemoryStore:
         wing: str | None,
         room: str | None,
     ) -> dict[str, Any]:
-        """``{"wing","room","source","category","filed_at"}`` for one drawer
-        hit (search/list_drawers), scope-aware (see :meth:`_resolve_filing`);
-        falls back to the pre-fix per-predicate facts + first-matching scope
-        edge for a legacy drawer with no filing."""
+        """``{"wing","room","source","category","filed_at","importance"}``
+        for one drawer hit (search/list_drawers), scope-aware (see
+        :meth:`_resolve_filing`); falls back to the pre-fix per-predicate
+        facts + first-matching scope edge for a legacy drawer with no
+        filing. ``importance`` (perf/startup-latency, a402866) is resolved
+        here too -- the filing cell never carries it (see
+        :meth:`_filing_payload`), so it's always one ``has_importance``
+        lookup against the shared fold, regardless of filing presence."""
+        importance_raw = self._first_fact_value(ref, "has_importance", fold)
+        try:
+            importance = float(importance_raw) if importance_raw is not None else None
+        except ValueError:
+            importance = None
         filing = self._resolve_filing(ref, fold, wing=wing, room=room)
         if filing is not None:
             return {
@@ -1158,6 +1787,7 @@ class NativeMemoryStore:
                 "source": filing.get("source"),
                 "category": filing.get("category"),
                 "filed_at": filing.get("filed_at"),
+                "importance": importance,
             }
         wing_name, room_name = self._resolve_wing_room(ref, fold)
         return {
@@ -1166,6 +1796,7 @@ class NativeMemoryStore:
             "source": self._first_fact_value(ref, "has_source", fold),
             "category": self._first_fact_value(ref, "has_category", fold),
             "filed_at": self.drawer_times([ref], _fold=fold, wing=wing).get(ref),
+            "importance": importance,
         }
 
     def _resolve_wing_room(
@@ -1222,9 +1853,9 @@ class NativeMemoryStore:
 
         s = self.store
         if room is not None:
-            scope_ref = self._scope_ref("room", room)
+            scope_ref = self._read_scope_ref("room", room)
         elif wing is not None:
-            scope_ref = self._scope_ref("wing", wing)
+            scope_ref = self._read_scope_ref("wing", wing)
         else:
             scope_ref = None
 
@@ -1242,7 +1873,6 @@ class NativeMemoryStore:
         for ref in selected_refs:
             content = self._payload_text(ref, _fold)
             meta = self._resolve_hit_meta(ref, _fold, wing=wing, room=room)
-            importance_raw = self._first_fact_value(ref, "has_importance", _fold)
             out.append(
                 {
                     "ref": ref,
@@ -1250,9 +1880,7 @@ class NativeMemoryStore:
                     "wing": meta["wing"],
                     "room": meta["room"],
                     "category": meta["category"],
-                    "importance": float(importance_raw)
-                    if importance_raw is not None
-                    else None,
+                    "importance": meta["importance"],
                     "filed_at": meta["filed_at"],
                 }
             )
@@ -1353,9 +1981,9 @@ class NativeMemoryStore:
         s = self.store
         scope_ref = None
         if room is not None:
-            scope_ref = self._scope_ref("room", room)
+            scope_ref = self._read_scope_ref("room", room)
         elif wing is not None:
-            scope_ref = self._scope_ref("wing", wing)
+            scope_ref = self._read_scope_ref("wing", wing)
         # Snapshot AFTER the scope-cell write above, so the fold sees at least
         # everything the per-call store-surface folds used to see.
         fold = self._fold_snapshot()
@@ -1569,6 +2197,7 @@ class NativeMemoryStore:
                     "category": meta["category"],
                     "source": meta["source"],
                     "filed_at": meta["filed_at"],
+                    "importance": meta["importance"],
                 }
             )
         return results
@@ -1598,14 +2227,17 @@ class NativeMemoryStore:
         docstring). BM25 *scoring* is still filtered to this call's scoped
         (and, if given, temporally eligible) candidates via ``candidates=``.
         """
-        from amplifier_data.lenses._scope import fold_scope
-
         from .embedder import lexical_score
 
         assert fold is not None
         assert BM25Index is not None
 
-        scope_index = fold_scope(fold)
+        # D26 (scale fix): the fold's OWN precomputed scope_membership,
+        # never a `fold_scope(fold)` re-walk of the whole event list per
+        # call -- this is the cross-request-incremental piece of the D26
+        # fix (the fold itself is also incrementally extended, see
+        # `_SearchFold._merge_triples`).
+        scope_index = fold.scope_index()
         all_drawer_refs = set(scope_index.membership.keys())
         scoped_refs = (
             set(scope_index.cells_in_scope(scope_ref))
@@ -1625,24 +2257,31 @@ class NativeMemoryStore:
         semantic_rank: dict[Any, int] = {}
         cosine_by_ref: dict[Any, float] = {}
         if query_vector is not None:
-            from amplifier_data.lenses.vector import VectorLens
-
             # When a temporal filter narrowed the eligible set, request a
             # wider vector pool so an eligible-but-lower-cosine candidate
             # is not crowded out of the top-n_pool by ineligible ones.
             vector_pool_k = (
                 max(n_pool, len(scoped_refs)) if eligible is not None else n_pool
             )
-            raw_candidates = (
-                VectorLens()
-                .query(
-                    kernel=fold,
-                    vector=list(query_vector),
-                    k=max(1, vector_pool_k),
-                    scope=scope_ref,
-                )
-                .output
+            # perf/incremental-fold: numpy-accelerated candidate generation
+            # over the fold's own vector matrix, falling back to the
+            # pure-Python VectorLens when numpy/embeddings are unavailable.
+            raw_candidates = _fast_vector_query(
+                fold, list(query_vector), max(1, vector_pool_k), scope_ref
             )
+            if raw_candidates is None:
+                from amplifier_data.lenses.vector import VectorLens
+
+                raw_candidates = (
+                    VectorLens()
+                    .query(
+                        kernel=fold.vector_view(),
+                        vector=list(query_vector),
+                        k=max(1, vector_pool_k),
+                        scope=scope_ref,
+                    )
+                    .output
+                )
             rank = 0
             for ref, cosine in raw_candidates:
                 if eligible is not None and ref not in eligible:
@@ -1696,6 +2335,7 @@ class NativeMemoryStore:
                     "category": meta["category"],
                     "source": meta["source"],
                     "filed_at": meta["filed_at"],
+                    "importance": meta["importance"],
                 }
             )
         return results
@@ -1703,34 +2343,43 @@ class NativeMemoryStore:
     def read_diary(self, *, agent_name: str, last_n: int = 10) -> list[dict[str, Any]]:
         """Cells under scope ``agent:{name}``, SeqPos-ordered, newest last (§3.2).
 
-        Mirrors :meth:`list_drawers`'s use of the scope fold for membership,
-        then orders by each cell's OWN defining ``CellWriteEvent`` position in
-        the log (SeqPos) -- the fold does not carry position, so this walks
-        ``kernel.all_events()`` once to build a ``ref -> first SeqPos`` map.
+        Mirrors :meth:`list_drawers`'s use of the (precomputed, D26) scope
+        index for membership, then orders by each cell's OWN defining
+        ``CellWriteEvent`` position in the log (SeqPos) -- the fold does not
+        carry position, so this walks ``fold.all_events()``/``fold.refs``
+        once to build a ``ref -> first SeqPos`` map, over the ONE-fold
+        snapshot (perf/startup-latency) when a foldable kernel is available.
         """
         from amplifier_data.lenses._scope import fold_scope
         from amplifier_data.models import CellWriteEvent
 
         s = self.store
-        scope_ref = self._scope_ref("agent", agent_name)
-        member_refs = fold_scope(s.kernel).cells_in_scope(scope_ref)  # type: ignore[attr-defined]
+        scope_ref = self._read_scope_ref("agent", agent_name)
+        fold = self._fold_snapshot()
+        scope_index = (
+            fold.scope_index() if fold is not None else fold_scope(s.kernel)  # type: ignore[attr-defined]
+        )
+        member_refs = scope_index.cells_in_scope(scope_ref)
 
         order: dict[Any, int] = {}
-        for pos, ev in s.kernel.all_events():  # type: ignore[attr-defined]
-            if isinstance(ev, CellWriteEvent):
-                ref = ev.cell_ref()
-                if ref in member_refs and ref not in order:
+        if fold is not None:
+            for (pos, _ev), ref in zip(fold.all_events(), fold.refs):
+                if ref is not None and ref in member_refs and ref not in order:
                     order[ref] = pos
+        else:
+            for pos, ev in s.kernel.all_events():  # type: ignore[attr-defined]
+                if isinstance(ev, CellWriteEvent):
+                    ref = ev.cell_ref()
+                    if ref in member_refs and ref not in order:
+                        order[ref] = pos
 
         ordered_refs = sorted(member_refs, key=lambda r: order.get(r, 0))
         tail = ordered_refs[-max(0, last_n) :] if last_n > 0 else []
 
         entries: list[dict[str, Any]] = []
         for ref in tail:
-            entry_text = s.regenerate(ref, record_access=False).payload.decode(  # type: ignore[attr-defined]
-                "utf-8", errors="replace"
-            )
-            _, topic = self._resolve_wing_room(ref)
+            entry_text = self._payload_text(ref, fold)
+            _, topic = self._resolve_wing_room(ref, fold)
             entries.append(
                 {
                     "ref": ref,
@@ -2170,9 +2819,9 @@ class NativeMemoryStore:
         s = self.store
         scope_ref = None
         if room is not None:
-            scope_ref = self._scope_ref("room", room)
+            scope_ref = self._read_scope_ref("room", room)
         elif wing is not None:
-            scope_ref = self._scope_ref("wing", wing)
+            scope_ref = self._read_scope_ref("wing", wing)
         fold = self._fold_snapshot()
 
         scope_index = (
@@ -2474,7 +3123,7 @@ class NativeMemoryStore:
         :meth:`_index_for_room`) and :meth:`index_set` (freshness count)."""
         from amplifier_data.lenses._scope import fold_scope
 
-        room_scope_ref = self._scope_ref("room", room)
+        room_scope_ref = self._read_scope_ref("room", room)
         scope_index = (
             fold.scope_index() if fold is not None else fold_scope(self.store.kernel)  # type: ignore[attr-defined]
         )
@@ -2495,7 +3144,7 @@ class NativeMemoryStore:
         ``index(wing)`` with no ``room`` enumerates one entry per room)."""
         from amplifier_data.lenses._scope import fold_scope
 
-        wing_scope_ref = self._scope_ref("wing", wing)
+        wing_scope_ref = self._read_scope_ref("wing", wing)
         scope_index = (
             fold.scope_index() if fold is not None else fold_scope(self.store.kernel)  # type: ignore[attr-defined]
         )
@@ -2508,7 +3157,7 @@ class NativeMemoryStore:
         return sorted(rooms)
 
     def _current_index_ref(self, room: str, fold: _SearchFold | None) -> Any | None:
-        room_scope_ref = self._scope_ref("room", room)
+        room_scope_ref = self._read_scope_ref("room", room)
         refs = self._current_fact_refs(room_scope_ref, _MEMORY_CURRENT_INDEX, fold)
         return refs[-1] if refs else None
 
@@ -2826,7 +3475,7 @@ class NativeMemoryStore:
         from amplifier_data.lenses._scope import fold_scope
 
         fold = self._fold_snapshot()
-        wing_scope_ref = self._scope_ref("wing", wing)
+        wing_scope_ref = self._read_scope_ref("wing", wing)
         scope_index = (
             fold.scope_index() if fold is not None else fold_scope(self.store.kernel)  # type: ignore[attr-defined]
         )

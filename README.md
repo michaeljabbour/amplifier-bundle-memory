@@ -20,7 +20,7 @@ This repo is one component of the **behavioral-plasticity suite**, composed by t
 
 **Install the full suite (always-on):**
 ```bash
-amplifier bundle add git+https://github.com/michaeljabbour/amplifier-bundle-behavioral-plasticity@main --app
+amplifier bundle add 'git+https://github.com/michaeljabbour/amplifier-bundle-behavioral-plasticity@main#subdirectory=behaviors/behavioral-plasticity.yaml' --app --name behavioral-plasticity
 amplifier bundle update behavioral-plasticity -y
 ```
 
@@ -109,8 +109,10 @@ Released 2026-04-17.
 
 ```
 session:start
-  ├── hooks-memory-briefing  →  ephemeral layered briefing (Memory map → Standing answers →
-  │                                 Known facts → Relevant evidence); legacy mode available
+  ├── hooks-memory-briefing  →  arms the layered briefing (Memory map → Standing answers →
+  │                                 Known facts → Relevant evidence; legacy mode available),
+  │                                 prefetched since mount, delivered at the first prompt:submit;
+  │                                 importance re-ranking (kill switch: briefing_importance_weight=0.0)
   ├── hooks-project-context      →  inject Tier 1 coordination files; scaffold if missing
   └── hooks-memory-reflect (opt-in) → drain up to N pending reflection jobs in the background
                                     → (opt-in, memory-index) curator refresh if index is stale
@@ -159,7 +161,7 @@ on-demand
 
 | Module | Type | Description |
 |---|---|---|
-| `hooks-memory-briefing` | hook | Session-start briefing: layered (Memory map/Standing answers/Known facts/Relevant evidence, default) or legacy (memory + KG + diary + coordination files, importance re-ranking). Emits `briefing_assembled` / `briefing_skipped` / `memory:retrieved` / `memory:injected`. |
+| `hooks-memory-briefing` | hook | Session-start briefing: layered (Memory map/Standing answers/Known facts/Relevant evidence, default) or legacy (memory + KG + diary + coordination files, importance re-ranking), prefetched at mount and delivered at the first `prompt:submit` (~300-1,500 tokens; kept in history under loop-streaming's default `persist` mode; sub-agent sessions skipped by default; memory sections reused per process up to 5 min -- see the [2.0.2 CHANGELOG](CHANGELOG.md)). Emits `briefing_assembled` / `briefing_skipped` / `memory:retrieved` / `memory:injected`. |
 | `hooks-memory-capture` | hook | Verbatim memory capture on tool:post with category detection, secret redaction, `filed_at`/`in_session`/`at_commit` provenance. Emits `drawer_filed` / `capture_skipped`. |
 | `hooks-memory-interject` | hook | Mid-session memory surfacing (cosine >= 0.72, LLM-judged in uncertain band). Emits `memory_surfaced` / `interject_skipped` / `memory:retrieved` (every attempt) / `memory:injected` (on inject). |
 | `hooks-memory-reflect` | hook (opt-in) | Cold-path: watermarks the conversation span since the last reflection on compaction/session:end, files it as a durable `reflection_job`, spawns `memory:distiller` (background agent) to write L2 facts. Ships in `behaviors/memory-reflect.yaml`, not the core behavior. |
