@@ -332,3 +332,20 @@ invalidation story needed).
   after a consumer check across this repo and the four constellation siblings
   (zero references); research doc kept; CI list updated.
 **Status:** derived.
+
+### D21 — P4 as built + v2.1.0 release prep
+- `memory:retrieved` (source tool|interject|briefing, op, redacted query ≤200
+  chars, wing, ≤20 content-free hits {ref, rank, layer, score, rrf, arms},
+  latency_ms) and `memory:injected` (source, refs, layers, chars) are emitted
+  and registered via observability.events. Refs are content addresses, so they
+  are stable ids across sessions — this closes the backlog item "stable memory
+  ids + memory_outcome event": the conductor joins `memory:injected` with its
+  own outcome signal. Memory stays event-only (constellation rule).
+- Versions → 2.1.0 in lockstep (hooks-project-context jumped 1.1.0 → 2.1.0 for
+  bundle-wide consistency); `daemon_version()` reads package metadata, so an
+  old 2.0.1 daemon respawns and serves the new ops. hooks-memory-reflect 0.1.0.
+  All module locks re-generated (`uv lock --check` clean in every module).
+- 2.1.0 not 3.0.0: every default change keeps a byte-identical legacy mode
+  (`fusion="legacy"`, `briefing_mode="legacy"`), and all new layers are
+  additive or opt-in.
+**Status:** derived.

@@ -1,6 +1,6 @@
 # Design: three-layer memory, Amplifier-shaped (v2.1 → v3.0)
 
-**Status:** accepted direction (Michael, 2026-09-27); per-phase detail is
+**Status:** P0–P5 built on `feat/memory-layers` (2026-09-28, D16–D21); T1.5 + T4.2 + AMB baseline open. Direction accepted by Michael 2026-09-27; per-phase detail is
 plan-ready. Evidence: `docs/research/2026-09-27-memory-systems-gene-survey.md`.
 Decisions: `project-context/PROVENANCE.md` D6–D15. Each task below carries an
 ID, files, interface and a machine-checkable acceptance so a plan-writing
