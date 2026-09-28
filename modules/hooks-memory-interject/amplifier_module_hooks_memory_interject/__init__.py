@@ -15,15 +15,15 @@ Design (from Amplifier expert consultation):
   - Priority: 20 (runs early, after critical instrumentation at 50+)
   - Per-turn guard flag prevents infinite loops on orchestrator:complete
 
-Read lane (native cutover, docs/plans/2026-07-07-native-cutover-design.md)
+Read lane (native cutover, the native-cutover design history)
 ----------------------------------------------------------------------------
-Earlier vendor-backed history: this hook once opened a ChromaDB
-``PersistentClient`` directly at a hardcoded path/collection that did not
-match the vendor's actual on-disk layout, so the write lane (capture hook)
-and this hook's read lane never shared a store -- interject could never see
-anything the store actually held. That was fixed (2026-07-07) by routing
-reads through the vendor's own supported MCP search surface instead of
-touching its storage directly.
+Earlier externally-backed history: this hook once opened a legacy vector
+store's persistent client directly at a hardcoded path/collection that did
+not match that store's actual on-disk layout, so the write lane (capture
+hook) and this hook's read lane never shared a store -- interject could
+never see anything the store actually held. That was fixed (2026-07-07) by
+routing reads through the legacy store's own supported MCP search surface
+instead of touching its storage directly.
 
 The native cutover replaces that MCP transport entirely. This hook now
 reads exclusively through ``MemoryClient.search()`` via ``ensure_daemon()``
@@ -123,7 +123,7 @@ except ImportError:
         pass
 
 
-# Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md): the
+# Native cutover (B2, the native-cutover design history): the
 # ONE transport seam this hook uses for memory reads is MemoryClient via
 # ensure_daemon() -- there is no vendor subprocess anymore. Hard
 # dependency (amplifier-module-tool-memory already hard-depends on
@@ -211,7 +211,7 @@ def _mcp_search(
     timeout_s: float = DEFAULT_RETRIEVAL_TIMEOUT_S,
 ) -> list[dict[str, Any]]:
     """Retrieve candidate memories via the native memory daemon's ``search``
-    tool (native cutover, B2, docs/plans/2026-07-07-native-cutover-design.md).
+    tool (native cutover, B2, the native-cutover design history).
 
     This is the ONLY way this hook reads memory: the daemon resolves its
     own store and embedder server-side, so there is no path/collection value

@@ -15,9 +15,9 @@ dependencies = [
     #
     # amplifier-module-tool-memory already hard-depends on amplifier-data
     # + fastembed (native cutover, docs/plans/2026-07-07-native-cutover-
-    # design.md) -- there is no vendor dependency anymore -- retrieval goes
-    # exclusively through MemoryClient.search() via ensure_daemon(), no
-    # vendor subprocess, no ChromaDB.
+    # design.md) -- there is no external vendor dependency anymore --
+    # retrieval goes exclusively through MemoryClient.search() via
+    # ensure_daemon(), no vendor subprocess, no direct store client.
     #
     # Only used by the OPT-IN llm_judge_enabled path (default False -- see
     # module docstring "Privacy"). Never invoked unless a user explicitly
@@ -60,7 +60,7 @@ pythonVersion = "3.11"
 typeCheckingMode = "basic"
 reportMissingImports = false
 reportGeneralTypeIssues = false
-# Pre-existing: chromadb QueryResult fields can be None; guarded by try/except in code
+# Pre-existing: legacy store query-result fields can be None; guarded by try/except in code
 reportOptionalSubscript = false
 
 # Required: the amplifier-data dependency above is a direct (git+) URL reference;

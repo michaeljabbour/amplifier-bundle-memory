@@ -16,7 +16,7 @@ in conversation history.
 Re-ranking formula (CP4):
   final = semantic_score + weight * (importance - 0.5) * 0.08
 
-Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md): every
+Native cutover (B2, the native-cutover design history): every
 memory read (search / KG / diary) routes through MemoryClient via
 ensure_daemon() against the auto-started memory daemon. There is no
 vendor subprocess anywhere in this module.

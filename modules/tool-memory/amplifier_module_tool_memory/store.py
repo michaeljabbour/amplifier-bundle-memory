@@ -3,7 +3,7 @@ MemoryStore — the storage seam for the consolidation pipeline.
 
 The cold-path ``curate.dot`` pipeline produces consolidated "cells" and writes
 them through a ``MemoryStore``. ``NativeMemoryStore`` is the ONE store
-now (native cutover, B2, docs/plans/2026-07-07-native-cutover-design.md) --
+now (native cutover, B2, the native-cutover design history) --
 drawers, scopes, KG facts, vectors, and diary entries all route through it,
 with three interchangeable backends (direct ``AmplifierStore``, ``RemoteStore``
 via the companion server, and the authed ``GatewayClient``/``MemoryClient``).
@@ -741,7 +741,7 @@ class NativeMemoryStore:
         self.rolled_back.append(record.interaction_id)
 
     # ------------------------------------------------------------------
-    # Native read surfaces (§3.2 of docs/plans/2026-07-07-native-cutover-design.md)
+    # Native read surfaces (§3.2 of the native-cutover design history)
     # ------------------------------------------------------------------
 
     def _scope_ref(self, kind: str, name: str) -> Any:

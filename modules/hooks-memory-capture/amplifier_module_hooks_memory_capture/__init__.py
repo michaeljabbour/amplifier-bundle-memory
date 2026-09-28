@@ -153,7 +153,7 @@ try:
 except ImportError:
     _load_manifest = None  # type: ignore[assignment]
 
-# Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md): this
+# Native cutover (B2, the native-cutover design history): this
 # hook's write path now goes through MemoryClient via ensure_daemon() -- the
 # auto-started memory daemon IS the store, not a shadow of one. This is a
 # hard dependency (amplifier-module-tool-memory already hard-depends on
@@ -319,7 +319,7 @@ def _file_drawer(
 ) -> None:
     """File a verbatim drawer via the native memory daemon (client.remember).
 
-    Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md):
+    Native cutover (B2, the native-cutover design history):
     this is now the ONLY store write for the capture pipeline -- there is
     no separate shadow write anymore, since the daemon IS the store. Raises
     on any failure (daemon unavailable, or a genuine write error) so

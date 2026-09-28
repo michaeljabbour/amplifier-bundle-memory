@@ -1,5 +1,5 @@
 """
-KG-N1 (docs/plans/2026-07-07-native-cutover-design.md \u00a712): the killer gate
+KG-N1 (the native-cutover design history \u00a712): the killer gate
 assigned to B2.
 
 Remember->search round-trip through the REAL tool surface:

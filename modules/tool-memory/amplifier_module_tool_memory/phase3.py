@@ -11,7 +11,7 @@ Public API:
     plan_phase3_actions(drawers)         -> list[KGFact]
 
 See agents/curator.md Phase 3 for how these are used in practice.
-Spec: docs/spec-v1.2.0-gene-transfer.md Section 5.
+Spec: the v1.2.0 design spec Section 5.
 """
 
 from __future__ import annotations

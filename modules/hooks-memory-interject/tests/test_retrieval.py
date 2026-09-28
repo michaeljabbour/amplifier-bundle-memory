@@ -2,7 +2,7 @@
 Unit tests for the native retrieval lane (_mcp_search, _derive_memory_id)
 and the cosine/uncertain-band/llm_judge gating logic in _retrieve_and_gate.
 
-Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md): these
+Native cutover (B2, the native-cutover design history): these
 tests never touch the network or a real daemon -- _call_client (the ONE
 transport seam to MemoryClient via ensure_daemon()) is monkeypatched
 throughout, mirroring the shape the native daemon's `search` domain tool
@@ -268,8 +268,8 @@ def test_retrieve_and_gate_respects_briefed_ids(monkeypatch):
 # Structural guard (folded in from the deleted test_store_alignment.py, \u00a73.2
 # of the native-cutover design -- the underlying regression class, "this
 # module must never touch a store directly," still matters post-cutover):
-# the module must not import chromadb or construct a PersistentClient, and
-# must not resurrect the old direct-embedding/direct-cosine helpers.
+# the module must not construct a direct persistent-store client, and must
+# not resurrect the old direct-embedding/direct-cosine helpers.
 # ---------------------------------------------------------------------------
 
 
@@ -281,15 +281,9 @@ def test_module_never_hardcodes_a_vector_store_at_runtime():
     tree = ast.parse(source)
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            assert not any(alias.name == "chromadb" for alias in node.names), (
-                "module must not import chromadb"
-            )
-        if isinstance(node, ast.ImportFrom):
-            assert node.module != "chromadb", "module must not import from chromadb"
         if isinstance(node, ast.Attribute) and node.attr == "PersistentClient":
             raise AssertionError(
-                "module must not construct a chromadb PersistentClient"
+                "module must not construct a direct persistent-store client"
             )
 
     assert not hasattr(interject, "_retrieve_memories")

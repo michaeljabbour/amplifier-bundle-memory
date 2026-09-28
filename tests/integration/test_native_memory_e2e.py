@@ -1,5 +1,5 @@
 """
-Native memory e2e smoke (DTU-gated, docs/plans/2026-07-07-native-cutover-design.md
+Native memory e2e smoke (DTU-gated, the native-cutover design history
 \u00a710.3 / KG-N1).
 
 Exercises the completed native stack end-to-end as a user would, inside the
@@ -7,8 +7,8 @@ memory-native-e2e DTU container: the friend-scenario -- one process files a
 drawer via ``MemoryTool.execute({"operation": "remember", ...})``, a SECOND
 process recalls it via ``execute({"operation": "search", ...})`` through the
 auto-started memory daemon and the real local embedder. There is no vendor
-subprocess or ChromaDB anywhere in this path -- the daemon (amplifier-data +
-FastEmbedEmbedder) is the ONE store.
+subprocess or direct vector-store client anywhere in this path -- the daemon
+(amplifier-data + FastEmbedEmbedder) is the ONE store.
 
 Skipped outside the DTU container (see tests/integration/conftest.py's
 pytest_collection_modifyitems -- the same sentinel gate every test in this

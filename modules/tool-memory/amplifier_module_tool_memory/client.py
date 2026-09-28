@@ -1,5 +1,5 @@
 """MemoryClient \u2014 the ONE seam every hook/tool/pipeline op will use in B2
-(\u00a73.2 of docs/plans/2026-07-07-native-cutover-design.md).
+(\u00a73.2 of the native-cutover design history).
 
 Absorbs :class:`~amplifier_module_tool_memory.daemon.GatewayClient`
 wholesale (write_cell/scope/assert_fact/invalidate_fact/regenerate/

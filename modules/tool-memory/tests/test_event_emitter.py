@@ -1,7 +1,7 @@
 """
 Tests for amplifier_module_tool_memory.event_emitter
 
-Section 8.1 of spec-v1.2.0-gene-transfer.md
+Section 8.1 of the v1.2.0 design spec
 """
 
 from __future__ import annotations

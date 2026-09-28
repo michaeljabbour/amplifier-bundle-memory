@@ -262,7 +262,7 @@ def make_gateway(
 
 
 # ---------------------------------------------------------------------------
-# Memory daemon (D3, §5 of docs/plans/2026-07-07-native-cutover-design.md)
+# Memory daemon (D3, §5 of the native-cutover design history)
 #
 # B1 lands the daemon's new capabilities IN this file (old module names,
 # additive per §11's B1 scope -- the file/module rename to

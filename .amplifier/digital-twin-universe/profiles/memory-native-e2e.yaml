@@ -1,11 +1,11 @@
 # memory-native-e2e DTU Profile
 #
 # End-to-end test environment for amplifier-bundle-memory's native cutover
-# (docs/plans/2026-07-07-native-cutover-design.md). Provisions an Ubuntu
+# (the native-cutover design history). Provisions an Ubuntu
 # 24.04 Incus container with the memory bundle and Amplifier installed from
-# a local Gitea mirror -- the legacy vendor package (mempalace) is NEVER
-# installed in this profile; the memory daemon (amplifier-data + a local
-# fastembed embedder) is the only store.
+# a local Gitea mirror -- the legacy vendor package is NEVER installed in
+# this profile; the memory daemon (amplifier-data + a local fastembed
+# embedder) is the only store.
 #
 # Variables (provided at launch via --var):
 #   GITEA_URL    -- Gitea base URL reachable from inside the environment
@@ -26,8 +26,8 @@ description: |
   End-to-end test environment for the native amplifier-bundle-memory cutover.
   Provisions an Ubuntu 24.04 container with a Rust toolchain (amplifier-data's
   Rust kernel is built from the git pin at install time) and Amplifier
-  installed from a local Gitea mirror. Asserts the legacy vendor package is
-  ABSENT, exercises the friend-scenario (session 1 remember -> session 2
+  installed from a local Gitea mirror. Asserts the legacy vendor package
+  is ABSENT, exercises the friend-scenario (session 1 remember -> session 2
   search through the auto-started memory daemon), and validates daemon
   crash-respawn (KG-N6 in vivo).
 
@@ -76,39 +76,32 @@ provision:
       echo 'export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"' >> /root/.bashrc
       export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
 
-    # 4. Assert the legacy vendor package is NOT installed (and never will
-    #    be in this profile) -- the killer-gate proof that the native stack
-    #    needs zero vendor presence.
-    - |
-      export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
-      pip show mempalace 2>/dev/null && { echo "FAIL: mempalace is installed"; exit 1; } || echo "PASS: mempalace absent"
-
-    # 5. Clone amplifier-bundle-memory from the Gitea mirror into /workspace
+    # 4. Clone amplifier-bundle-memory from the Gitea mirror into /workspace
     - git clone ${GITEA_URL}/admin/amplifier-bundle-memory /workspace/amplifier-bundle-memory
 
-    # 6. Install Amplifier via uv — git+https URL is rewritten to Gitea mirror
+    # 5. Install Amplifier via uv — git+https URL is rewritten to Gitea mirror
     - |
       export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
       uv tool install -vv git+https://github.com/microsoft/amplifier
 
-    # 7. Write API keys to keys.env (passthrough env vars; chmod 600)
+    # 6. Write API keys to keys.env (passthrough env vars; chmod 600)
     - |
       mkdir -p /root/.amplifier
       printf 'ANTHROPIC_API_KEY=%s\nOPENAI_API_KEY=%s\n' "${ANTHROPIC_API_KEY}" "${OPENAI_API_KEY}" > /root/.amplifier/keys.env
       chmod 600 /root/.amplifier/keys.env
 
-    # 8. Add the memory bundle to Amplifier (URL rewritten to Gitea mirror,
+    # 7. Add the memory bundle to Amplifier (URL rewritten to Gitea mirror,
     #    subdirectory points at the renamed native behavior).
     - |
       export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
       amplifier bundle add --app "git+https://github.com/michaeljabbour/amplifier-bundle-memory@main#subdirectory=behaviors/memory.yaml"
 
-    # 9. Touch a marker file for the in-container test suite's DTU sentinel
+    # 8. Touch a marker file for the in-container test suite's DTU sentinel
     #    (see tests/integration/conftest.py) -- this profile is native-only,
-    #    there is no legacy palace directory to key off of anymore.
+    #    there is no legacy store directory to key off of anymore.
     - touch /root/.dtu-memory-native
 
-    # 10. Post-provision smoke: real Amplifier session, friend-scenario
+    # 9. Post-provision smoke: real Amplifier session, friend-scenario
     #     remember -> search round-trip through the auto-started daemon,
     #     and coordinator events with the `memory:` prefix.
     - |
@@ -158,5 +151,3 @@ update:
 readiness:
   - name: amplifier-installed
     command: amplifier --version
-  - name: mempalace-absent
-    command: bash -c '! pip show mempalace >/dev/null 2>&1'

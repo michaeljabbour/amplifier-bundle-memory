@@ -1,5 +1,5 @@
 """Local embedder for the memory daemon (D1, D2 of
-docs/plans/2026-07-07-native-cutover-design.md).
+the native-cutover design history).
 
 ``FastEmbedEmbedder`` wraps fastembed's ``TextEmbedding`` (ONNX Runtime, no
 torch) behind the ``amplifier_data.embedding.Embedder`` protocol

@@ -1,7 +1,7 @@
 """
 Tests for amplifier_module_tool_memory.phase3
 
-Section 8.4 of docs/plans/spec-v1.2.0-gene-transfer.md
+Section 8.4 of the v1.2.0 design spec
 
 These are pure unit tests — no MCP calls, no store fixture, no network.
 """

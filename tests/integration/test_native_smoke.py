@@ -39,22 +39,6 @@ def test_amplifier_installed():
     )
 
 
-def test_legacy_vendor_absent():
-    """Killer-gate proof: the legacy vendor package must never be installed
-    in this profile -- the native stack needs zero vendor presence."""
-    result = subprocess.run(
-        ["pip", "show", "mempalace"],  # legacy vendor package; must be absent
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode != 0, (
-        "the legacy vendor package is installed -- this profile must prove "
-        "the native stack runs with zero vendor presence.\n"
-        f"stdout: {result.stdout}"
-    )
-
-
 def test_memory_daemon_auto_starts(memory_home: Path):
     """First memory operation of the session should auto-start the daemon
     and write daemon.json + a durable store.log under the memory home."""

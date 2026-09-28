@@ -1,7 +1,7 @@
 """
 Memory Garden — on-demand deep analysis of memory store contents.
 
-Spec: docs/spec-v1.2.0-gene-transfer.md Section 6.
+Spec: the v1.2.0 design spec Section 6.
 
 Public API (used by MemoryTool.execute):
     execute_garden(wing, room, lookback_days, max_drawers,
@@ -13,7 +13,7 @@ Pure-function helpers (importable for tests, no daemon calls):
     classify_cluster(member_ids, categories, texts) -> (label, dominant_category)
     extract_common_terms(texts, top_n) -> list[str]
 
-Native cutover (B2, docs/plans/2026-07-07-native-cutover-design.md): drawer
+Native cutover (B2, the native-cutover design history): drawer
 enumeration, near-duplicate detection, KG edges, and diary writes all route
 through ``MemoryClient`` via ``ensure_daemon()`` instead of the
 vendor subprocess. Clustering math (the pure functions above) is

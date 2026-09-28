@@ -13,7 +13,7 @@ Provides a single `memory` tool with sub-operations:
   events    — Query the per-session JSONL event log (CP2)
   garden    — On-demand cluster analysis
 
-Native cutover (docs/plans/2026-07-07-native-cutover-design.md): every
+Native cutover (the native-cutover design history): every
 operation routes through ``MemoryClient`` via ``ensure_daemon()`` against the
 auto-started memory daemon -- there is no vendor subprocess anywhere in this
 module. The daemon IS the store (not a shadow of one). Tool name is `memory`

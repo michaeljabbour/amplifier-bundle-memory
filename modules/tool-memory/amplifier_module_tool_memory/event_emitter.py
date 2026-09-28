@@ -7,7 +7,7 @@ All hooks import from here:
 Events are written to: ~/.amplifier/memory/events/{session_id}.jsonl
 (override: AMPLIFIER_MEMORY_HOME).
 
-Native cutover (docs/plans/2026-07-07-native-cutover-design.md §7.2): memory
+Native cutover (the native-cutover design history §7.2): memory
 owns its home directory outright -- there is no separate "initialised"
 signal anymore. The home directory (and the events/ subdirectory) is
 created lazily (mkdir -p) on first use rather than requiring a prior init

@@ -1,5 +1,5 @@
 """Tests for the NEW native read surfaces on NativeMemoryStore
-(\u00a73.2 of docs/plans/2026-07-07-native-cutover-design.md): search, list_drawers,
+(\u00a73.2 of the native-cutover design history): search, list_drawers,
 read_diary, status, kg_stats. Direct seam-level tests (no HTTP, no daemon) --
 the daemon dispatch layer is covered separately in test_daemon.py.
 

@@ -9,7 +9,7 @@ CLI:
     memory-write-cells [cells.json]
         Reads cells from the given file, or from stdin when omitted.
         Files them via the native NativeMemoryStore (direct backend,
-        docs/plans/2026-07-07-native-cutover-design.md B2) and prints the
+        the native-cutover design history B2) and prints the
         count written.
 """
 

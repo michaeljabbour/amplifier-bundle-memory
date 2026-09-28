@@ -3,7 +3,7 @@ Coordinator-bridge unit tests.
 
 These tests use FakeCoordinator — a pure-Python stub that replaces the real
 Amplifier kernel (RustCoordinator / RustHookRegistry).  No real Amplifier
-kernel, filesystem, MCP server, ChromaDB instance, or subprocess is involved.
+kernel, filesystem, MCP server, vector-store instance, or subprocess is involved.
 
 The suite verifies four properties of the memory coordinator bridge:
 

@@ -1,7 +1,7 @@
 """
 Tests for briefing importance re-ranking.
 
-Section 8.5 of spec-v1.2.0-gene-transfer.md
+Section 8.5 of the v1.2.0 design spec
 
 Formula: final = semantic + weight * (importance - 0.5) * 0.08
 All tests are pure unit tests with no MCP calls.

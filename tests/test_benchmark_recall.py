@@ -1,7 +1,7 @@
 """
 Benchmark: Briefing Importance Re-ranking — R@5 Recall Gate
 
-Section 9 of spec-v1.2.0-gene-transfer.md
+Section 9 of the v1.2.0 design spec
 
 Run modes:
   Default suite  — test_zero_regression_guarantee, test_max_boost_does_not_dominate_semantic
@@ -631,7 +631,7 @@ _TOOLS_A = [
     "Kafka",
     "OpenAI",
     "LangChain",
-    "ChromaDB",
+    "Elasticsearch",
 ]
 _TOOLS_B = [
     "MongoDB",
