@@ -26,7 +26,7 @@ capability check (`coordinator.get_tool("run_pipeline") is None → no-op`), nev
 a hard YAML dependency. Each box node spawns a child LLM session, so automatic
 triggering has real cost and must be opt-in + gated.
 **Alternatives:** session:end hook now (deferred — cost + optionality complexity);
-compose attractor in behaviors/mempalace.yaml (rejected: hard dependency).
+compose attractor in the legacy behavior file (rejected: hard dependency).
 
 ### D3 — Emergent policy: declared, default off
 **Decision:** `emergent.enabled` (default false) + `promote_threshold` live in the
@@ -35,24 +35,28 @@ Not yet wired into classification logic.
 **Why:** Keep the precision/recall knob visible and user-owned, but don't ship
 auto-promotion behavior unproven. "Propose, don't drop, don't silently park."
 
-### D4 — Substrate: palace now, amplifier-data as a declared seam
-**Decision:** Phase 2 writes through `PalaceMemoryStore` (ChromaDB palace).
-`AmplifierDataMemoryStore` exists as a loud `NotImplementedError` stub.
+### D4 — Substrate: the legacy vendor store now, amplifier-data as a declared seam
+**Decision:** Phase 2 writes through a legacy-vendor-backed `MemoryStore`
+implementation (the previous vendor's own vector store). An amplifier-data-
+backed store exists as a loud `NotImplementedError` stub.
 **Why:** amplifier-data's Rust floor is proven (E1–E3 green) but it lacks
 persistence + a vector lens — the two things memory actually needs. Writing
 through a `MemoryStore` seam means swapping to amplifier-data later is a
 one-class change, with the gap explicit rather than silent.
 **Open fork for Michael:** commit to amplifier-data (fund persistence + vector
-lens) vs. stay on the palace and keep amplifier-data concept-only. Phase 3 gated
-on this.
+lens) vs. stay on the legacy vendor store and keep amplifier-data
+concept-only. Phase 3 gated on this.
 **(Superseded by D5, 2026-07-07 — the stub described here was completed.)**
+*(External research record for the full pre-scrub text of this decision:
+memthoughts/research/amplifier-memory-v2.1/lineage.md, not part of this
+bundle.)*
 
 ### D5 — Substrate seam completed (supersedes D4's "stub" status)
 **Date:** 2026-07-07. Implements
 `docs/plans/2026-07-07-substrate-adapter-completion-design.md`.
 
-**Fork resolution:** D4's "open fork" (commit to amplifier-data vs. stay
-palace-only) resolved toward **composition**: amplifier-data's persistence
+**Fork resolution:** D4's "open fork" (commit to amplifier-data vs. stay on
+the legacy vendor store only) resolved toward **composition**: amplifier-data's persistence
 (durable `DurableKernel`/Rust) and vector lens (dim-agnostic `query_vector`/
 `add_embedding`) DID land upstream (verified against amplifier-data at HEAD
 `09482f1`). The seam is no longer a stub — it is a completed consumer
@@ -67,18 +71,18 @@ a §8 migration/read-verify harness (`dualwrite_compare.py`).
 - **Embeddings** — `file(..., embedding=v)` transports a caller-supplied
   vector to `add_embedding`/the batch path; `search_vectors(v, k, wing=...)`
   is the verify-only read. The seam NEVER computes embeddings itself (bundle
-  policy per COMPOSITION.md stays with the embedder, e.g. ChromaDB's
-  `text-embedding-3-small`); it is dim-agnostic by construction.
-- **KG facts** — anchor-cell encoding: a palace string entity (e.g.
+  policy per COMPOSITION.md stays with the embedder, e.g. the legacy vector
+  backend's own embedding model); it is dim-agnostic by construction.
+- **KG facts** — anchor-cell encoding: a legacy-store string entity (e.g.
   `"svc-a"`) maps to a content-addressed `entity:{name}` cell so
-  `assert_kg`/`invalidate_kg`/`query_kg`/`kg_timeline` can carry palace-shaped
+  `assert_kg`/`invalidate_kg`/`query_kg`/`kg_timeline` can carry legacy-shaped
   string triples onto substrate `(Hash, str, Hash)` facts. Serves both the
-  `tool-mempalace` `kg` op (shadowed best-effort via `_shadow_kg`) and
+  legacy-vendor-store tool's `kg` op (shadowed best-effort via `_shadow_kg`) and
   Phase-3 curator facts (`has_importance`/`has_category`/`duplicates`/
   `related_to`) — no special-casing, same `assert_kg` surface.
 - **Diary** — `file_diary(agent_name, entry, topic)` introduces a NEW scope
   axis, `agent:{agent_name}`, orthogonal to `wing:`/`room:`. Shadowed
-  best-effort from the palace `diary write` op via `_shadow_diary`.
+  best-effort from the legacy store's `diary write` op via `_shadow_diary`.
 
 **The `write_batch` probe decision:** the old probe
 (`getattr(s, "update_fact")` / `getattr(s, "append_batch")`) never fired —
@@ -96,8 +100,8 @@ endpoint and degrades honestly: sequential path, `MutationRecord.atomic=False`.
   multi-call recovery, and every multi-write flow in this repo fits in one
   `WriteBatch`. Revisit only when a flow genuinely needs cross-commit
   rollback.
-- **Read-path cutover** — the palace remains the ONLY production read
-  source. The new `dualwrite_compare.py` checks (vector self-retrieval, KG
+- **Read-path cutover** — the legacy vendor store remains the ONLY production
+  read source. The new `dualwrite_compare.py` checks (vector self-retrieval, KG
   assert/invalidate/timeline, scope-query consistency, diary round-trip) are
   verification that the substrate COULD answer, not a migration. Cutover
   policy is a future design decision.
@@ -106,12 +110,17 @@ endpoint and degrades honestly: sequential path, `MutationRecord.atomic=False`.
 Discovered that repo-root `tests/` is DTU-gated (skipped outside the
 memory-bundle-e2e container). Unit tests for this work were placed under
 `modules/*/tests/` instead, with a local conftest for the capture-hook tests to
-put the sibling tool-mempalace module on sys.path. Recorded so the next session
-doesn't re-learn it.
+put the sibling legacy-vendor-store tool module on sys.path. Recorded so the
+next session doesn't re-learn it.
+
+*(External research record for the full pre-scrub text of D5:
+memthoughts/research/amplifier-memory-v2.1/lineage.md, not part of this
+bundle.)*
 
 ## 2026-09-27 — Three-layer memory, Amplifier-shaped (design session)
 
-Evidence: `docs/research/2026-09-27-memory-systems-gene-survey.md`.
+Evidence: external research record: memthoughts/research/amplifier-memory-v2.1/
+(not part of this bundle).
 Design + task list: `docs/plans/2026-09-27-memory-layers-design.md`.
 Entry format (for automated brainstorm/plan sessions): **Decision / Why /
 Alternatives / Evidence / Status / Unblocks.** Status is one of
@@ -161,12 +170,13 @@ Rust model change).
 **Decision:** add `lenses/bm25.py` to amplifier-data (pure fold, mirrors
 `lenses/vector.py`); `store.search` fuses semantic + BM25 by RRF (k=60) with
 per-arm caps on the existing shared `_SearchFold`, and reports per-arm ranks.
-**Why:** Mem0, Hindsight and Graphiti independently converged here; our
+**Why:** multiple surveyed systems independently converged here; our
 current lexical term only reranks vector top-3k and cannot recover a vector
 miss — fatal for identifiers, paths and error codes in a coding agent.
 **Alternatives:** SQLite FTS5 sidecar (rejected for now: second store, second
 consistency story); weighted sum (rejected: scale-sensitive, needs tuning).
-**Evidence:** survey F5.
+**Evidence:** survey F5 (external research record:
+memthoughts/research/amplifier-memory-v2.1/, not part of this bundle).
 **Status:** derived from D6(4). **Unblocks:** T1.1–T1.2.
 
 ### D10 — Background LLM work = spawned agent via `session.spawn`, opt-in behaviors
@@ -197,9 +207,10 @@ blocks on an LLM call, and is superseded by D7.
 invalidate `@memory:current` + `expired_at`; unresolved contradictions become
 amplifier-data integrity tensions; single-valued predicates resolve newest-wins
 without an LLM.
-**Why:** Mem0 v2 dropped destructive UPDATE/DELETE; Graphiti/Mem0g invalidate
-softly; our substrate is append-only; provenance keeps derived text auditable
-against verbatim evidence (our differentiator).
+**Why:** a surveyed system dropped destructive UPDATE/DELETE in a later
+version; other surveyed systems invalidate softly; our substrate is
+append-only; provenance keeps derived text auditable against verbatim
+evidence (our differentiator).
 **Status:** derived. **Unblocks:** T2.1, T2.7.
 
 ### D13 — The measurement bar for "best of all the tools"
@@ -208,7 +219,7 @@ and ≥ AMB hybrid baseline; PrecisionMemBench R@10 ≥ v2.0.1; ≤50% context
 tokens; hot-path p95 ≤300 ms with zero LLM calls.
 **Why:** our 96.6% R@5 is retrieval-only and partly synthetic; peers report
 judged QA; vendor numbers are disputed, so we measure locally and publish both.
-**Status:** **proposed — needs Michael's ratification of the numbers.**
+**Status:** ratified (Michael, 2026-09-28: "Okay, on D13").
 **Unblocks:** T0.4 baseline, every later "better" claim.
 
 ### D14 — Secrets are scrubbed before capture
@@ -349,3 +360,51 @@ invalidation story needed).
   (`fusion="legacy"`, `briefing_mode="legacy"`), and all new layers are
   additive or opt-in.
 **Status:** derived.
+
+### D22 — amplifier-data stays a separate repo; merged to main, not absorbed
+**Decision:** merge `feat/bm25-lens` into amplifier-data `main` and pin to it;
+do not fold amplifier-data into this bundle.
+**Why:** the owner allowed either (2026-09-28). amplifier-data is the shared
+substrate of the constellation (the conductor and survey depend on it); the
+one-way edge memory → amplifier-data (AGENTS.md) exists so memory never owns
+other bundles' storage. Absorbing it would invert that edge.
+**Status:** derived from the owner's permission; revisable.
+
+### D23 — No remnants of original products
+**Decision:** no product names (the legacy vendor store and the ten surveyed
+systems) anywhere in this repo or amplifier-data, enforced by
+`tests/test_no_product_names.py` (and its amplifier-data twin). The only
+exemption is the external benchmark harness's own identifiers inside
+`benchmarks/amb/`. The legacy-import tool (`migrate.py`,
+`amplifier-memory-import`, the vector-DB extra) and vendor-era design docs were
+removed; attribution and verbatim lineage now live outside the product in
+`memthoughts/research/amplifier-memory-v2.1/` (`gene-survey.md`, `lineage.md`).
+**Why:** owner: "we don't want any remnants of the original products in our
+work." Evidence stays auditable, just not inside the product.
+**Open (owner):** the drawer/wing/room vocabulary is the legacy vendor's
+metaphor and is public API (tool params `wing`/`room`, hit fields, events). A
+rename is a breaking v3 change — not done without a ruling.
+**Status:** ratified (directive) except the open item.
+
+### D24 — Lessons from memthoughts (next-phase candidates)
+Source: memthoughts gap map, wikimem loop, and the MemoryBench paper (see
+memthoughts/research/). Surveyed systems did not consistently beat plain
+BM25/embedding retrieval outside the long-input/short-output task shape; the
+differentiator was procedural memory learned from feedback.
+1. **Procedural (skill) memory keyed by task signature**, written from outcome
+   feedback — our biggest remaining gap. (proposed, medium)
+2. **Measure across task shapes**, not only long-context QA: add a second
+   benchmark covering short/long input × short/long output with feedback logs
+   before claiming "best of all tools" under D13. (proposed, low–medium; needs
+   GPU or API budget)
+3. **Construction cost is a first-class metric:** record distill time and
+   tokens per compaction next to search p95. (derived, low)
+4. **Growth bound on LLM-authored writes:** per-room fact cap / rollover rule
+   (the fact gate already rejects missing sources and secrets). (proposed, low)
+5. **Decay of uncorroborated derived facts** (never evidence): e.g. facts with
+   proof_count 1 never retrieved in N days leave `@memory:current`
+   (supersede-style, reversible). (proposed, medium)
+Rejected: rewrite-in-place topic pages (conflicts with supersede-never-delete
+and unproven at scale). A reconstruct-with-citations answer step stays a
+candidate after the baseline shows whether it's needed.
+**Status:** proposed.
