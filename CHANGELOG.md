@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Removed
+
+- `modules/context-sleep` is retired from this bundle (see
+  `project-context/PROVENANCE.md` D11): it is a context manager, not memory,
+  was not composed by any behavior, blocked the turn on an LLM call, and
+  emitted an unregistered event. Superseded by `hooks-memory-reflect`, which
+  observes standard compaction events. The empirical research behind it is
+  kept at `docs/research/context-sleep-study.md`.
+
 ## [2.0.1] — 2026-08-24
 
 ### Fixed

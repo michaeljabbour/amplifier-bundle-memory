@@ -78,7 +78,6 @@ jobs:
             tests/test_vendor_sweep.py \
             tests/test_behavioral_write.py \
             tests/test_benchmark_recall.py \
-            tests/test_context_sleep.py \
             tests/test_coordinator_bridge.py \
             tests/test_mutable_embeddings.py \
             tests/test_mutation_seam.py \
