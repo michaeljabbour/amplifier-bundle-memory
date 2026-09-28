@@ -36,7 +36,7 @@ dependencies = [
     # must restate the pin directly. Direct URL restated deliberately: uv
     # --no-sources rejects transitive URL deps -- NOT the sibling-dep
     # anti-pattern; amplifier-data is an external library.
-    "amplifier-data @ git+https://github.com/michaeljabbour/amplifier-data@09482f1fa569ba8407894cad3a32f8ab6aecbc3d",
+    "amplifier-data @ git+https://github.com/michaeljabbour/amplifier-data@3ef751b6fac7f6899824b78774b74809f09bcd81",
 ]
 
 [project.entry-points."amplifier.modules"]
