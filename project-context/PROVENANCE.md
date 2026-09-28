@@ -108,3 +108,121 @@ memory-bundle-e2e container). Unit tests for this work were placed under
 `modules/*/tests/` instead, with a local conftest for the capture-hook tests to
 put the sibling tool-mempalace module on sys.path. Recorded so the next session
 doesn't re-learn it.
+
+## 2026-09-27 — Three-layer memory, Amplifier-shaped (design session)
+
+Evidence: `docs/research/2026-09-27-memory-systems-gene-survey.md`.
+Design + task list: `docs/plans/2026-09-27-memory-layers-design.md`.
+Entry format (for automated brainstorm/plan sessions): **Decision / Why /
+Alternatives / Evidence / Status / Unblocks.** Status is one of
+`ratified` (owner said so), `derived` (follows from a ratified rule, revisable),
+`proposed` (needs owner ratification).
+
+### D6 — Owner constraints for the layers work
+**Decision:** (1) Amplifier-shaped and best-of-all-tools; (2) gene-transfer from
+any surveyed repo; (3) vendor nothing; (4) amplifier-data (or other) is fine and
+should be upgraded; (5) compaction follows standard Amplifier protocol; (6) build
+the missing layers, small commits, decisions logged here.
+**Why:** Michael, 2026-09-27, verbatim in design §1.
+**Alternatives:** n/a — owner direction.
+**Evidence:** conversation 2026-09-27.
+**Status:** ratified. **Unblocks:** D7–D15.
+
+### D7 — Memory ships no context manager; reflection observes standard events
+**Decision:** A new hook `hooks-memory-reflect` subscribes to
+`context:compaction` (emitted by foundation `context-simple` with stats only),
+`context:pre_compact` (kernel constant; emitted by other managers) and
+`session:end`. It reads the span since its watermark via the context module's
+`get_messages()` (contract: always full, non-destructive history) rather than
+depending on an evicted-messages payload that no contract guarantees.
+**Why:** CONTEXT_CONTRACT makes compaction the context manager's private
+policy; hooks are the sanctioned observers. A watermark works identically for
+every conforming context manager.
+**Alternatives:** keep/ship `context-sleep` (rejected: blocks the turn on an
+LLM call, emits an unregistered event, competes with the user's chosen context
+manager); require an `evicted` payload field (rejected: not in contract).
+**Evidence:** core-expert (events.rs:105-110, CONTEXT_CONTRACT.md); installed
+context-simple `__init__.py:1481-1501`.
+**Status:** derived from D6(5). **Unblocks:** T2.5.
+
+### D8 — Time and provenance are consumer-supplied facts, not substrate fields
+**Decision:** `filed_at`, `in_session`, `at_commit`, `recorded_at`,
+`expired_at`, `valid_at`/`invalid_at` are stored as amplifier-data facts (or
+fact-cell payload fields), never as kernel event fields.
+**Why:** amplifier-data deliberately excludes wall-clock time from events to
+keep byte-identical regeneration (E1, `lenses/temporal.py:13-18`). Facts need
+zero kernel change and are already queryable.
+**Alternatives:** add timestamps to `CellWriteEvent` (rejected: breaks E1,
+Rust model change).
+**Evidence:** amplifier-data survey §2.
+**Status:** derived. **Unblocks:** T0.2, T1.3, T2.1.
+
+### D9 — Hybrid retrieval by rank fusion; BM25 lives upstream as a lens
+**Decision:** add `lenses/bm25.py` to amplifier-data (pure fold, mirrors
+`lenses/vector.py`); `store.search` fuses semantic + BM25 by RRF (k=60) with
+per-arm caps on the existing shared `_SearchFold`, and reports per-arm ranks.
+**Why:** Mem0, Hindsight and Graphiti independently converged here; our
+current lexical term only reranks vector top-3k and cannot recover a vector
+miss — fatal for identifiers, paths and error codes in a coding agent.
+**Alternatives:** SQLite FTS5 sidecar (rejected for now: second store, second
+consistency story); weighted sum (rejected: scale-sensitive, needs tuning).
+**Evidence:** survey F5.
+**Status:** derived from D6(4). **Unblocks:** T1.1–T1.2.
+
+### D10 — Background LLM work = spawned agent via `session.spawn`, opt-in behaviors
+**Decision:** distillation and index rollup run in spawned agent sessions
+(`memory:distiller`, `memory:curator`) through the app-layer `session.spawn`
+capability, launched in an `asyncio` task joined by `coordinator.register_cleanup`.
+Model choice is `model_role: [fast, general]` in agent frontmatter. They ship as
+opt-in `behaviors/memory-reflect.yaml` and `behaviors/memory-index.yaml`;
+absence of `session.spawn` is a no-op (job stays queued), never an error.
+**Why:** foundation: hooks are mechanism and must not call providers; the
+spawn capability is what tool-recipes/dot-runner use; routing matrix owns
+models.
+**Alternatives:** in-hook provider call (rejected: policy leak, blocks turn);
+work-tracker queue (deferred: heavier than a durable job cell for one consumer).
+**Evidence:** foundation-expert; installed tool-recipes `executor.py`.
+**Status:** derived. **Unblocks:** T2.4–T2.6, T3.1.
+
+### D11 — Retire `context-sleep` from this bundle
+**Decision:** stop treating `modules/context-sleep` as part of memory; remove
+in P5 after confirming no consumer. Keep `docs/research/context-sleep-study.md`.
+**Why:** it is a context manager (not memory), not composed by any behavior,
+blocks on an LLM call, and is superseded by D7.
+**Status:** derived from D6(5). **Unblocks:** T5.1.
+
+### D12 — Facts are add-only, provenance-mandatory, supersede-never-delete
+**Decision:** a fact cannot be written without ≥1 existing source drawer
+(`@memory:derived_from`); updates create a new fact + `@memory:supersedes` +
+invalidate `@memory:current` + `expired_at`; unresolved contradictions become
+amplifier-data integrity tensions; single-valued predicates resolve newest-wins
+without an LLM.
+**Why:** Mem0 v2 dropped destructive UPDATE/DELETE; Graphiti/Mem0g invalidate
+softly; our substrate is append-only; provenance keeps derived text auditable
+against verbatim evidence (our differentiator).
+**Status:** derived. **Unblocks:** T2.1, T2.7.
+
+### D13 — The measurement bar for "best of all the tools"
+**Decision:** design §6: AMB QA accuracy (LongMemEval-S, LoCoMo) ≥ v2.0.1 +5
+and ≥ AMB hybrid baseline; PrecisionMemBench R@10 ≥ v2.0.1; ≤50% context
+tokens; hot-path p95 ≤300 ms with zero LLM calls.
+**Why:** our 96.6% R@5 is retrieval-only and partly synthetic; peers report
+judged QA; vendor numbers are disputed, so we measure locally and publish both.
+**Status:** **proposed — needs Michael's ratification of the numbers.**
+**Unblocks:** T0.4 baseline, every later "better" claim.
+
+### D14 — Secrets are scrubbed before capture
+**Decision:** `hooks-memory-capture` redacts known secret shapes before filing;
+emits counts only.
+**Why:** verbatim capture + local-forever storage + search/briefing
+resurfacing = a durable leak; the article's "keys live in the runtime, not in
+memory notes" rule.
+**Status:** derived from D6(1). **Unblocks:** T0.3.
+
+### D15 — The Curator write path was never actually wired
+**Decision:** treat `memory:curator_handoff_requested` as a defect: either
+spawn the curator (D10 path) or delete the event (T2.6).
+**Why:** `hooks-project-context` emits it at `session:end`; no subscriber
+exists anywhere, so session-end curation described in docs never runs.
+**Evidence:** `hooks-project-context/__init__.py:380-405`; grep of bundle.
+**Status:** derived. **Unblocks:** T2.6.
