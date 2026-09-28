@@ -27,6 +27,7 @@ Credits: project-context (github.com/michaeljabbour/project-context).
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,11 +43,17 @@ except ImportError:
 
 
 try:
-    from amplifier_module_tool_memory.event_emitter import emit_event
+    from amplifier_module_tool_memory.event_emitter import (
+        build_retrieved_data,
+        emit_event,
+    )
 except ImportError:
 
     def emit_event(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
         pass
+
+    def build_retrieved_data(**kwargs: Any) -> dict[str, Any]:  # type: ignore[misc]
+        return {}
 
 
 # Native cutover: the ONE transport seam for every memory read this
@@ -328,6 +335,7 @@ def _build_briefing(
     include_diary: bool,
     include_project_context: bool,
     importance_weight: float = 1.0,
+    hits_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[str, list[str], int, list[dict[str, Any]], list[dict[str, Any]]]:
     """Assemble a concise briefing from memory search, KG, diary, and coordination files.
 
@@ -385,6 +393,9 @@ def _build_briefing(
         results = reranked[:5]
 
     results_after_rerank = list(results)
+
+    if hits_sink is not None:
+        hits_sink.extend({**r, "layer": r.get("layer", "drawer")} for r in results)
 
     if results:
         lines = [f"**Recent memories -- `{project}`:**"]
@@ -468,6 +479,7 @@ def _build_layered_briefing(
     opening_query: str,
     token_budget: int,
     include_project_context: bool = True,
+    hits_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[str, list[str], int, list[dict[str, Any]], dict[str, int]]:
     """Assemble the P3 layered briefing: project-context coordination files
     (unchanged from legacy) -> Memory map (L3 index) -> Standing answers ->
@@ -531,6 +543,12 @@ def _build_layered_briefing(
         sections.append(section)
         approx_tokens += len(section) // 4
         section_counts["map_rooms"] = len(index_rows)
+    if hits_sink is not None and isinstance(index_rows, list):
+        hits_sink.extend(
+            {"ref": r.get("scope"), "layer": "index"}
+            for r in index_rows
+            if isinstance(r, dict)
+        )
 
     # 2. Standing answers -- non-stale answers, plus one line of stale questions.
     if approx_tokens < token_budget:
@@ -558,6 +576,12 @@ def _build_layered_briefing(
                 approx_tokens += len(section) // 4
                 section_counts["standing_answered"] = len(answered_lines)
                 section_counts["standing_stale"] = len(stale_questions)
+        if hits_sink is not None and isinstance(standing_rows, list):
+            hits_sink.extend(
+                {"ref": r.get("question"), "layer": "standing"}
+                for r in standing_rows
+                if isinstance(r, dict)
+            )
 
     # 3. Known facts -- top current L2 facts for the wing.
     if approx_tokens < token_budget:
@@ -574,6 +598,10 @@ def _build_layered_briefing(
             sections.append(section)
             approx_tokens += len(section) // 4
             section_counts["facts"] = len(facts_rows)
+        if hits_sink is not None and isinstance(facts_rows, list):
+            hits_sink.extend(
+                {**r, "layer": "fact"} for r in facts_rows if isinstance(r, dict)
+            )
 
     # 4. Relevant evidence -- L1 drawers as short cited snippets, whatever
     # token budget remains.
@@ -607,6 +635,12 @@ def _build_layered_briefing(
             sections.append(section)
             approx_tokens += len(section) // 4
             section_counts["evidence"] = len(raw_hits)
+        if hits_sink is not None:
+            hits_sink.extend(
+                {**h, "ref": str(h.get("ref", "")), "layer": "drawer"}
+                for h in raw_hits
+                if isinstance(h, dict)
+            )
 
     if not sections:
         return "", [], 0, [], section_counts
@@ -707,6 +741,8 @@ class MemoryBriefingHook:
             effective_mode = "legacy"
 
         section_counts: dict[str, int] = {}
+        retrieved_hits: list[dict[str, Any]] = []
+        t0 = time.monotonic()
         if effective_mode == "layered":
             briefing, sections, token_estimate, evidence_hits, section_counts = (
                 _build_layered_briefing(
@@ -714,6 +750,7 @@ class MemoryBriefingHook:
                     opening_query=opening_query,
                     token_budget=self.token_budget,
                     include_project_context=self.include_project_context,
+                    hits_sink=retrieved_hits,
                 )
             )
             results_fetched: list[dict[str, Any]] = []
@@ -733,7 +770,38 @@ class MemoryBriefingHook:
                 include_diary=self.include_diary,
                 include_project_context=self.include_project_context,
                 importance_weight=self.briefing_importance_weight,
+                hits_sink=retrieved_hits,
             )
+        latency_ms = (time.monotonic() - t0) * 1000
+
+        # T4.1: one memory:retrieved per briefing assembly, summarizing every
+        # search/fact/index read this pass made (mechanism-first: the
+        # conductor -- not this hook -- decides what "helped" means).
+        if self.emit_events:
+            retrieved_data = build_retrieved_data(
+                source="briefing",
+                op=effective_mode,
+                query=opening_query,
+                wing=f"wing_{project}",
+                hits=retrieved_hits,
+                latency_ms=latency_ms,
+            )
+            try:
+                emit_event(
+                    "memory-briefing",
+                    "retrieved",
+                    ok=True,
+                    data=retrieved_data,
+                    session_id=sid,
+                )
+            except Exception:
+                pass
+            try:
+                await self._bridge_emit(
+                    "memory:retrieved", {"ok": True, **retrieved_data}
+                )
+            except Exception:
+                pass
 
         # Derive drawer_ids from results_after_rerank (list of dicts)
         drawer_ids = [
@@ -775,6 +843,43 @@ class MemoryBriefingHook:
                     )
                 except Exception:
                     pass
+
+                # T4.1: memory:injected -- the briefing actually entered the
+                # model context (unlike memory:retrieved, which fires
+                # regardless of outcome). Refs are content addresses,
+                # stable across sessions.
+                injected_refs = [
+                    str(h.get("ref") or h.get("id") or "")
+                    for h in retrieved_hits
+                    if h.get("ref") or h.get("id")
+                ]
+                injected_layers = {
+                    str(h.get("ref") or h.get("id")): h.get("layer", "drawer")
+                    for h in retrieved_hits
+                    if h.get("ref") or h.get("id")
+                }
+                injected_data = {
+                    "source": "briefing",
+                    "refs": injected_refs,
+                    "layers": injected_layers,
+                    "chars": len(briefing),
+                }
+                try:
+                    emit_event(
+                        "memory-briefing",
+                        "injected",
+                        ok=True,
+                        data=injected_data,
+                        session_id=sid,
+                    )
+                except Exception:
+                    pass
+                try:
+                    await self._bridge_emit(
+                        "memory:injected", {"ok": True, **injected_data}
+                    )
+                except Exception:
+                    pass
             return HookResult(
                 action="inject_context",
                 context_injection=briefing,
@@ -808,7 +913,12 @@ async def mount(
     register_events(
         coordinator,
         "memory-briefing",
-        ["memory:briefing_assembled", "memory:briefing_skipped"],
+        [
+            "memory:briefing_assembled",
+            "memory:briefing_skipped",
+            "memory:retrieved",
+            "memory:injected",
+        ],
     )
 
     bridge_emit = make_async_bridge(coordinator)
@@ -818,6 +928,6 @@ async def mount(
         coordinator.hooks.register(event, hook, name=hook.name)
     return {
         "name": "hooks-memory-briefing",
-        "version": "1.1.0",
+        "version": "2.1.0",
         "provides": ["memory-briefing"],
     }

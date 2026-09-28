@@ -66,6 +66,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import time
 from typing import Any
 
 try:
@@ -89,11 +90,17 @@ except ImportError:
 
 
 try:
-    from amplifier_module_tool_memory.event_emitter import emit_event
+    from amplifier_module_tool_memory.event_emitter import (
+        build_retrieved_data,
+        emit_event,
+    )
 except ImportError:
 
     def emit_event(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
         pass
+
+    def build_retrieved_data(**kwargs: Any) -> dict[str, Any]:  # type: ignore[misc]
+        return {}
 
 
 try:
@@ -234,18 +241,22 @@ def _mcp_search(
         # Native search always returns a real ref -- the surrogate-id
         # derivation below only fires defensively (e.g. a malformed hit).
         mem_id = str(hit.get("ref") or "") or _derive_memory_id(hit, text)
-        memories.append(
-            {
-                "id": mem_id,
-                "text": text,
-                "score": float(hit.get("score", 0.0) or 0.0),
-                "metadata": {
-                    "wing": hit.get("wing"),
-                    "room": hit.get("room"),
-                    "source_file": hit.get("source"),
-                },
-            }
-        )
+        memory: dict[str, Any] = {
+            "id": mem_id,
+            "text": text,
+            "score": float(hit.get("score", 0.0) or 0.0),
+            "metadata": {
+                "wing": hit.get("wing"),
+                "room": hit.get("room"),
+                "source_file": hit.get("source"),
+            },
+        }
+        # T4.1: carry layer/rrf/arms through when the daemon returns them, so
+        # memory:retrieved can report them without a second call.
+        for key in ("layer", "rrf", "arms"):
+            if hit.get(key) is not None:
+                memory[key] = hit[key]
+        memories.append(memory)
     return memories
 
 
@@ -345,8 +356,37 @@ class MemoryInterjectHook:
         for mid in memory_ids:
             self._last_injected[mid] = self._turn
 
+    async def _emit_injected(
+        self, memories: list[dict[str, Any]], injection: str, sid: str | None
+    ) -> None:
+        """T4.1: ``memory:injected`` -- fires only when content actually
+        enters the model context (unlike ``memory:retrieved``, which fires
+        on every attempt). Refs are content addresses, stable across
+        sessions -- the conductor joins on them directly.
+        """
+        if not self.emit_events:
+            return
+        refs = [m["id"] for m in memories]
+        layers = {m["id"]: m.get("layer", "drawer") for m in memories}
+        data = {
+            "source": "interject",
+            "refs": refs,
+            "layers": layers,
+            "chars": len(injection),
+        }
+        try:
+            emit_event(
+                "memory-interject", "injected", ok=True, data=data, session_id=sid
+            )
+        except Exception:
+            pass
+        try:
+            await self._bridge_emit("memory:injected", {"ok": True, **data})
+        except Exception:
+            pass
+
     async def _retrieve_and_gate(
-        self, query: str, event: str
+        self, query: str, event: str, *, trigger: str = "", sid: str | None = None
     ) -> tuple[list[dict[str, Any]], bool, str, bool]:
         """Retrieve memories and decide whether to inject.
 
@@ -362,7 +402,33 @@ class MemoryInterjectHook:
             5,
             timeout_s=self.retrieval_timeout_s,
         )
+        t0 = time.monotonic()
         candidates = await asyncio.get_running_loop().run_in_executor(None, search)
+        latency_ms = (time.monotonic() - t0) * 1000
+
+        # T4.1: memory:retrieved fires for every retrieval attempt, whether
+        # or not it ends up injecting -- the conductor decides what "helped"
+        # means, not this hook.
+        if self.emit_events:
+            data = build_retrieved_data(
+                source="interject",
+                op=trigger,
+                query=query,
+                wing=None,
+                hits=candidates,
+                latency_ms=latency_ms,
+            )
+            try:
+                emit_event(
+                    "memory-interject", "retrieved", ok=True, data=data, session_id=sid
+                )
+            except Exception:
+                pass
+            try:
+                await self._bridge_emit("memory:retrieved", {"ok": True, **data})
+            except Exception:
+                pass
+
         if not candidates:
             return [], False, "retrieval_failed", False
 
@@ -461,7 +527,9 @@ class MemoryInterjectHook:
             should_inject,
             skip_reason,
             judge_used,
-        ) = await self._retrieve_and_gate(prompt_text, event)
+        ) = await self._retrieve_and_gate(
+            prompt_text, event, trigger="prompt_submit", sid=sid
+        )
         if not should_inject:
             if self.emit_events:
                 emit_event(
@@ -517,6 +585,7 @@ class MemoryInterjectHook:
                 )
             except Exception:
                 pass
+            await self._emit_injected(memories, injection, sid)
 
         return HookResult(
             action="inject_context",
@@ -580,7 +649,7 @@ class MemoryInterjectHook:
             should_inject,
             skip_reason,
             judge_used,
-        ) = await self._retrieve_and_gate(query, event)
+        ) = await self._retrieve_and_gate(query, event, trigger="tool_pre", sid=sid)
         if not should_inject:
             if self.emit_events:
                 emit_event(
@@ -631,6 +700,7 @@ class MemoryInterjectHook:
                 )
             except Exception:
                 pass
+            await self._emit_injected(memories, injection, sid)
 
         return HookResult(
             action="inject_context",
@@ -726,7 +796,9 @@ class MemoryInterjectHook:
             should_inject,
             skip_reason,
             judge_used,
-        ) = await self._retrieve_and_gate(response, event)
+        ) = await self._retrieve_and_gate(
+            response, event, trigger="orchestrator_complete", sid=sid
+        )
         if not should_inject:
             if self.emit_events:
                 emit_event(
@@ -827,6 +899,7 @@ class MemoryInterjectHook:
                 )
             except Exception:
                 pass
+            await self._emit_injected(contradicting, injection, sid)
 
         return HookResult(
             action="inject_context",
@@ -856,7 +929,12 @@ async def mount(
     register_events(
         coordinator,
         "memory-interject",
-        ["memory:memory_surfaced", "memory:interject_skipped"],
+        [
+            "memory:memory_surfaced",
+            "memory:interject_skipped",
+            "memory:retrieved",
+            "memory:injected",
+        ],
     )
 
     bridge_emit = make_async_bridge(coordinator)
@@ -905,7 +983,7 @@ async def mount(
 
     return {
         "name": "hooks-memory-interject",
-        "version": "2.0.1",
+        "version": "2.1.0",
         "description": (
             "OR-firing memory interjection hook: surfaces relevant memories "
             "on prompt:submit and orchestrator:complete (tool:pre is opt-in)"

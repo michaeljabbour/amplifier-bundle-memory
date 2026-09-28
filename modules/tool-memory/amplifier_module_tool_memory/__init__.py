@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,11 @@ from .coordinator_bridge import (
     make_sync_bridge,
     register_events,
 )
-from .event_emitter import _read_events_with_skip_count, emit_event
+from .event_emitter import (
+    _read_events_with_skip_count,
+    build_retrieved_data,
+    emit_event,
+)
 from .garden import execute_garden
 
 # Hard wall-clock budget for garden operations. Patchable in tests.
@@ -322,9 +327,58 @@ class MemoryTool(Tool):
         "standing_answer, standing (standing questions)."
     )
 
-    def __init__(self, *, bridge_emit: SyncBridge | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        bridge_emit: SyncBridge | None = None,
+        emit_events: bool = True,
+    ) -> None:
         super().__init__()
         self._bridge_emit: SyncBridge = bridge_emit or NOOP_SYNC_BRIDGE
+        # T4.1: gate for memory:retrieved emission (search/facts/index ops).
+        # zero added work when False -- callers skip both emit_event and the
+        # bridge call entirely.
+        self.emit_events: bool = emit_events
+
+    def _emit_retrieved(
+        self,
+        *,
+        op: str,
+        query: str | None,
+        wing: str | None,
+        hits: list[dict[str, Any]] | None,
+        latency_ms: float,
+        session_id: str | None,
+    ) -> None:
+        """T4.1: emit ``memory:retrieved`` for a tool search/facts/index op.
+
+        Never raises -- mirrors the never-disrupt-the-caller contract every
+        other emit call site in this module already follows.
+        """
+        if not self.emit_events:
+            return
+        data = build_retrieved_data(
+            source="tool",
+            op=op,
+            query=query,
+            wing=wing,
+            hits=hits,
+            latency_ms=latency_ms,
+        )
+        try:
+            emit_event(
+                "tool-memory",
+                "retrieved",
+                ok=True,
+                data=data,
+                session_id=session_id,
+            )
+        except Exception:
+            pass
+        try:
+            self._bridge_emit("memory:retrieved", {"ok": True, **data})
+        except Exception:
+            pass
 
     input_schema = {
         "type": "object",
@@ -700,10 +754,12 @@ class MemoryTool(Tool):
         kwargs = {k: v for k, v in input.items() if k != "operation"}
         try:
             if operation == "search":
+                query = kwargs.get("query", "")
+                t0 = time.monotonic()
                 try:
                     result = _call_client(
                         "search",
-                        query=kwargs.get("query", ""),
+                        query=query,
                         k=int(kwargs.get("limit", 5)),
                         wing=kwargs.get("wing") or None,
                         room=kwargs.get("room") or None,
@@ -714,6 +770,15 @@ class MemoryTool(Tool):
                     )
                 except Exception as exc:
                     return _client_error_to_tool_result(exc)
+                hits = result.get("results", []) if isinstance(result, dict) else []
+                self._emit_retrieved(
+                    op="search",
+                    query=query,
+                    wing=kwargs.get("wing") or None,
+                    hits=hits,
+                    latency_ms=(time.monotonic() - t0) * 1000,
+                    session_id=kwargs.get("session_id"),
+                )
                 return _client_result_to_tool_result(result)
 
             elif operation == "remember":
@@ -1033,10 +1098,12 @@ class MemoryTool(Tool):
                 return _client_result_to_tool_result(result)
 
             elif operation == "facts":
+                query = kwargs.get("query")
+                t0 = time.monotonic()
                 try:
                     result = _call_client(
                         "facts",
-                        query=kwargs.get("query"),
+                        query=query,
                         wing=kwargs.get("wing") or None,
                         room=kwargs.get("room") or None,
                         current_only=bool(kwargs.get("current_only", True)),
@@ -1046,6 +1113,19 @@ class MemoryTool(Tool):
                     )
                 except Exception as exc:
                     return _client_error_to_tool_result(exc)
+                hits = (
+                    [dict(r, layer="fact") for r in result]
+                    if isinstance(result, list)
+                    else []
+                )
+                self._emit_retrieved(
+                    op="facts",
+                    query=query,
+                    wing=kwargs.get("wing") or None,
+                    hits=hits,
+                    latency_ms=(time.monotonic() - t0) * 1000,
+                    session_id=kwargs.get("session_id"),
+                )
                 return _client_result_to_tool_result(result, wrap_key="facts")
 
             elif operation == "reflection_job_add":
@@ -1089,14 +1169,29 @@ class MemoryTool(Tool):
                 return _client_result_to_tool_result(result)
 
             elif operation == "index":
+                wing = kwargs.get("wing", "general")
+                t0 = time.monotonic()
                 try:
                     result = _call_client(
                         "index",
-                        wing=kwargs.get("wing", "general"),
+                        wing=wing,
                         room=kwargs.get("room") or None,
                     )
                 except Exception as exc:
                     return _client_error_to_tool_result(exc)
+                hits = (
+                    [dict(r, ref=r.get("scope"), layer="index") for r in result]
+                    if isinstance(result, list)
+                    else []
+                )
+                self._emit_retrieved(
+                    op="index",
+                    query=None,
+                    wing=wing,
+                    hits=hits,
+                    latency_ms=(time.monotonic() - t0) * 1000,
+                    session_id=kwargs.get("session_id"),
+                )
                 return _client_result_to_tool_result(result, wrap_key="index")
 
             elif operation == "index_set":
@@ -1158,17 +1253,19 @@ async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Mount the memory tool into the Amplifier coordinator."""
+    cfg = config or {}
     register_events(
         coordinator,
         "memory-tool",
-        ["memory:garden_completed", "memory:garden_progress"],
+        ["memory:garden_completed", "memory:garden_progress", "memory:retrieved"],
     )
 
     bridge_emit = make_sync_bridge(coordinator)
-    tool = MemoryTool(bridge_emit=bridge_emit)
+    emit_events = bool(cfg.get("emit_events", True))
+    tool = MemoryTool(bridge_emit=bridge_emit, emit_events=emit_events)
     await coordinator.mount("tools", tool, name=tool.name)
     return {
         "name": "tool-memory",
-        "version": "2.0.1",
+        "version": "2.1.0",
         "provides": ["memory"],
     }

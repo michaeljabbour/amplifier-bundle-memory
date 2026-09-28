@@ -117,6 +117,81 @@ def truncate_preview(text: str | None) -> str | None:
     return text
 
 
+def redact_query(query: str | None, max_len: int = 200) -> str:
+    """Scrub known secret shapes from a search/facts/index query and cap its
+    length for inclusion in a ``memory:retrieved`` event payload (T4.1).
+
+    Always returns a string (never ``None``) so callers can embed it in an
+    event payload unconditionally.
+    """
+    if not query:
+        return ""
+    from .redact import redact as _redact
+
+    scrubbed, _counts = _redact(query)
+    return scrubbed[:max_len]
+
+
+def summarize_hits(
+    hits: list[dict[str, Any]] | None, max_hits: int = 20
+) -> list[dict[str, Any]]:
+    """Build the content-free hit summaries for a ``memory:retrieved`` event.
+
+    Only an explicit allowlist of fields is copied out of each hit --
+    ``ref`` (falling back to ``id``/``scope``/``question_ref`` for shapes
+    that don't use ``ref`` directly), ``rank`` (1-based position in *hits*),
+    and, when present on the source hit, ``layer``, ``score``, ``rrf`` and
+    ``arms``. Verbatim hit text/content is NEVER copied -- this is the one
+    seam that keeps retrieved-event payloads content-free by construction.
+
+    Capped at *max_hits* (default 20, per T4.1 spec).
+    """
+    if not hits:
+        return []
+    summarized: list[dict[str, Any]] = []
+    for rank, hit in enumerate(hits[:max_hits], start=1):
+        if not isinstance(hit, dict):
+            continue
+        ref = (
+            hit.get("ref")
+            or hit.get("id")
+            or hit.get("scope")
+            or hit.get("question_ref")
+            or ""
+        )
+        entry: dict[str, Any] = {"ref": str(ref), "rank": rank}
+        for key in ("layer", "score", "rrf", "arms"):
+            if hit.get(key) is not None:
+                entry[key] = hit[key]
+        summarized.append(entry)
+    return summarized
+
+
+def build_retrieved_data(
+    *,
+    source: str,
+    op: str,
+    query: str | None,
+    wing: str | None,
+    hits: list[dict[str, Any]] | None,
+    latency_ms: float,
+    max_hits: int = 20,
+) -> dict[str, Any]:
+    """Assemble the ``memory:retrieved`` event payload (T4.1).
+
+    ``source`` is one of ``"tool"``, ``"interject"``, ``"briefing"``.
+    Never includes hit content/text -- see :func:`summarize_hits`.
+    """
+    return {
+        "source": source,
+        "op": op,
+        "query": redact_query(query),
+        "wing": wing,
+        "hits": summarize_hits(hits, max_hits),
+        "latency_ms": round(latency_ms, 1),
+    }
+
+
 def emit_event(
     hook: str,
     event: str,

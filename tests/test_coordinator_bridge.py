@@ -598,7 +598,7 @@ class TestInterjectCoordinatorBridge:
         hook = handler.__self__
 
         # Stub _retrieve_and_gate to return one matching memory
-        async def _fake_retrieve(query: str, event: str):  # type: ignore[no-untyped-def]
+        async def _fake_retrieve(query: str, event: str, **_kw):  # type: ignore[no-untyped-def]
             return ([{"id": "m1", "text": "hello", "score": 0.9}], True, "", False)
 
         hook._retrieve_and_gate = _fake_retrieve  # type: ignore[method-assign]
