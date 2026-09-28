@@ -298,3 +298,37 @@ exists anywhere, so session-end curation described in docs never runs.
   content address. T2.6 (curator handoff event) moves to P3 with the index
   curator work; the event stays informational until then.
 **Status:** derived. **Unblocks:** P3 (index rollup uses current facts).
+
+### D19 — L3 index is mechanism-first; the curator improves it, never gates it
+**Decision:** `index()` and `standing()` are deterministic, LLM-free reads,
+computed on read from current facts and drawers in one fold. `index_set()` /
+`standing_answer()` let `memory:curator` supersede the derived text with better
+prose (with `@memory:cites` to facts); a curated index is served until
+`pending_changes` > 10, then the derived view returns. Standing answers are
+stale when any cited fact is no longer current (retraction check).
+**Why:** D10's rule that background LLM work is additive, never load-bearing;
+L3 must work in a store that never had a curator spawn.
+**Alternatives:** require a curator write before reads (rejected: hard LLM
+dependency); cache derived views (rejected: recompute is one fold, no
+invalidation story needed).
+**Status:** derived. **Unblocks:** layered briefing.
+
+### D20 — P3/P5 as built
+- **Layered briefing** (default when the client exposes `index`): coordination
+  files first (byte-identical to legacy), then Memory map → Standing answers →
+  Known facts `[proof N]` → Relevant evidence, sharing the existing budget.
+  Legacy stays byte-identical and is pinned in its tests.
+- **Include-order footgun fixed:** foundation deep-merges hook config by module
+  id with the later scalar winning (`dicts/merge.py:79-129`), and a bundle's own
+  declarations compose after its includes (`registry.py:792-795`). So
+  `behaviors/memory-index.yaml` now `includes: memory:behaviors/memory-reflect`
+  itself; its `index_refresh: true` wins regardless of consumer include order.
+- **Index refresh** (opt-in): at `session:start` the reflect hook spawns
+  `memory:curator` only when a derived room has ≥10 pending changes or a
+  standing question is stale — quiet sessions spawn nothing.
+- **Standing questions** are content-addressed by question text (a shared
+  question across wings is one cell scoped to each) — accepted.
+- **P5:** `modules/context-sleep` and `tests/test_context_sleep.py` removed
+  after a consumer check across this repo and the four constellation siblings
+  (zero references); research doc kept; CI list updated.
+**Status:** derived.
