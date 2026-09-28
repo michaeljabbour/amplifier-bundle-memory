@@ -1,26 +1,26 @@
 # Handoff
 
-*Last updated: 2026-09-28 — v2.1.0 three-layer memory on `feat/memory-layers` (local, not pushed)*
+*Last updated: 2026-09-28 -- v2.1.0 three-layer memory on `feat/memory-layers` (local, not pushed)*
 
-## TL;DR for Michael (2026-09-28 — three layers built, gene-transferred, Amplifier-shaped)
+## TL;DR for Michael (2026-09-28 -- three layers built, gene-transferred, Amplifier-shaped)
 
-Surveyed 10 memory systems at source level (Mem0, OpenMemory, Hindsight, AMB,
-Graphiti, Cognee, Letta/Letta Code, memU, OpenViking) and built the missing
-layers in our shape. Nothing vendored. Evidence:
-`docs/research/2026-09-27-memory-systems-gene-survey.md`; design + task IDs:
-`docs/plans/2026-09-27-memory-layers-design.md`; decisions D6–D21 in PROVENANCE.
+Surveyed 10 prior-art memory systems at source level and built the missing
+layers in our shape. Nothing vendored. Evidence: external research record:
+memthoughts/research/amplifier-memory-v2.1/ (not part of this bundle); design
++ task IDs: `docs/plans/2026-09-27-memory-layers-design.md`; decisions D6-D21
+in PROVENANCE.
 
 **Built (all tests green: 629 module/bench + 89 CI-root):**
 - L1 evidence: `filed_at`/`in_session`/`at_commit` facts; secret redaction
   before capture; garden `lookback_days` finally real.
 - Retrieval: BM25 lens upstream (amplifier-data `feat/bm25-lens`, local) + RRF
-  fusion (identifier recall that embeddings miss), `since`/`until`; p95 ~160–190 ms
+  fusion (identifier recall that embeddings miss), `since`/`until`; p95 ~160-190 ms
   on 5k drawers vs 300 ms gate; legacy byte-identical mode kept.
 - L2 facts: provenance-mandatory, add-only, supersede-never-delete, single-valued
   predicates, integrity tensions; durable reflection-job queue.
 - Reflection: `hooks-memory-reflect` observes standard `context:compaction` /
   `context:pre_compact` / `session:end`, spawns `memory:distiller`
-  (`model_role [fast, general]`) via `session.spawn` — opt-in
+  (`model_role [fast, general]`) via `session.spawn` -- opt-in
   `behaviors/memory-reflect.yaml`.
 - L3: mechanism-first index + standing questions (retraction check); layered
   briefing; opt-in `behaviors/memory-index.yaml` curator refresh.
@@ -28,14 +28,14 @@ layers in our shape. Nothing vendored. Evidence:
 - `context-sleep` retired (D11). AMB adapter in `benchmarks/amb/`.
 
 **Needs you (in order):**
-1. Push amplifier-data `feat/bm25-lens` (5d7c301, 9b993a1) → merge → bump the pin
+1. Push amplifier-data `feat/bm25-lens` (5d7c301, 9b993a1) -> merge -> bump the pin
    in all six module pyprojects (T1.5). Until then production runs legacy
-   search (capability check — safe).
+   search (capability check -- safe).
 2. Ratify D13's measurement bar, then provide `GEMINI_API_KEY` (+ `GROQ_API_KEY`)
    so the AMB baseline can run (`benchmarks/amb/README.md`). No "better" claim
    until those numbers exist.
-3. Push `feat/memory-layers` and validate in a DTU (amplifier-tester) — the
-   spawn path (`session.spawn` → distiller) is unit-tested with fakes only.
+3. Push `feat/memory-layers` and validate in a DTU (amplifier-tester) -- the
+   spawn path (`session.spawn` -> distiller) is unit-tested with fakes only.
 4. T4.2 lives in behavioral-plasticity: consume `memory:injected`.
 
 **Environment note:** `~/dev/.venv` has amplifier-data 0.2.0 from the unpushed
@@ -45,344 +45,13 @@ local branch (see WAYSOFWORKING).
 harmless); T2.6 curator-handoff event still informational; standing questions
 keyed by text across wings.
 
-*Last updated: 2026-08-24 — v2.0.1 latency and daemon-singleton hardening on `perf/search-no-regenerate`*
-
-## TL;DR for Michael (2026-08-24 — latency RCA and v2.0.1 hardening)
-
-The observed TUI slowdown was not primarily rendering. A large native memory
-store made synchronous interject searches expensive, and the default
-`tool:pre` registration paid that search cost before nearly every tool call.
-The default gateway timeout was 15 seconds, matching the repeated 14–17 second
-gaps in the affected turn. Multiple daemons also shared one memory home because
-`daemon.lock` protected only process spawn, not daemon lifetime; an older daemon
-could unlink a newer daemon's `daemon.json` during shutdown.
-
-The v2.0.1 branch now combines the existing one-fold-per-search optimization
-(`577d6bf`) with three runtime guards:
-
-- `tool:pre` interjection is opt-in (prompt and orchestrator retrieval remain
-  enabled), and daemon search requests fail open after 3 seconds.
-- `memory-daemon` holds `daemon.owner.lock` through an OS-backed exclusive lock
-  for its full lifetime; SIGKILL releases it automatically.
-- discovery cleanup removes `daemon.json` only when it still names the exiting
-  PID. Package/module versions are 2.0.1 so version mismatch restarts the
-  discoverable old daemon when the new bundle activates.
-
-Evidence: hook suites 24/24; tool-memory suites 272/272 using the shared
-substrate venv (`RUST_AVAILABLE=True`); lifecycle regression proves a direct
-second daemon cannot replace the active owner; result-equivalence coverage
-proves the one-fold search returns the old refs/scores/order/fields exactly.
-The live user's existing daemon processes were deliberately not killed while a
-turn was active; installation/restart and orphan cleanup are release/operations
-steps, not evidence from this source checkout.
-
-## TL;DR for Michael (2026-07-08 — NATIVE CUTOVER v2.0.0, DTU-validated 6/6)
-
-**mempalace is GONE. memory runs natively on amplifier-data.** Final HEAD `f1bb266`; the full
-cutover ladder (design → B1 core → B2 rewiring → B3 vendor sweep → 5 DTU fix rounds) is on main.
-
-**What shipped (v2.0.0, breaking):**
-- Modules renamed: tool-mempalace→tool-memory, hooks-mempalace-*→hooks-memory-*; tool `palace`→`memory`
-  (operations unchanged); `NativeMemoryStore` (store.py); behaviors/memory.yaml; home `~/.amplifier/memory/`;
-  events schema v2 (`memory:*`); external SQLite tool-memory module dropped (name collision).
-- Local `FastEmbedEmbedder` (all-MiniLM-L6-v2 ONNX, 384-dim, daemon-side — nothing leaves the machine).
-- Auto-started `memory-daemon` (ensure_daemon: daemon.json discovery, /health, spawn-lock race,
-  stale-pid + kill-9 recovery, version-mismatch respawn); durable amplifier-data store (pin 09482f1).
-- `amplifier-memory-import` migration script ([migrate] extra = chromadb only; copies vectors verbatim;
-  --verify; KG/diary import loudly skipped by design).
-- Killer gates KG-N1..N7 all EXECUTED (semantic round-trip via real orchestrator convention; 2-process
-  concurrent writers; embedder-offline lexical degradation; vendor-sweep grep gate as a test; real-chroma
-  migration; kill-9 respawn; cold-start sweep convergence).
-
-**Conductor-bundle DTU validation: 6/6 PASS** (memory f1bb266 · conductor 7053120 · survey 05d338e ·
-amplifier-data pin 09482f1): compose + vendor absence · cold-start cross-session recall (model cache
-wiped, re-downloaded, found score 0.803 + semantic rephrase 0.546) · cohort ci+memory + autofire record
-written · full suite battery incl. DTU integration 8 passed (drawer_filed e2e green) · migration
-(3 drawers + vectors verified, searchable at 0.785) · daemon kill-9 respawn with pre-crash fact intact.
-
-**Bug ledger — 7 real defects the DTU rounds caught (none visible to green unit suites):**
-1. Cold-start data loss — needs_embedding had no consumer; writes during model download permanently
-   unsearchable → `b2c9334` (sweep on warm-up + lexical union window).
-2. Autofire worker crashed EVERY session (spawned by file path, relative imports → ImportError,
-   swallowed) → conductor `7053120`.
-3. Cohort never auto-detected on direct tool calls (always "neither") → conductor `7053120`.
-4. Direct-URL pins without hatchling allow-direct-references → ALL five hook modules failed to
-   activate in live sessions → `8f3224b`.
-5. ensure_daemon swallowed str-home TypeError → silent None → `8f3224b`.
-6. Ambient capture NEVER worked live — hook read `tool_output`; orchestrator sends
-   `result={success,output,error}` → `37b6499` (+ verbatim-contract tests).
-7. Drain-thread bridge context loss — `memory:drawer_filed` had never reached any events.jsonl;
-   Future exceptions never inspected → `f1bb266` (bridge from session context; done-callback logging).
-Plus `bac6dd0` (transitive-URL pin restatement, found concurrently) and `c597a1e` (deterministic e2e
-test + capture_skipped bridged into events.jsonl — the observability that made #6/#7 one-grep finds).
-
-**Follow-ups (not blockers):** stale AGENTS.md note re tool_success (line exists pre-cutover);
-2 pre-existing test-isolation flakes in combined repo-root runs (reproduced at baseline); ANN
-accelerator behind VectorBackend when scale demands; friend's feature ask (stable memory ids +
-memory_outcome event) still open as backlog — invite issues.
-
-## TL;DR for Michael (2026-07-07, fourth pass — THE root cause + conductor DTU 5/5)
-
-**The real bug behind "stored 3 facts, told success, recalled nothing" (commit `e7a975f`):**
-`PalaceTool.execute` was declared `execute(self, operation: str, **kwargs)` but amplifier-core's
-Tool protocol is `execute(self, input: dict)` — ONE positional dict. Orchestrators call
-`tool.execute(tool_call.arguments)`, so the whole arguments dict bound to `operation`, dispatch
-always fell to the unknown-operation branch, and **the palace tool never worked through a real
-session**. Unit tests called it with kwargs directly, masking it; the `# type: ignore[override]`
-was silencing the type checker's exact complaint. Fixed to the protocol signature; all 24 test
-call sites converted to the real single-positional-dict convention; 2 new tests pin the
-orchestrator calling convention. tool-mempalace: 220 passed, 30 contract tests, pyright 0 errors,
-zero suppressions.
-
-**Full-suite DTU validation (behavioral-plasticity conductor, one `bundle add`): 5/5 PASS.**
-Composed conductor `b2ca118` + memory `e7a975f` + amplifier-data pinned `09482f1` (verified in
-BOTH interpreters). The friend's exact scenario proven fixed end-to-end through the REAL
-orchestrator surface: session 1 remember → `{"success": true, "drawer_id": "drawer_ops_deploys_…"}`;
-separate session 2 search → recalled the fact VERBATIM (similarity 0.743). Failures loud:
-with `mempalace-mcp` removed from PATH, palace returns `success=false` + real error, not
-success/null. In-container suites: tool-mempalace 221 passed, interject 25 passed.
-`falsification_harness` smoke: verdict "proxy", success true. DTU destroyed after validation;
-reusable profiles: `~/dev/amplifier-data/.amplifier/digital-twin-universe/profiles/
-{bp-conductor-e2e,memory-substrate-e2e}.yaml`.
-
-**Pin lockstep DONE:** behavioral-plasticity `dep-amplifier-data` advanced `c1107b4` → `09482f1`
-(module version 0.1.1 to refresh the install fingerprint) — conductor commit `b2ca118`. Memory's
-`[substrate]` extra already at `09482f1`. The two pins now move together, as designed.
-
-## TL;DR for Michael (2026-07-07, third pass — external user report fixes)
-
-A real external user (fresh install, isolated session, mempalace 3.5.0 from PyPI) reported four issues; all four addressed:
-
-1. **Palace tool swallowed ALL failures** — every branch of `PalaceTool.execute` built
-   `ToolResult(content=..., is_error=True)`, but amplifier-core's `ToolResult` is a pydantic
-   model (`success`/`output`/`error`) that silently DROPS unknown kwargs — so every call
-   returned `success=True, output=None`, even hard failures. Fixed every construction site
-   (search/remember/status/kg/traverse/diary/mine/unknown-op/exception paths) via a single
-   `_mcp_result_to_tool_result()` mapper; `mine` now checks `returncode`. All three pyright
-   suppressions in tool-mempalace's pyproject REMOVED (two were dead weight — pydantic's
-   `**data: Any` init defeats pyright structurally — one was hiding 8 unrelated pre-existing
-   type errors, all fixed). Contract pinned by 28 new tests (`test_palace_tool_contract.py`):
-   every op × success/failure. tool-mempalace now 218 passed.
-2. **`mempalace mcp --call` never existed** — fixed earlier this session (758b0fd); the user's
-   report independently confirms the diagnosis.
-3. **Interject read the WRONG store** — it read `~/.mempalace/chroma` / collection
-   `mempalace_default`; mempalace 3.5.0 actually writes `~/.mempalace/palace` /
-   `mempalace_drawers` (verified from mempalace source). Raw chromadb access DELETED;
-   interject now searches via the real `mempalace-mcp` JSON-RPC surface (`mempalace_search`)
-   — same store, same server-side local embedding space (all-MiniLM-L6-v2 ONNX), structurally
-   no path/collection to get wrong. `test_store_alignment.py` pins agreement against the
-   installed mempalace. Dependency floor `mempalace>=3.5.0` (3.3.x has no `mempalace-mcp`
-   script). Real e2e proof: drawer filed via mempalace-mcp → interject `_mcp_search` found it.
-4. **Privacy** — interject's OpenAI query-embedding call deleted (dead code once search went
-   server-side); the `gpt-4.1-nano` LLM judge is now explicit opt-in (`llm_judge_enabled`,
-   default false — uncertain-band candidates simply aren't promoted). "Nothing leaves your
-   machine" claims in README/context/skill reconciled with an explicit exception note.
-
-**User's feature ask (BACKLOG, not built):** stable memory ids across the JSONL event log +
-a `memory_outcome` event, so downstream systems (their "jilog") can measure week-over-week
-whether memory improves sessions. Good idea, deliberately not rushed tonight — invite them
-to file issues; design alongside the event-emitter schema (`v` field exists for additive
-evolution).
-
-## TL;DR for Michael (2026-07-07, later same session — MCP fix + DTU validation)
-
-Both 2026-07-07 work items are now **committed and pushed to origin/main**:
-`6c0974d` (substrate-adapter completion, below) and `758b0fd` (MCP transport fix).
-
-**Critical bug found by DTU validation:** the invocation pattern `mempalace mcp --call <json>`
-NEVER existed in any published mempalace (3.5.0 current; `mcp` only accepts `--backend` and
-merely prints setup instructions). Because most call sites were fire-and-forget, **palace
-writes were silently no-oping**. The real surface is the separate `mempalace-mcp` console
-script: newline-delimited JSON-RPC 2.0 over stdio (initialize handshake → `tools/call`,
-results wrapped in `result.content[0].text`). Fixed at ALL 6 call sites via a canonical
-`_call_mcp_tool()` helper in `scripts/memory_store.py`: `PalaceMemoryStore.file` and the
-capture hook's `_mcp_add_drawer` now FAIL LOUD (making capture's spool-retry contract
-functional for the first time); briefing/garden/tool keep their best-effort contracts with
-observability events; `tests/test_benchmark_recall.py` rewired; the DTU e2e smoke rewritten
-to drive real production paths.
-
-**DTU reality check: 5/5 PASS** (isolated container, Gitea-mirrored repos at
-memory=`758b0fd` / amplifier-data=`09482f1`, pinned-SHA git dep resolved byte-exactly,
-Rust kernel built in-container): bundle composes; `[substrate]` pin verified; tool-mempalace
-191 passed with substrate gates EXECUTING; `tests/integration/test_substrate_shadow_e2e.py`
-PASSED (drawer + embedding + KG fact through the live gateway shadow, read back from the
-substrate, palace unharmed); `mempalace-dualwrite-compare` PASS exit 0. DTU instance
-destroyed after validation; reusable profile saved at
-`~/dev/amplifier-data/.amplifier/digital-twin-universe/profiles/memory-substrate-e2e.yaml`.
-
-Also note: the old TL;DR says "**Not committed** — left on the working tree for review" — update that sentence in the older section to read "(Since committed and pushed as `6c0974d`.)" replacing the not-committed claim. Report the final diff summary.
-
-## TL;DR for Michael (2026-07-07 session — substrate-adapter completion)
-
-Implemented `docs/plans/2026-07-07-substrate-adapter-completion-design.md` in
-full: the `AmplifierDataMemoryStore` seam now routes vectors, KG facts, and
-diary entries through amplifier-data (not just drawers), `file()`/
-`file_diary()`/`update_importance()` are atomic on capable backends (the
-stale `update_fact`/`append_batch` probe is replaced with the real
-`write_batch` primitive), the gateway gained `add_embedding`/`query_vector`/
-`batch` parity, `tool-mempalace` gained a best-effort shadow for `kg` and
-`diary` ops, and `dualwrite_compare.py` now verifies vector/KG/scope/diary
-read-consistency in addition to E1/scope/facts/durability. (Since committed and pushed as `6c0974d`.)
-
-**Killer gates KG-V1…KG-G1:** all encoded as tests and green in the
-substrate-installed dev venv (`~/dev/.venv`, amplifier-data editable at HEAD
-`09482f1`). See "Verification evidence" below for exact counts.
-
-**Pin bump (flag for the conductor):** `modules/tool-mempalace/pyproject.toml`
-`[substrate]` extra bumped `c1107b4` → `09482f1fa569ba8407894cad3a32f8ab6aecbc3d`
-(Plan 4a intent-compiler + Plan 4b convergent-integrity now included). **The
-matching pin in `amplifier-bundle-behavioral-plasticity`'s
-`modules/dep-amplifier-data/pyproject.toml` `[project.dependencies]` MUST move
-to the SAME SHA in lockstep** — that repo is out of scope here (owned by the
-conductor bundle) and was NOT touched.
-
-## TL;DR for Michael (Sunday, 2026-06-05 — prior session)
-
-Built and committed **Phase 1 (manifest)** and **Phase 2 (curate.dot pipeline)** of
-the memory architecture, on branch `feat/manifest-and-curate-pipeline`. Everything
-is TDD'd and verified green. **Not pushed, no PR opened** — left for your review.
-
-```
-Branch:   feat/manifest-and-curate-pipeline  (off main)
-Commits:  1297ce6  feat(memory): externalize capture taxonomy into a user-editable manifest   (Phase 1)
-          dc978c8  feat(memory): add opt-in attractor curate.dot consolidation pipeline        (Phase 2)
-Pushed:   NO        PR: NONE     (your call)
-```
-
-## Accomplished
-
-### Phase 1 — the "knowable list" (Capture Manifest)
-- `context/memory-manifest.yaml` — the editable list of what memory captures (7 attractors: seeds + importance_base + emergent policy).
-- `modules/tool-mempalace/.../manifest.py` — pure loader. `load_manifest()` resolution order: explicit `manifest_path` → `<project>/project-context/memory-manifest.yaml` → `~/.amplifier/memory-manifest.yaml` → in-code `DEFAULT_MANIFEST`. The default **mirrors the legacy hardcoded behavior exactly**, so no-manifest deployments behave identically. Graceful fallback on missing/malformed files. **23 tests.**
-- `hooks-mempalace-capture/__init__.py` — now loads category signals from the manifest (zero-LLM, hot-path safe). New `manifest_path` config knob. `_detect_category(text, signals=None)` keeps legacy default. **5 tests.**
-- `phase3.py` — added `base_overrides` param to `compute_importance` / `plan_phase3_actions` so the manifest's `importance_base` can flow into the rubric. Default `None` = legacy behavior unchanged. **9 tests.**
-- `behaviors/mempalace.yaml` — documented the `manifest_path` knob.
-
-### Phase 2 — the user-steerable cold-path pipeline (curate.dot)
-- `pipelines/curate.dot` — consolidation pipeline: `load → dedup → classify → verify[goal_gate convergence] → write`. **VERIFIED: parses (7 nodes) + passes `validate_or_raise` against the REAL amplifier-bundle-attractor engine.**
-- `scripts/memory_store.py` — the storage seam: `MemoryStore` protocol, `RecordingMemoryStore` (tests/dry-run), `PalaceMemoryStore` (real, shells `mempalace add_drawer`), `AmplifierDataMemoryStore` (**deliberate loud `NotImplementedError` stub** for the Phase 3 substrate).
-- `scripts/load_captures.py` + `scripts/write_cells.py` — the two pipeline node scripts, registered as `[project.scripts]` entry points (`mempalace-load-captures`, `mempalace-write-cells`) so curate.dot tool nodes resolve on PATH. **12 tests** (9 scripts + 3 curate.dot).
-- `behaviors/curate.yaml` — **OPT-IN** behavior pulling attractor's `run_pipeline` tool + Curator. Deliberately NOT included by `behaviors/mempalace.yaml` (no hard dependency on attractor).
-- `agents/curator.md` — documented the on-demand "consolidate my memory" flow with graceful optionality.
-
-## Verification evidence (run these to reproduce)
-
-Test runner is the shared dev venv: `../.venv/bin/python` (3.12.4, has yaml 6.0.3 + pytest 9.0.2).
-Run per-module (a combined invocation hits a pytest duplicate-`tests`-package collection error — a known invocation artifact, not a code defect):
-
-```
-cd ~/dev/amplifier-bundle-memory
-../.venv/bin/python -m pytest modules/tool-mempalace/tests -q
-    → 149 passed, 2 skipped         (includes manifest 23, phase3-overrides 9, scripts 9, curate.dot 3)
-../.venv/bin/python -m pytest modules/hooks-mempalace-capture/tests -q
-    → 5 passed
-../.venv/bin/python -m pytest modules/hooks-mempalace-briefing/tests -q
-    → 12 passed
-```
-
-### 2026-07-07 substrate-adapter-completion evidence
-
-Test runner: `~/dev/.venv/bin/python` (3.12.4), with amplifier-data **editable-installed**
-from `~/dev/amplifier-data` at HEAD `09482f1` (`RUST_AVAILABLE=True` — durable-store
-gates run against the real Rust kernel, not just the in-memory fallback).
-
-```
-cd ~/dev/amplifier-bundle-memory
-~/dev/.venv/bin/python -m pytest modules/tool-mempalace/tests -q -rs
-    → 190 passed, 2 skipped   (skips are PRE-EXISTING: "mempalace CLI not available",
-                                unrelated to substrate work; ALL substrate-gated tests
-                                EXECUTED, not skipped, since amplifier_data is installed)
-~/dev/.venv/bin/python -m pytest modules/hooks-mempalace-capture/tests -q
-    → 8 passed                (was 5; +3 net from this session's protocol-kwarg
-                                regression coverage + pre-existing shadow tests)
-~/dev/.venv/bin/python -m pytest modules/hooks-mempalace-briefing/tests -q
-    → 12 passed               (unchanged, regression-green)
-~/dev/.venv/bin/python -m pytest tests -q --ignore=tests/integration
-    → 111 passed, 2 deselected  (repo-root contract tests; tests/integration/ is
-                                   DTU-gated and excluded here by design)
-```
-
-Killer gates KG-V1…KG-G1, all EXECUTED (not skipped) and green:
-
-| Gate | Test(s) |
-| --- | --- |
-| KG-V1, KG-V2 | `test_amplifier_data_store.py::test_vector_top1_self_retrieval_and_scope_isolation`, `::test_embedding_regenerates_byte_identical_after_reopen` |
-| KG-A1 | `::test_update_importance_atomic_success_and_crash_injection`, `::test_update_importance_non_atomic_on_remote_store` |
-| KG-A2 | `::test_file_atomic_single_append_batch_with_embedding` |
-| KG-K1 | `::test_assert_kg_query_and_timeline` (seam half) + `test_tool_shadow_ops.py` (tool-wiring half, all 3 tests) |
-| KG-K2 | `test_amplifier_data_store.py::test_kg_phase3_shaped_facts_traverse_and_resolve` |
-| KG-D1 | `::test_file_diary_scoped_and_sourced` |
-| KG-R1 | `test_dualwrite_compare.py` (3 tests) + manual CLI run below |
-| KG-P1 | `test_substrate_pin.py::test_substrate_extra_resolves_pinned_sha` (fresh-venv `uv pip install` of the exact pinned SHA; verified `vcs_info.commit_id` match + `callable(AmplifierStore().write_batch)`) + `::test_write_batch_callable_in_this_process` |
-| KG-G1 | `test_amplifier_data_gateway.py::TestGatewayVectorAndBatchParity` (4 tests: round-trip, scoped query, auth-required, atomic batch) |
-
-`mempalace-dualwrite-compare` CLI, run end-to-end against a temp store (representative
-corpus, synthetic vectors — no local palace/ChromaDB export available in this environment):
-
-```
-cd ~/dev/amplifier-bundle-memory
-PYTHONPATH=modules/tool-mempalace ~/dev/.venv/bin/python -m \
-  amplifier_module_tool_mempalace.scripts.dualwrite_compare --events-dir /tmp/nonexistent
-    → PASS, exit 0. All fields green: e1_byte_identical=8/8, scope_edges_ok=8/8,
-      durable_reopen_ok=8/8, durable_vector_ok=8/8, facts_ok=7/7,
-      vector_top1_ok=8/8=vector_scoped_total, kg_assert_ok/kg_invalidate_ok/
-      kg_timeline_ok/scope_query_consistent/diary_ok = true.
-```
-
-`ruff check` on every new/changed file: clean (0 issues after removing one unused
-import). `pyright` (module's own `[tool.pyright]` config, run from
-`modules/tool-mempalace/`) on every changed `.py` file: **0 errors, 0 warnings**.
-The `python_check` aggregate tool separately reports pre-existing,
-unrelated-to-this-work findings across the wider package (ruff-format drift in
-files this session did not touch — `garden.py`, `manifest.py`, `phase3.py`,
-`load_captures.py`, `server_concurrency_check.py`; and `reportMissingImports`
-on intra-package imports across ALL `scripts/*.py` files, including ones this
-session did not touch — an artifact of that tool not resolving the editable
-package path, not a real import failure, confirmed by the clean manual
-`pyright` run above). One pre-existing 108-char line
-(`amplifier_module_tool_mempalace/__init__.py`, the `mine` operation's
-`mode` schema description) shifted position due to this session's additions
-earlier in the file; its content is git-identical to HEAD and the repo's own
-ruff config does not select `E501`, so this is not a regression.
-
-curate.dot validated against the real attractor engine:
-```
-../.venv/bin/python -c "import sys; sys.path.insert(0,'$HOME/dev/amplifier-bundle-attractor/modules/loop-pipeline'); \
-from amplifier_module_loop_pipeline.dot_parser import parse_dot; \
-from amplifier_module_loop_pipeline.validation import validate_or_raise; \
-g=parse_dot(open('pipelines/curate.dot').read()); validate_or_raise(g); print('curate.dot OK', len(g.nodes), 'nodes')"
-    → curate.dot OK 7 nodes
-```
-
-`python_check`: **0 errors.** Warnings: 1 intentional STUB (`AmplifierDataMemoryStore` raises `NotImplementedError` by design — a test asserts it). 3 pre-existing pyright `SyncBridge` typing warnings in the capture hook are unrelated — confirmed present at HEAD before this work.
-
-## Decisions I locked (autonomous defaults — override if you disagree)
-
-See `PROVENANCE.md` for full rationale. Summary:
-1. **Manifest scope:** per-project preferred, with `~/.amplifier/` then in-code default fallback.
-2. **Cold-path trigger:** on-demand only for Phase 2 (Option C, per foundation-expert). Volume-gated `session:end` hook deferred to a follow-on, and must use a Python capability check (never a hard YAML dep).
-3. **Emergent policy:** declared in the manifest schema (`emergent.enabled`, default **false**); pipeline can propose, user confirms. Not yet wired into classification logic.
-4. **Substrate:** ~~Phase 2 writes through `PalaceMemoryStore` (ChromaDB palace). amplifier-data is a declared seam only (stub), **blocked** on persistence + vector lens.~~ **RESOLVED 2026-07-07 (see D5 in PROVENANCE.md):** the fork resolved toward composition — amplifier-data's persistence + vector lens landed upstream, and the seam is a completed consumer adapter (vectors, KG facts via anchor cells, diary entries, atomic `write_batch`). The palace remains the production read source; the substrate is a shadow/verify target. Read-path cutover is a separate, still-open policy decision (see "Start Here Next Session" below).
-
-## Blocked / Unresolved (need your input)
-
-- ~~**Substrate fork (the big one):** commit to amplifier-data as the FILE target → fund persistence + vector lens in the amplifier-data repo? Or stay on the palace and keep amplifier-data concept-only? Phase 3 is gated on this.~~ **RESOLVED 2026-07-07** — see D5 in PROVENANCE.md and point 4 above.
-- **NEW (2026-07-07): read-path cutover policy.** The substrate can now answer memory's read shapes (vector, KG, scope, diary) per `dualwrite_compare.py`'s new checks, but the palace is still the ONLY production read source. Deciding when/whether to cut reads over to amplifier-data (partially or fully) is an open policy call — out of scope for the substrate-adapter-completion design by intent (§9 "Explicitly out of scope").
-- **NEW (2026-07-07): ChromaDB-behind-`VectorBackend`.** COMPOSITION.md's target state is ChromaDB as the ANN accelerator *behind* the substrate's `VectorBackend` stud (rebuilt from `iter_embeddings()`), not vectors living in two independent places. This change only makes the substrate the *write* target for vectors; the accelerator wiring is a follow-on.
-- **NEW (2026-07-07): conductor pin lockstep.** The `[substrate]` extra pin bump (`c1107b4` → `09482f1fa569ba8407894cad3a32f8ab6aecbc3d`) needs the SAME bump in `amplifier-bundle-behavioral-plasticity`'s `modules/dep-amplifier-data/pyproject.toml`. Not done here (out of scope repo) — flagging so it happens in lockstep, not drifts.
-- **End-to-end runtime not exercised.** curate.dot is validated structurally against the real grammar, and every script is unit-tested, but I did **not** run the full pipeline through a live attractor session (needs attractor installed + LLM + the data-threading detail below). I am NOT claiming it runs end-to-end.
-- **Known integration gap:** how the `verify` node's `cells` output reaches `mempalace-write-cells` stdin is not yet wired — it needs attractor `context_updates`/`report_outcome` threading. This is the first thing to finish before a live run. Documented, not done.
-- **load_captures reads the event log** (`~/.mempalace/events/{sid}.jsonl`), which has previews (~100 chars), not full verbatim drawer content. Full-content consolidation needs a palace query — a deliberate follow-on.
-
-## Start Here Next Session
-
-1. Decide the **substrate fork** and **cold-path trigger** (unblocks Phase 3 + the session:end hook).
-2. Wire the `verify → write` data threading (cells → write_cells stdin) and do one live attractor run of curate.dot in a scratch session.
-3. If happy: push the branch and open a PR to `main`.
-4. Optional follow-on: volume-gated `session:end` consolidation hook (Python capability check), and palace-query-based full-content loading.
-
 ## Non-Obvious Context
 
-- **`tests/` (repo root) is DTU-gated** — every test there is skipped outside the memory-bundle-e2e container. Unit tests must live under `modules/*/tests/` (not DTU-gated). I learned this the hard way; the capture-hook tests have their own `conftest.py` that puts the sibling tool-mempalace module on sys.path.
+- **`tests/` (repo root) is DTU-gated** -- every test there is skipped outside the memory-bundle-e2e container. Unit tests must live under `modules/*/tests/` (not DTU-gated).
 - Modules are **not pip-installed** in the dev venv; pytest's rootdir insertion makes each module's own package importable, cross-module imports need a conftest path hack.
-- `AGENTS.md` and `project-context/` are untracked workspace files — I intentionally did **not** commit them in the feature commits.
+- `AGENTS.md` and `project-context/` are untracked workspace files in some historical branches -- check `git status` before assuming they are committed.
+
+Earlier sessions' handoffs (native cutover, substrate-adapter completion,
+Phase 1/2 manifest + curate pipeline) are not reproduced here -- see git
+history and `project-context/PROVENANCE.md` for those decisions and their
+rationale.

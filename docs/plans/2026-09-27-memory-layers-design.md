@@ -1,7 +1,8 @@
 # Design: three-layer memory, Amplifier-shaped (v2.1 → v3.0)
 
 **Status:** P0–P5 built on `feat/memory-layers` (2026-09-28, D16–D21); T1.5 + T4.2 + AMB baseline open. Direction accepted by Michael 2026-09-27; per-phase detail is
-plan-ready. Evidence: `docs/research/2026-09-27-memory-systems-gene-survey.md`.
+plan-ready. Evidence: external research record:
+memthoughts/research/amplifier-memory-v2.1/ (not part of this bundle).
 Decisions: `project-context/PROVENANCE.md` D6–D15. Each task below carries an
 ID, files, interface and a machine-checkable acceptance so a plan-writing
 session can expand it without re-deriving intent.
@@ -12,7 +13,7 @@ session can expand it without re-deriving intent.
 |---|---|
 | "amplifier shaped and works the best of all of the tools" | Every piece maps to a kernel module type / behavior / agent / context file per foundation docs; "best" is proven by the measurement bar (§6), not asserted |
 | "gene transfer whatever you need" | Any mechanism from the ten surveyed repos is fair game |
-| "don't vendor anything" | Reimplement; no copied code or prompts; AMB run as external tool; OpenViking (AGPL) and Zep paper (NC-SA) are ideas-only |
+| "don't vendor anything" | Reimplement; no copied code or prompts; AMB run as external tool; copyleft-licensed prior art is ideas-only |
 | "ok using amplifier-data or something else … upgrade amplifier-data too" | Substrate stays amplifier-data; new lenses land upstream there; pin bumps are explicit commits |
 | "compaction should follow standard amplifier protocols and shape" | Reflection observes the standard context-manager events; memory ships **no** context manager |
 | "build the missing layers … document everything clearly in small commits in the provenance log" | One decision per PROVENANCE entry; one concern per commit |
@@ -97,7 +98,7 @@ Each task = one or a few small commits + tests. Acceptance is machine-checked.
 ### P2 — facts and reflection
 - **T2.1** Fact model + tool ops `fact_add`, `fact_supersede`, `facts` (query, `current_only`), provenance required (op rejects a fact with no existing source drawer). *Accept:* tests for provenance rejection, supersede chain, proof_count.
 - **T2.2** Search returns facts first-class (`layer:"fact"`, citing drawers).
-- **T2.3** `context/reflection-rubric.md` (own words; Letta/Mem0/Hindsight-derived rules: corrections first, noop allowed, absolute dates vs observation date, 15–80 words, don't re-record the searchable, preserve history).
+- **T2.3** `context/reflection-rubric.md` (own words; rules derived from the memory-systems survey: corrections first, noop allowed, absolute dates vs observation date, 15–80 words, don't re-record the searchable, preserve history).
 - **T2.4** `agents/distiller.md` (`model_role: [fast, general]`, tools: memory only).
 - **T2.5** `hooks-memory-reflect`: subscribe `context:compaction`, `context:pre_compact`, `session:end`; watermark over `coordinator.get("context").get_messages()`; durable `reflection_job` cell; spawn distiller via `session.spawn` in a task joined by `register_cleanup`; per-session job cap; events `memory:reflection_queued|started|completed|skipped`. *Accept:* tests with fake context + fake spawn prove: span = messages since watermark, no double-reflection, no-op without spawn capability, job persisted.
 - **T2.6** Handle `memory:curator_handoff_requested` for real (spawn curator the same way) or remove the dead event. *Accept:* test.
@@ -123,4 +124,4 @@ ANN index (until p95 gate fails), MMR, cross-encoder, graph expansion arm, skill
 2. PrecisionMemBench R@10 ≥ v2.0.1.
 3. Context tokens per answer ≤ 50% of v2.0.1 briefing at equal or better accuracy.
 4. Hot path: interject/search p95 ≤ 300 ms on 5k drawers; zero LLM calls on hot path (asserted by test).
-Head-to-head against Hindsight/Mem0 is run through AMB's own providers when keys allow; otherwise their self-reported numbers are quoted as self-reported.
+Head-to-head against surveyed prior systems is run through AMB's own providers when keys allow; otherwise their self-reported numbers are quoted as self-reported.

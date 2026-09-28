@@ -65,10 +65,10 @@ See `CHANGELOG.md` for the full list; highlights:
 
 ### Running the AMB benchmark
 
-`benchmarks/amb/` adapts this store to the external [Agent Memory
-Benchmark](https://github.com/vectorize-io/agent-memory-benchmark) (AMB is a
-dev-only external tool -- nothing from it is vendored into this repo; see
-`benchmarks/amb/README.md`). Offline smoke test (no AMB install, no
+`benchmarks/amb/` adapts this store to the external Agent Memory
+Benchmark (AMB is a dev-only external tool -- nothing from it is vendored
+into this repo; see `benchmarks/amb/README.md` for the project link and
+install instructions). Offline smoke test (no AMB install, no
 network): `pytest benchmarks/amb/tests/`. A real run against AMB's
 LongMemEval-S / LoCoMo / PrecisionMemBench splits requires installing AMB
 separately -- see `benchmarks/amb/README.md` for setup and `run.py` usage.
@@ -84,14 +84,14 @@ pending ratification, not yet run against a live AMB install with API keys.
 
 ## What's New in v2.0.0
 
-**Breaking: native cutover.** The prior vendor-backed (ChromaDB) store is
+**Breaking: native cutover.** The prior externally-backed store is
 gone. Memory is now backed entirely by amplifier-data through an
 auto-started local memory daemon (a local ONNX embedder, no torch, no
-external network calls by default). The tool (previously named after the vendor) is now named `memory`
-(operations unchanged); the standalone SQLite fact-store module formerly
-registered under the name `tool-memory` is dropped (its niche is covered by
-the native `kg` operation). See `CHANGELOG.md` for full migration
-instructions -- existing data migrates via `amplifier-memory-import`.
+external network calls by default). The tool (previously named after the prior
+implementation) is now named `memory` (operations unchanged); the
+standalone SQLite fact-store module formerly registered under the name
+`tool-memory` is dropped (its niche is covered by the native `kg`
+operation). See `CHANGELOG.md` for full history of the rename.
 
 ## What's New in v1.2.0
 
@@ -102,7 +102,6 @@ Released 2026-04-17.
 - **Briefing re-ranking**: `final = semantic + weight * (importance - 0.5) * 0.08`. Max boost +/-0.04 at weight=1.0. Kill switch: `briefing_importance_weight: 0.0` -> identical to v1.1.0.
 - **`memory garden` operation**: on-demand structural analysis (BFS clustering, KG edges, diary entry, importance backfill).
 - **`memory:docent` agent**: conversational memory Q&A in natural language.
-- **Research paper**: full design + evaluation writeup at [`docs/research/gene-transfer-v1.2.0.pdf`](docs/research/gene-transfer-v1.2.0.pdf).
 
 ---
 
@@ -306,23 +305,11 @@ Once present, these files (plus `AGENTS.md` at the project root) are cross-platf
 | LoCoMo (hybrid v5, top-10) | R@10 | 88.9% |
 | **Briefing re-ranking** (v1.2.0, 200x30 synthetic) | **R@5 delta** | **+0.022** (baseline 0.567 -> reranked 0.589) |
 
-The first four rows are properties of the retrieval engine. The last row measures the briefing hook's re-ranking on a local synthetic proxy — the harness supports running against real LongMemEval when the dataset is available. Full methodology in `docs/research/gene-transfer-v1.2.0.pdf`.
+The first four rows are properties of the retrieval engine. The last row measures the briefing hook's re-ranking on a local synthetic proxy — the harness supports running against real LongMemEval when the dataset is available.
 
 **These R@5/R@10 numbers are retrieval-only and not comparable to judged QA-accuracy numbers** (LLM-graded answer correctness, e.g. AMB's LongMemEval-S/LoCoMo scores) — see "Running the AMB benchmark" above and `project-context/PROVENANCE.md` D13 for the actual head-to-head measurement bar and its status.
 
 The benchmark runner lives in `tests/test_benchmark_recall.py` (run the full R@5 simulation with `pytest -m benchmark`); raw run logs backing the re-ranking delta above are in `docs/eval/briefing-rerank-benchmark.md`. The LongMemEval/LoCoMo evaluation methodology is documented in `docs/eval/EVALUATION.md`.
-
----
-
-## Research Paper
-
-Full architectural + evaluation writeup: [`docs/research/gene-transfer-v1.2.0.pdf`](docs/research/gene-transfer-v1.2.0.pdf) (14 pages, 5 Graphviz figures).
-
-Covers: gene-transfer concept, system architecture, event observability design, KG intelligence (Phase 3 + briefing re-rank with formula proofs + memory garden), evaluation with benchmark methodology, philosophy preservation analysis, deferred work.
-
-Rebuild from source: `cd docs/research && make all` (requires LaTeX + graphviz).
-
----
 
 ## Credits
 

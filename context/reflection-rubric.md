@@ -1,9 +1,9 @@
 # Reflection rubric
 
 How to turn one conversation span into durable facts. Written for the
-`memory:distiller` agent; the rules are ours, derived from what Letta Code,
-Mem0, Hindsight, memU and Graphiti each learned (see
-`docs/research/2026-09-27-memory-systems-gene-survey.md`).
+`memory:distiller` agent; the rules are ours, distilled from a survey of
+prior memory-system designs (see external research record:
+memthoughts/research/amplifier-memory-v2.1/ (not part of this bundle)).
 
 ## The one rule
 The verbatim span is already stored and searchable. **Only write what a future

@@ -19,10 +19,9 @@ follow the pin and run legacy until the pin moves. Re-run the install after any
 upstream edit; revert with a pin-matching install if another repo needs 0.1.0.
 
 ## Run the CI-equivalent root suite at every phase, not just module suites
-P2 added `modules/hooks-memory-reflect/tests/conftest.py` with the standard
-vendor-absence assert and broke the KG-N4 vendor sweep (its allowlist
-enumerates each module conftest). Module suites were green; CI would not have
-been. Before each commit batch run:
+Module suites can be green while the root gate suite fails (it scans the
+whole repo, not one module). Before each commit batch run:
 `~/dev/.venv/bin/python -m pytest tests/test_contract.py tests/test_hook_emissions.py <the list in .github/workflows/contract.yml>`.
-A new module with tests must be added to `_ALLOWLISTED_MEMPALACE_FILES` in
-`tests/test_vendor_sweep.py`.
+That list includes `tests/test_no_product_names.py`, the gate that fails the
+build if a prior-generation vendor/product name reappears anywhere outside
+its allowlist (see the module docstring for the exact allowlist).

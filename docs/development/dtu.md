@@ -7,12 +7,6 @@ This guide explains how to provision, use, and maintain the DTU environment for
 .amplifier/digital-twin-universe/profiles/memory-native-e2e.yaml
 ```
 
-A second profile validates the migration path from a legacy vendor store:
-
-```
-.amplifier/digital-twin-universe/profiles/memory-migration-e2e.yaml
-```
-
 ---
 
 ## Why the DTU?
@@ -35,7 +29,7 @@ Inside a DTU environment the following all run against real infrastructure:
   or manifest error that the mocks hide will surface here.
 - **A real auto-started memory daemon with semantic search.** The daemon opens
   a durable amplifier-data store (Rust kernel, built at install time) and a
-  real local fastembed embedder — no vendor dependency, no mocks.
+  real local fastembed embedder — no external dependency, no mocks.
 - **Real Anthropic / OpenAI calls.** The LLM provider is not stubbed. Prompt
   regressions that do not break unit tests become visible.
 - **Full event flow.** Every hook — briefing, post-tool, post-assistant — fires
@@ -184,9 +178,6 @@ is auto-generated and printed as the final JSON line of launch output
 > a Rust toolchain (amplifier-data's kernel is built from source at install
 > time), compiles Python wheels, installs Amplifier, and adds the bundle.
 > Subsequent launches reuse the cached base image and are faster.
-
-To validate the migration path from a legacy vendor store instead, launch
-`memory-migration-e2e.yaml` the same way.
 
 ---
 

@@ -16,4 +16,4 @@
 
 - 2026-09-27 — Gene survey of 10 memory systems; layers design + D6–D15 logged
 - 2026-08-24 — v2.0.1 latency + daemon-singleton hardening
-- 2026-07-08 — v2.0.0 native cutover onto amplifier-data (mempalace removed)
+- 2026-07-08 — v2.0.0 native cutover onto amplifier-data (legacy vendor store removed)
