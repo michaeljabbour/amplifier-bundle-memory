@@ -1,5 +1,19 @@
 # Experiment Journal
 
+
+## 2026-09-28 — DTU end-to-end validation of the three-layer build (fb51886)
+**Hypothesis:** the layers work in a real Amplifier session, not just unit tests.
+**Method:** DTU `memory-layers-e2e` (Anthropic provider), bundles composing
+foundation + memory + memory-index (→ memory-reflect), one with a low
+compaction threshold; nine scripted checks run by the validator agent.
+**Results:** 9/9 PASS (see PROVENANCE D28). First validation of 5592400
+failed 2 checks: briefing never reached the model (listened only on
+`session:start`) — fixed by integrating main's prompt:submit delivery (D27);
+capture "failure" was a test input outside the category allowlist.
+**Learned:** composition-level defects (relative agent tool sources, D25;
+session:start injection discarded) are invisible to module suites — keep a
+DTU pass in every release.
+
 ## 2026-09-28 — D13 retrieval baseline on AMB: RRF vs legacy fusion (L1 path)
 
 **Hypothesis:** RRF fusion (T1.2/D9) beats the legacy

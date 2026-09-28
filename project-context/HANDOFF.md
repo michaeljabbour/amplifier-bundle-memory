@@ -2,6 +2,27 @@
 
 *Last updated: 2026-09-28 -- merged origin/main (18 commits: v2.0.2 release, incremental fold caching + numpy vector search + automation opt-out, stale-daemon retirement, sub-session skip) into `feat/memory-layers`'s three-layer memory (D26). See PROVENANCE.md for the merge resolution notes.*
 
+## TL;DR for Michael (2026-09-28, later — merged, pushed, DTU-validated)
+
+- **amplifier-data** `feat/bm25-lens` merged to `main` (`2ecdce3`) and pushed;
+  all seven memory modules pin it. It stays a separate repo (D22).
+- **feat/memory-layers** pushed at the D28 commit: origin/main (2.0.2–2.0.4)
+  integrated underneath the layers (D27); lockstep modules 2.2.0. ~851 tests
+  pass; product-name gate clean (D23 — research lives in
+  `memthoughts/research/amplifier-memory-v2.1/`).
+- **DTU 9/9 PASS** (D28). **Benchmark (D26):** RRF +2.4 QA on LongMemEval-S,
+  R@10 0.970 on PrecisionMemBench; D13's +5 not yet met; context tokens
+  unchanged (the L2/L3 briefing, not L1 retrieval, is the token lever).
+- **Next, in order:** (1) scope-partitioned indexes fed by the kernel's
+  `subscribe` stream (scoped p95 still grows with unrelated corpus); (2) daemon
+  identity from source, not dist-info (D28.1); (3) re-run the benchmark
+  on the integrated build, then LoCoMo; (4) D24 candidates — procedural memory
+  from outcomes, task-shape benchmark; (5) owner call: rename the public
+  wing/room/drawer vocabulary (D23 open item) or keep it.
+- DTU `memory-layers-e2e` is still running (teardown:
+  `amplifier-digital-twin destroy memory-layers-e2e`). Not merged to memory
+  `main`; open a PR when ready.
+
 ## TL;DR for Michael (2026-09-28 -- three layers built, gene-transferred, Amplifier-shaped)
 
 Surveyed 10 prior-art memory systems at source level and built the missing

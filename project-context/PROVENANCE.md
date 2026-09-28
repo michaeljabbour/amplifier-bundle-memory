@@ -458,3 +458,25 @@ fold cache (D26 item 2, partly). Also caught: our search had dropped main's
 BM25 arms still fold the whole log; the next substrate step is scope-partitioned
 indexes maintained from the kernel's `subscribe` stream.
 **Status:** derived.
+
+### D28 — DTU validation of fb51886: 9/9 pass; two follow-ups
+**Evidence (DTU memory-layers-e2e, 2026-09-28):** strict activation (both
+bundles); capture + redaction with filed_at/in_session/at_commit; hybrid search
+with per-arm ranks and importance; briefing delivered at first prompt:submit
+(HANDOFF marker quoted verbatim, Memory map + Known facts present);
+compaction/session-end reflection → distiller wrote a `procedure` fact
+(`predicate: test_command`) and a `preference` fact (`predicate:
+package_manager`), both `derived_from` the span drawer; queue-at-end /
+drain-at-start; content-free retrieval events; product-name gate; no daemon
+errors. The earlier "capture FAIL" was a test input with no category keyword —
+the category allowlist working as designed, not a defect.
+**Follow-ups (open):**
+1. **Stale daemon after an in-place bundle update:** `daemon_version()` reads
+   installed package metadata; a bundle cache refresh without reinstalling the
+   editable modules leaves the old dist-info, so a 2.1.0 daemon survived an
+   update to 2.2.0 source. Fix direction: derive the daemon's identity from
+   the module source (version constant or code fingerprint), not dist-info.
+2. **Query text in `memory:retrieved`:** the live prompt/search string
+   (redacted, ≤200 chars) is recorded for correlation. Consider a
+   `query_mode: text|hash|off` option before this telemetry leaves the machine.
+**Status:** derived.
