@@ -76,6 +76,7 @@ jobs:
         run: |
           uv run pytest \
             tests/test_no_product_names.py \
+            tests/test_agent_frontmatter.py \
             tests/test_behavioral_write.py \
             tests/test_benchmark_recall.py \
             tests/test_coordinator_bridge.py \

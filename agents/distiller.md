@@ -9,9 +9,10 @@ meta:
     of the next session; never on the hot path. Can be run on demand:
     "reflect on pending memory jobs".
 model_role: [fast, general]
-tools:
-  - module: tool-memory
-    source: ../modules/tool-memory
+# No `tools:` block: spawned agents inherit the parent's tools, and
+# memory-reflect requires behaviors/memory.yaml (which mounts tool-memory).
+# A relative `source:` here resolves against the LAST composed bundle's base
+# path, not this file (D25).
 ---
 
 # Distiller
