@@ -1,0 +1,52 @@
+bundle:
+  name: memory-index-behavior
+  version: 0.1.0
+  description: |
+    OPT-IN L3 index/standing-answer curation (T3.1-T3.3,
+    docs/plans/2026-09-27-memory-layers-design.md \u00a72/\u00a74; D19 in
+    project-context/PROVENANCE.md).
+
+    This behavior is intentionally NOT included by behaviors/memory.yaml OR
+    behaviors/memory-reflect.yaml. It REQUIRES memory-reflect-behavior
+    (behaviors/memory-reflect.yaml) to already be composed -- it overrides
+    that behavior's hooks-memory-reflect config to turn on `index_refresh`
+    and adds the `memory:curator` agent to the composed agent set.
+
+    D19 (index is mechanism-first): the L3 index
+    (`memory(operation="index")`) and standing questions
+    (`memory(operation="standing")`) are ALWAYS available without this
+    behavior -- a deterministic, LLM-free derived view is computed on every
+    read. This behavior exists ONLY to make the curated version better than
+    the mechanical fold: it spawns `memory:curator` at session:start when a
+    room has drifted past `index_refresh_min_pending` changes since its last
+    curated build, or a standing question has gone stale (a cited fact was
+    superseded).
+
+    Cost model: at most ONE additional background LLM agent spawn per
+    session:start (bundled into the same drain-on-start pass
+    hooks-memory-reflect already runs for pending reflection jobs), and ONLY
+    when something is actually stale -- a quiet session with a fresh index
+    triggers zero spawns. Without this behavior composed, the index/standing
+    machinery still works end-to-end; it simply never gets curator-quality
+    prose, staying on the mechanical fold forever.
+
+# memory-index includes memory-reflect itself so its own override composes
+# LAST and wins regardless of include order in the consuming bundle
+# (foundation: registry.py folds includes first, own declarations last;
+# dicts/merge.py deep-merges hook config by module id, later scalar wins).
+includes:
+  - bundle: memory:behaviors/memory-reflect
+
+# ── Hooks (config override) ────────────────────────────────────────
+hooks:
+  - module: hooks-memory-reflect
+    source: ../modules/hooks-memory-reflect
+    version: 0.1.0
+    config:
+      index_refresh: true       # THE flag this behavior exists to flip
+      index_refresh_min_pending: 10
+
+# ── Agents ────────────────────────────────────────
+agents:
+  include:
+    - memory:curator     # index/standing curation, spawned by hooks-memory-reflect

@@ -57,6 +57,12 @@ hooks:
       drain_limit: 3             # at most this many pending jobs drained per session:start
       drain_timeout_s: 20        # mount() cleanup: await in-flight tasks this long, then cancel
       emit_events: true          # false to disable JSONL event emission
+      # P3 (T3.2, D19): opt-in curator spawn to refresh the L3 index/standing
+      # answers at session:start. Default OFF -- overridden to true by
+      # behaviors/memory-index.yaml. See that file's header for the cost
+      # model and why the derived index works fine without this.
+      index_refresh: false
+      index_refresh_min_pending: 10
 
 # ── Agents ─────────────────────────────────────────────────────────────────
 agents:

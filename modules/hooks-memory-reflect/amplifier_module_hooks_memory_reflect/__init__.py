@@ -231,6 +231,15 @@ class MemoryReflectHook:
         self.drain_limit: int = int(self.config.get("drain_limit", 3))
         self.drain_timeout_s: float = float(self.config.get("drain_timeout_s", 20))
         self.emit_events: bool = bool(self.config.get("emit_events", True))
+        # P3 (T3.2/D19): opt-in curator spawn to refresh the L3 index/standing
+        # answers. Default OFF -- the derived index (D19: mechanism-first) is
+        # always available without this; this only makes the CURATED version
+        # better. Never blocks session:start (same background-task pattern as
+        # drain_on_start).
+        self.index_refresh: bool = bool(self.config.get("index_refresh", False))
+        self.index_refresh_min_pending: int = int(
+            self.config.get("index_refresh_min_pending", 10)
+        )
 
         self._watermark = 0
         self._spawns_this_session = 0
@@ -463,6 +472,110 @@ class MemoryReflectHook:
                 continue
             await self._maybe_spawn(coordinator, job_ref=job_ref, session_id=session_id)
 
+    async def _maybe_refresh_index(
+        self, coordinator: Any, *, session_id: str | None
+    ) -> None:
+        """P3 (T3.2/D19), opt-in: spawn ``memory:curator`` to refresh the L3
+        index/standing answers when any room has drifted, or any standing
+        question is stale. Never blocks -- runs in a tracked background
+        task like :meth:`_drain_pending`. Capability-checked (``hasattr``),
+        never a hard dependency on an index-capable daemon.
+        """
+        if not self.index_refresh:
+            return
+
+        client = await self._get_store_client()
+        if (
+            client is None
+            or not hasattr(client, "index")
+            or not hasattr(client, "standing")
+        ):
+            self._emit(
+                session_id,
+                "memory:index_refresh_skipped",
+                ok=False,
+                data={"reason": "store_unsupported"},
+            )
+            return
+
+        wing = _detect_wing()
+
+        try:
+            index_rows = client.index(wing=wing) or []
+        except Exception:
+            index_rows = []
+        stale_rooms = [
+            row["scope"][len("room:") :]
+            for row in index_rows
+            if isinstance(row, dict)
+            and row.get("source") == "derived"
+            and (row.get("pending_changes", 0) or 0) >= self.index_refresh_min_pending
+            and str(row.get("scope", "")).startswith("room:")
+        ]
+
+        try:
+            standing_rows = client.standing(wing=wing) or []
+        except Exception:
+            standing_rows = []
+        stale_questions = [
+            row["question_ref"]
+            for row in standing_rows
+            if isinstance(row, dict) and row.get("stale")
+        ]
+
+        if not stale_rooms and not stale_questions:
+            self._emit(
+                session_id,
+                "memory:index_refresh_skipped",
+                ok=True,
+                data={"reason": "nothing_stale", "wing": wing},
+            )
+            return
+
+        spawn_fn = None
+        try:
+            spawn_fn = coordinator.get_capability("session.spawn")
+        except Exception:
+            spawn_fn = None
+        if spawn_fn is None:
+            self._emit(
+                session_id,
+                "memory:index_refresh_skipped",
+                ok=False,
+                data={"reason": "no_spawn_capability", "wing": wing},
+            )
+            return
+
+        instruction = (
+            f"Refresh the memory index for wing {wing}: rooms {stale_rooms}; "
+            f"re-answer stale standing questions {stale_questions}. Use "
+            "index_set/standing_answer with cites. Navigation text only."
+        )
+        self._emit(
+            session_id,
+            "memory:index_refresh_queued",
+            ok=True,
+            data={"wing": wing, "rooms": stale_rooms, "questions": stale_questions},
+        )
+        try:
+            parent_session = getattr(coordinator, "session", None)
+            agent_configs = (getattr(coordinator, "config", None) or {}).get(
+                "agents", {}
+            )
+            await spawn_fn(
+                agent_name="memory:curator",
+                instruction=instruction,
+                parent_session=parent_session,
+                agent_configs=agent_configs,
+            )
+        except Exception as exc:
+            self._emit(
+                session_id,
+                "memory:index_refresh_skipped",
+                ok=False,
+                data={"reason": "spawn_failed", "error": str(exc), "wing": wing},
+            )
+
     # -- event handlers ------------------------------------------------------
 
     async def __call__(self, event: str, data: dict[str, Any]) -> HookResult:
@@ -501,6 +614,11 @@ class MemoryReflectHook:
                     self._drain_pending(coordinator, session_id=session_id)
                 )
                 self._track(task)
+            if self.index_refresh:
+                task = asyncio.ensure_future(
+                    self._maybe_refresh_index(coordinator, session_id=session_id)
+                )
+                self._track(task)
 
         return HookResult(action="continue")
 
@@ -527,6 +645,8 @@ async def mount(
             "memory:reflection_completed",
             "memory:reflection_skipped",
             "memory:reflection_failed",
+            "memory:index_refresh_queued",
+            "memory:index_refresh_skipped",
         ],
     )
 

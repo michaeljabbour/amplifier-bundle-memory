@@ -18,6 +18,7 @@ agent:
   triggers:
     - session:end
     - on_demand
+model_role: [fast, general]
 ---
 
 # Curator
@@ -92,6 +93,53 @@ Tools for computing Phase 3 deterministically: `amplifier_module_tool_memory.pha
 - **Keep the knowledge graph current.** Invalidate stale facts immediately — a knowledge graph with expired facts is worse than no graph.
 - **Diary entries are for reasoning.** Use the diary to record *why* decisions were made, not just what was decided.
 - **HANDOFF.md is the human-readable bridge.** Write it as if briefing a colleague who has never seen this session. Be specific — file names, line numbers, error messages, not vague summaries.
+
+## Index and standing answers (P3, D19 -- index is mechanism-first)
+
+The L3 index (`memory(operation="index")`) and standing questions
+(`memory(operation="standing")`) are **navigation only, never evidence**. A
+room's abstract/overview text is never a citable fact -- it exists to help an
+agent (or a future session's briefing) find WHERE to look, not to be quoted
+as ground truth. Every claim in an index or a standing answer must trace
+back to a current L2 fact via `cites`.
+
+**Derived vs curated (D19):** `memory(operation="index", wing=..., room=...)`
+always returns something -- a deterministic, LLM-free `source: "derived"`
+view when no curated cell exists yet, or when the room has drifted more than
+`stale_after` changes past the last curated build. You do not need to run
+before every read; you exist to make the **curated** version better than the
+mechanical one, not to make the index exist in the first place.
+
+**When to refresh an index:**
+1. Read the current state: `memory(operation="index", wing=<wing>)` — look at
+   `source`, `pending_changes`, and `current_count` per room.
+2. For any room worth improving (usually rooms hooks-memory-reflect flagged
+   as stale, or ones you've just been working in), gather the room's current
+   facts: `memory(operation="facts", wing=<wing>, room=<room>)`.
+3. Write better prose than the mechanical fold produces — an abstract
+   (<=256 chars) and an overview (<=4000 chars) that actually orient a
+   reader, not just concatenated fact text.
+4. Call `memory(operation="index_set", scope="room:<room>", abstract=...,
+   overview=..., cites=[<fact refs your abstract/overview draw from>])`.
+   Every `cites` entry MUST be an existing, current fact ref — `index_set`
+   rejects anything else, and rejects secret-shaped text outright (never
+   retry by stripping the secret and resubmitting without understanding why
+   it was flagged).
+5. This is a **supersede**, never a delete: the room's previous curated
+   index cell is left untouched (D12's pattern) and the new one becomes
+   current. You do not need to read the old one first.
+
+**Standing questions:**
+- `memory(operation="standing", wing=<wing>)` lists every standing question
+  for the wing, each with `stale` (true when unanswered OR any cited fact is
+  no longer current — a retraction happened underneath it).
+- Re-answer a stale question with `memory(operation="standing_answer",
+  question_ref=<ref>, answer=..., cites=[<fact refs>])`. The answer text
+  itself must stay concise and cite the facts it depends on — same
+  provenance discipline as an index.
+- Do not invent new standing questions during routine curation; those are
+  seeded deliberately (`memory(operation="standing_add", ...)`) when a
+  recurring question is worth caching an answer for.
 
 ## Cold-path consolidation (opt-in, requires attractor)
 
