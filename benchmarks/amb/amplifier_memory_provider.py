@@ -22,7 +22,8 @@ Verified interface (2026-09-27, against AMB HEAD cloned to a scratch dir):
       instantiated with no constructor arguments by
       ``get_memory_provider()``. Configuration for a registry-mediated
       instantiation therefore has to travel through environment variables
-      (``AMPLIFIER_AMB_EMBEDDER``, ``AMPLIFIER_AMB_HOME``) -- direct
+      (``AMPLIFIER_AMB_EMBEDDER``, ``AMPLIFIER_AMB_FUSION``,
+      ``AMPLIFIER_AMB_LAYERS``) -- direct
       construction (as the smoke test does) can pass constructor kwargs
       instead.
 
@@ -36,6 +37,7 @@ provider in AMB's own registry.
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import shutil
 import tempfile
@@ -91,6 +93,8 @@ class AmplifierMemoryProvider:
         *,
         home: str | Path | None = None,
         embedder: str | None = None,
+        fusion: str | None = None,
+        layers: str | Sequence[str] | None = None,
     ) -> None:
         """``embedder``: ``"auto"`` (try FastEmbedEmbedder, degrade to lexical-only
         on any failure -- the default) or ``"none"`` (always lexical-only, never
@@ -107,6 +111,20 @@ class AmplifierMemoryProvider:
             raise ValueError(
                 f"embedder must be 'auto' or 'none', got {self._embedder_mode!r}"
             )
+        # ``fusion``: ``"rrf"`` (default) or ``"legacy"`` -- passed straight to
+        # ``NativeMemoryStore.search(fusion=...)``. ``layers``: comma-separated
+        # cell kinds (default ``"drawer"``; the benchmark only ingests drawers).
+        # Env fallbacks: ``AMPLIFIER_AMB_FUSION`` / ``AMPLIFIER_AMB_LAYERS``.
+        self._fusion = fusion or os.environ.get("AMPLIFIER_AMB_FUSION", "rrf")
+        if self._fusion not in ("rrf", "legacy"):
+            raise ValueError(f"fusion must be 'rrf' or 'legacy', got {self._fusion!r}")
+        raw_layers = layers or os.environ.get("AMPLIFIER_AMB_LAYERS", "drawer")
+        if isinstance(raw_layers, str):
+            raw_layers = raw_layers.split(",")
+        self._layers = tuple(x.strip() for x in raw_layers if x.strip())
+        if not self._layers or not set(self._layers) <= {"drawer", "fact"}:
+            raise ValueError(f"layers must be drawer and/or fact, got {raw_layers!r}")
+        self.last_raw: dict[str, Any] | None = None
         self._store: Any = None
         self._embedder: Any = None
         self._embedder_load_attempted = False
@@ -156,7 +174,10 @@ class AmplifierMemoryProvider:
             if home is None:
                 home = Path(tempfile.mkdtemp(prefix="amb_amplifier_"))
                 self._home = home
-            self._store = NativeMemoryStore(path=str(home))
+            home.mkdir(parents=True, exist_ok=True)
+            # The store path is a log FILE; ``home`` is a directory (AMB's
+            # prepare() hands one over), so the log lives inside it.
+            self._store = NativeMemoryStore(path=str(home / "memory.log"))
         return self._store
 
     def _get_embedder(self) -> Any | None:
@@ -233,7 +254,14 @@ class AmplifierMemoryProvider:
         wing = self._wing_for(user_id)
         query_vector = self._embed(query)
 
-        hits = store.search(query_vector, k, wing=wing, lexical_query=query)
+        hits = store.search(
+            query_vector,
+            k,
+            wing=wing,
+            lexical_query=query,
+            fusion=self._fusion,
+            layers=self._layers,
+        )
 
         documents: list[Any] = []
         scores: dict[str, float] = {}
@@ -252,10 +280,9 @@ class AmplifierMemoryProvider:
 
         raw: dict[str, Any] = {
             "degraded": query_vector is None,
+            "fusion": self._fusion,
             "scores": scores,
-            # Present once T1.2 lands RRF fusion (per-hit "arms"/"layer");
-            # today's hits carry neither, so this is an honest empty default
-            # rather than a fabricated one.
+            # Per-hit RRF arm ranks (None under fusion="legacy") and layer.
             "arms": {
                 hit.get("source") or str(hit["ref"]): hit.get("arms") for hit in hits
             },
@@ -263,4 +290,28 @@ class AmplifierMemoryProvider:
                 hit.get("source") or str(hit["ref"]): hit.get("layer") for hit in hits
             },
         }
-        return documents, raw
+        trace = os.environ.get("AMPLIFIER_AMB_TRACE")
+        if trace:
+            # AMB drops raw_response from saved results, so R@k against
+            # gold_ids is only recoverable from this per-query id trace.
+            with open(trace, "a", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "user_id": user_id,
+                            "query": query,
+                            "k": k,
+                            "fusion": self._fusion,
+                            "ids": [d.id for d in documents],
+                        }
+                    )
+                    + "\n"
+                )
+        # Diagnostics stay OFF the returned raw_response: several AMB dataset
+        # prompts (longmemeval, locomo, lifebench) substitute
+        # ``json.dumps(raw_response)`` for the rendered context whenever it is
+        # non-empty, so a scores-only dict would hide every retrieved document
+        # from the answer model. Returning None makes AMB render its standard
+        # "## Memory i" context -- the same text its context_tokens counts.
+        self.last_raw = raw
+        return documents, None

@@ -168,8 +168,11 @@ def test_ingest_and_retrieve_exact_identifier(
     assert docs, "expected at least one hit for an exact-identifier query"
     assert docs[0].id == "d3"
     assert "ERR_4417" in docs[0].content
-    assert raw is not None
-    assert raw["scores"][docs[0].id] > 0.0
+    # raw_response must stay None: AMB prompts replace the rendered context
+    # with json.dumps(raw_response) when it is non-empty.
+    assert raw is None
+    assert provider.last_raw is not None
+    assert provider.last_raw["scores"][docs[0].id] > 0.0
 
 
 def test_user_isolation(provider: AmplifierMemoryProvider) -> None:
@@ -197,8 +200,45 @@ def test_embedder_none_never_touches_a_model(provider: AmplifierMemoryProvider) 
     provider.ingest(_docs())
     docs, raw = provider.retrieve("chef", k=5, user_id="bob")
 
-    assert raw is not None
-    assert raw["degraded"] is True  # no query vector was ever computed
+    assert provider.last_raw is not None
+    assert provider.last_raw["degraded"] is True  # no query vector computed
     assert provider._embedder is None
     assert provider._embedder_load_attempted is False
     assert any(d.id == "d5" for d in docs)
+
+
+@pytest.mark.parametrize("fusion", ["rrf", "legacy"])
+def test_fusion_selectable(tmp_path: Path, fusion: str) -> None:
+    """Both fusion modes run end-to-end and are reported in the raw payload."""
+    p = AmplifierMemoryProvider(home=tmp_path / "s", embedder="none", fusion=fusion)
+    try:
+        p.ingest(_docs())
+        docs, _ = p.retrieve("ERR_4417", k=5, user_id="alice")
+        assert p.last_raw is not None and p.last_raw["fusion"] == fusion
+        assert docs and docs[0].id == "d3"
+    finally:
+        p.cleanup()
+
+
+def test_fusion_and_layers_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AMPLIFIER_AMB_FUSION", "legacy")
+    monkeypatch.setenv("AMPLIFIER_AMB_LAYERS", "drawer,fact")
+    p = AmplifierMemoryProvider(embedder="none")
+    assert p._fusion == "legacy"
+    assert p._layers == ("drawer", "fact")
+    monkeypatch.setenv("AMPLIFIER_AMB_FUSION", "bogus")
+    with pytest.raises(ValueError):
+        AmplifierMemoryProvider(embedder="none")
+
+
+def test_trace_env_records_ids(
+    provider: AmplifierMemoryProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    trace = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("AMPLIFIER_AMB_TRACE", str(trace))
+    provider.ingest(_docs())
+    docs, _ = provider.retrieve("ERR_4417", k=5, user_id="alice")
+    row = json.loads(trace.read_text().splitlines()[-1])
+    assert row["user_id"] == "alice" and row["ids"] == [d.id for d in docs]

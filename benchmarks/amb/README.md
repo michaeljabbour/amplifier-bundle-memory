@@ -85,6 +85,8 @@ Confirmed by cloning AMB HEAD to a scratch dir and reading:
 ```bash
 export GROQ_API_KEY=...      # answer model (OMB_ANSWER_LLM default: groq)
 export GEMINI_API_KEY=...    # judge model (OMB_JUDGE_LLM default: gemini) — required unconditionally
+# No Groq key? AMB's answer model defaults to groq -- use Gemini for both:
+export OMB_ANSWER_LLM=gemini OMB_JUDGE_LLM=gemini
 
 # LongMemEval-S
 AMB_PATH=/path/to/agent-memory-benchmark python benchmarks/amb/run.py run \
@@ -94,9 +96,10 @@ AMB_PATH=/path/to/agent-memory-benchmark python benchmarks/amb/run.py run \
 AMB_PATH=/path/to/agent-memory-benchmark python benchmarks/amb/run.py run \
     --dataset locomo --split locomo10 --memory amplifier-memory
 
-# PrecisionMemBench
+# PrecisionMemBench (no LLM in the loop -- needs --mode retrieval)
 AMB_PATH=/path/to/agent-memory-benchmark python benchmarks/amb/run.py run \
-    --dataset precisionmembench --split single-turn --memory amplifier-memory
+    --dataset precisionmembench --split single-turn --memory amplifier-memory \
+    --mode retrieval
 ```
 
 Useful flags during iteration: `--query-limit N` (small smoke runs before
@@ -113,6 +116,24 @@ documents, isolates answer-generation quality from retrieval quality).
   `tests/test_provider_smoke.py` does, via the constructor kwarg directly
   rather than the env var, since it instantiates the provider itself).
 
+## Retrieval knobs (env vars)
+
+- `AMPLIFIER_AMB_FUSION=rrf` (default) or `legacy` — passed to
+  `NativeMemoryStore.search(fusion=...)`. `legacy` is the pre-RRF
+  `0.85*cosine + 0.15*lexical` re-rank.
+- `AMPLIFIER_AMB_LAYERS=drawer` (default; comma-separated, `drawer`/`fact`) —
+  passed as `search(layers=...)`. The benchmark only ingests drawers; facts
+  need the distiller, which AMB never runs.
+- `AMPLIFIER_AMB_TRACE=/path/trace.jsonl` — appends one JSON line per
+  `retrieve()` (`user_id`, `query`, `k`, `fusion`, `ids`). AMB saves results
+  with `raw_response=None`, so this trace is the only way to compute R@5/R@10
+  against each query's `gold_ids`.
+
+`run.py` mixes AMB's real `MemoryProvider` ABC into the adapter at
+registration time (the adapter module itself never imports AMB, so the smoke
+test runs without it); without that the runner fails on `initialize()` /
+`async_retrieve()`.
+
 `REGISTRY`-mediated runs (i.e. every real `amb run ... --memory
 amplifier-memory` invocation) can only configure the embedder mode through
 the env var, since AMB's harness instantiates the class with no
@@ -126,8 +147,9 @@ For each run, record in `project-context/EXPERIMENT_JOURNAL.md`:
   computes and reports it.
 - **QA accuracy** — the judge-scored accuracy AMB's own summary table
   reports (`EvalSummary.accuracy`).
-- **Context tokens per answer** — `EvalSummary`/`QueryResult.context_tokens`
-  (chars / 4 estimate, AMB's own metric — do not recompute independently).
+- **Context tokens per answer** — `QueryResult.context_tokens` (AMB counts
+  with tiktoken `cl100k_base`, despite its model comment saying chars/4 — do
+  not recompute independently).
 - **p95 retrieve ms** — derive from `QueryResult.retrieve_time_ms` across
   the run's queries (AMB records wall time for `memory.retrieve()` only,
   per query).

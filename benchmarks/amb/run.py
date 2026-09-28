@@ -69,8 +69,15 @@ def main() -> None:
     from memory_bench.memory import (
         REGISTRY,
     )  # the live dict; mutated in place, not replaced
+    from memory_bench.memory.base import MemoryProvider
 
-    REGISTRY["amplifier-memory"] = AmplifierMemoryProvider
+    # The adapter is written against AMB's shapes but does not import AMB at
+    # module load (so the smoke test runs without it). Mix in the real ABC
+    # here so the runner gets its concrete initialize()/async_retrieve()/...
+    class _RegisteredProvider(AmplifierMemoryProvider, MemoryProvider):
+        pass
+
+    REGISTRY["amplifier-memory"] = _RegisteredProvider
 
     # AMB's CLI is a typer app that reads sys.argv itself; `from .cli import
     # REGISTRY as MEMORY_REGISTRY` there binds the SAME dict object we just
