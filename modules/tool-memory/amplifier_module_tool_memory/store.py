@@ -24,6 +24,7 @@ primary + shadow -- there is no shadow anymore, the daemon IS the store).
 
 from __future__ import annotations
 
+import logging
 import struct
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -35,12 +36,38 @@ from amplifier_module_tool_memory.scripts.mutation import (
     new_mutation,
 )
 
+_logger = logging.getLogger(__name__)
+
+#: T1.2 (D9) capability check, not a hard dependency: BM25Index lives
+#: upstream in amplifier-data (lenses/bm25.py). When it is not importable
+#: (an older amplifier-data pin), RRF fusion is simply unavailable and
+#: `NativeMemoryStore.search` always takes the fusion="legacy" path --
+#: never a hard failure.
+try:
+    from amplifier_data.lenses.bm25 import BM25Index
+except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
+    BM25Index = None  # type: ignore[assignment,misc]
+    _logger.debug(
+        "amplifier_data.lenses.bm25.BM25Index is not available "
+        "(amplifier-data pin predates the bm25 lens); "
+        "NativeMemoryStore.search falls back to fusion='legacy'."
+    )
+
 #: Fact predicates carrying time/provenance on a drawer (D8: consumer-supplied
 #: facts, never kernel event fields -- amplifier-data deliberately excludes
 #: wall-clock time from events to keep byte-identical regeneration).
 _FILED_AT_PREDICATE = "filed_at"
 _IN_SESSION_PREDICATE = "in_session"
 _AT_COMMIT_PREDICATE = "at_commit"
+
+#: RRF constant (T1.2, D9): rrf = \u03a3_arms 1 / (_RRF_K + rank), rank 1-based.
+_RRF_K = 60
+
+#: T1.4 hot-path latency gate (design \u00a76 measurement bar): search p95 on a
+#: 5k-drawer synthetic store must stay under this budget. A module constant
+#: (not a magic number in the test) so the budget is visible and tunable in
+#: one place.
+SEARCH_P95_BUDGET_MS = 300
 
 
 def _resolve_batch_ref(commit_result: Any, ref: Any) -> Any:
@@ -304,6 +331,13 @@ class NativeMemoryStore:
         # T1-MEM-2: ledger of plasticity mutations applied through this seam.
         self.mutations: list[MutationRecord] = []
         self.rolled_back: list[str] = []
+        # T1.2 (D9): ONE persistent BM25Index per store instance. Safe
+        # because the daemon is single-writer over an append-only log --
+        # incremental `.add()` (idempotent per ref, see BM25Index docstring)
+        # is correct without ever needing to rebuild from scratch. `None`
+        # when amplifier-data predates the bm25 lens (see the module-level
+        # capability check above).
+        self._bm25_index: Any = BM25Index() if BM25Index is not None else None
 
     def close(self) -> None:
         """Close the backing store if it supports it (RemoteStore does not)."""
@@ -822,32 +856,63 @@ class NativeMemoryStore:
         wing: str | None = None,
         room: str | None = None,
         lexical_query: str | None = None,
+        fusion: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Hybrid rank (§6) or, when ``query_vector`` is None, lexical-only (§6.2).
+        """Hybrid rank (§6, T1.2/D9 RRF fusion) or lexical-only (§6.2).
 
-        ``query_vector=None`` signals the caller's embedder is not ready --
-        this method then falls back to a full scoped scan
+        ``fusion`` selects the ranking strategy:
+
+        * ``"rrf"`` (the default whenever ``amplifier_data.lenses.bm25.``
+          ``BM25Index`` is importable AND the backend has a foldable kernel):
+          fuses a semantic arm (cosine, existing ``VectorLens``) and a
+          lexical arm (BM25, T1.1) by Reciprocal Rank Fusion
+          (``rrf = Σ_arms 1 / (60 + rank)``, rank 1-based) over the SAME
+          scoped candidate set. Recovers exact-identifier queries (error
+          codes, paths) that have no semantic neighbour -- the case the
+          v2.0.1 cosine-then-lexical-rerank path could never surface,
+          because lexical_score only reranked the vector top-``k*3``
+          instead of contributing its own ranked arm.
+        * ``"legacy"`` reproduces the v2.0.1
+          ``0.85 * cosine + 0.15 * lexical_score`` re-rank byte-for-byte
+          (:meth:`_search_legacy`) -- kept for the existing result-
+          equivalence tests, and used automatically whenever BM25Index is
+          not installed or *fold* is ``None`` (a remote backend with no
+          foldable kernel: RRF needs the fold to build the BM25 index
+          cheaply, one materialized event list per call, same as every
+          other lens read in this method).
+
+        ``query_vector=None`` (embedder not ready) still degrades in both
+        modes: RRF runs the BM25 arm alone over the scoped candidates
+        (:meth:`_search_rrf`); legacy falls back to a full scoped scan
         (:meth:`list_drawers`) scored purely by
-        ``amplifier_module_tool_memory.embedder.lexical_score``. Otherwise:
-        cosine top-``k*3`` via ``query_vector`` scoped to room (if given)
-        else wing (if given) else global, then
-        ``final = 0.85 * cosine + 0.15 * lexical_score`` re-rank, top-``k``.
+        ``amplifier_module_tool_memory.embedder.lexical_score`` (§6.2).
 
-        Returns ``[{ref, score, content, wing, room, category, source}]``.
+        ``since``/``until`` (T1.3, ISO-8601 strings, inclusive bounds)
+        filter the candidate set by each drawer's EARLIEST ``filed_at``
+        (:meth:`drawer_times`) BEFORE scoring, in EITHER fusion mode. A
+        drawer with no ``filed_at`` fact (pre-T0.2 legacy content) is
+        EXCLUDED whenever either bound is given -- conservative: an
+        unknown-aged drawer can never be proven to fall inside an explicit
+        window. Omitting both bounds is a no-op (every candidate stays
+        eligible) -- so v2.0.1 callers that never pass these are unaffected.
+
+        Returns ``[{ref, score, content, wing, room, category, source,
+        filed_at}]``, plus (RRF mode only) ``rrf`` (the fused score) and
+        ``arms`` (``{"semantic": rank|None, "bm25": rank|None}``, 1-based).
+        ``score`` is ALWAYS the legacy-shaped blended value (0.85*cosine +
+        0.15*lexical, or lexical alone for a BM25-only/degraded hit) so
+        existing downstream thresholds (the interject cosine gate, briefing
+        rerank) keep their meaning regardless of fusion mode.
+
         Every read in this method goes through ONE log fold per call
-        (:class:`_SearchFold`) instead of a ``regenerate`` / lens
-        re-materialization per hit — regenerate drops the materialized cache
-        and re-folds the whole log every time, which made search
-        O(reads × log) (~12s/query on a ~38k-event store; ~1s with the single
-        fold). Semantics are unchanged: the same substrate lenses run over the
-        same event list, the snapshot returns byte-identical payloads
-        (content addressing), and remote backends without a foldable kernel
-        keep the exact store-surface path.
-        The caller (the daemon dispatch layer) is responsible for setting the
-        wire-level ``degraded`` flag based on whether it passed a real vector.
+        (:class:`_SearchFold` -- see its class docstring for the perf
+        rationale this preserves: O(1) folds instead of O(reads) regenerate
+        calls). The caller (the daemon dispatch layer) is responsible for
+        setting the wire-level ``degraded`` flag based on whether it passed
+        a real vector.
         """
-        from .embedder import lexical_score
-
         s = self.store
         scope_ref = None
         if room is not None:
@@ -858,6 +923,99 @@ class NativeMemoryStore:
         # everything the per-call store-surface folds used to see.
         fold = self._fold_snapshot()
 
+        resolved_fusion = (
+            fusion
+            if fusion is not None
+            else ("rrf" if BM25Index is not None else "legacy")
+        )
+        use_rrf = (
+            resolved_fusion == "rrf" and BM25Index is not None and fold is not None
+        )
+
+        eligible: set[Any] | None = None
+        if since is not None or until is not None:
+            from amplifier_data.lenses._scope import fold_scope
+
+            scope_index = fold_scope(fold if fold is not None else s.kernel)  # type: ignore[attr-defined]
+            universe = (
+                set(scope_index.cells_in_scope(scope_ref))
+                if scope_ref is not None
+                else set(scope_index.membership.keys())
+            )
+            eligible = self._temporal_eligible(universe, fold, since, until)
+
+        if use_rrf:
+            return self._search_rrf(
+                query_vector,
+                k,
+                wing=wing,
+                room=room,
+                lexical_query=lexical_query,
+                scope_ref=scope_ref,
+                fold=fold,
+                eligible=eligible,
+            )
+        return self._search_legacy(
+            query_vector,
+            k,
+            wing=wing,
+            room=room,
+            lexical_query=lexical_query,
+            scope_ref=scope_ref,
+            fold=fold,
+            eligible=eligible,
+        )
+
+    def _temporal_eligible(
+        self,
+        universe: set[Any],
+        fold: _SearchFold | None,
+        since: str | None,
+        until: str | None,
+    ) -> set[Any]:
+        """T1.3: ref subset of *universe* whose EARLIEST ``filed_at`` falls in
+        ``[since, until]`` (either bound optional; both given -> both apply).
+
+        Only called by :meth:`search` when at least one bound is given.
+        Undated drawers (no ``filed_at`` fact -- pre-T0.2 legacy content) are
+        always EXCLUDED here: an unknown age can never be proven to satisfy
+        an explicit window.
+        """
+        times = self.drawer_times(sorted(universe), _fold=fold)
+        eligible: set[Any] = set()
+        for ref, filed in times.items():
+            if filed is None:
+                continue
+            if since is not None and filed < since:
+                continue
+            if until is not None and filed > until:
+                continue
+            eligible.add(ref)
+        return eligible
+
+    def _search_legacy(
+        self,
+        query_vector: Sequence[float] | None,
+        k: int,
+        *,
+        wing: str | None,
+        room: str | None,
+        lexical_query: str | None,
+        scope_ref: Any,
+        fold: _SearchFold | None,
+        eligible: set[Any] | None,
+    ) -> list[dict[str, Any]]:
+        """v2.0.1 hybrid-rank / lexical-only search (§6) -- see :meth:`search`
+        for the full contract. Reached via ``fusion="legacy"``, or
+        automatically whenever BM25Index is not installed or *fold* is
+        ``None``. Preserved byte-for-byte from the pre-T1.2 implementation
+        apart from the *eligible* filter (T1.3), which is a no-op set
+        membership check when ``since``/``until`` were both omitted (in
+        which case :meth:`search` passes ``eligible=None``).
+        """
+        from .embedder import lexical_score
+
+        s = self.store
         scored: list[tuple[Any, float]] = []
         seen_refs: set[Any] = set()
         if query_vector is not None:
@@ -879,6 +1037,8 @@ class NativeMemoryStore:
                     list(query_vector), max(1, k * 3), scope=scope_ref
                 )
             for ref, cosine in candidates:
+                if eligible is not None and ref not in eligible:
+                    continue
                 content = self._payload_text(ref, fold)
                 lex = lexical_score(lexical_query or "", content)
                 scored.append((ref, 0.85 * cosine + 0.15 * lex))
@@ -910,6 +1070,8 @@ class NativeMemoryStore:
                     ref = drawer["ref"]
                     if ref in seen_refs:
                         continue
+                    if eligible is not None and ref not in eligible:
+                        continue
                     scored.append(
                         (ref, lexical_score(lexical_query or "", drawer["content"]))
                     )
@@ -921,6 +1083,8 @@ class NativeMemoryStore:
                 limit=self._DEGRADED_SEARCH_SCAN_LIMIT,
                 _fold=fold,
             ):
+                if eligible is not None and drawer["ref"] not in eligible:
+                    continue
                 scored.append(
                     (
                         drawer["ref"],
@@ -941,6 +1105,136 @@ class NativeMemoryStore:
                 {
                     "ref": ref,
                     "score": score,
+                    "content": content,
+                    "wing": wing_name,
+                    "room": room_name,
+                    "category": category,
+                    "source": source,
+                    "filed_at": times.get(ref),
+                }
+            )
+        return results
+
+    def _search_rrf(
+        self,
+        query_vector: Sequence[float] | None,
+        k: int,
+        *,
+        wing: str | None,
+        room: str | None,
+        lexical_query: str | None,
+        scope_ref: Any,
+        fold: _SearchFold | None,
+        eligible: set[Any] | None,
+    ) -> list[dict[str, Any]]:
+        """T1.2 (D9): RRF fusion of a semantic arm (cosine) and a lexical arm
+        (BM25) over the scoped candidate set -- see :meth:`search` for the
+        full contract. Only called when *fold* and ``BM25Index`` are both
+        available (:meth:`search` already resolved that).
+
+        The BM25 index is built (incrementally, idempotently) from EVERY
+        drawer ref visible in this fold's scope membership -- not just the
+        refs scoped to this particular query -- so ``BM25Index``'s global
+        IDF stays meaningful across searches touching different wings/rooms,
+        and `.add()` for an already-indexed ref is a cheap no-op (BM25Index
+        docstring). BM25 *scoring* is still filtered to this call's scoped
+        (and, if given, temporally eligible) candidates via ``candidates=``.
+        """
+        from amplifier_data.lenses._scope import fold_scope
+
+        from .embedder import lexical_score
+
+        assert fold is not None
+        assert BM25Index is not None
+
+        scope_index = fold_scope(fold)
+        all_drawer_refs = set(scope_index.membership.keys())
+        scoped_refs = (
+            set(scope_index.cells_in_scope(scope_ref))
+            if scope_ref is not None
+            else all_drawer_refs
+        )
+        candidate_refs = scoped_refs if eligible is None else (scoped_refs & eligible)
+
+        # Keep the persistent index current: idempotent per ref, so repeat
+        # calls across the store's lifetime only ever tokenize NEW drawers.
+        index = self._bm25_index
+        for ref in sorted(all_drawer_refs):
+            index.add(ref, self._payload_text(ref, fold))
+
+        n_pool = max(3 * k, 50)
+
+        semantic_rank: dict[Any, int] = {}
+        cosine_by_ref: dict[Any, float] = {}
+        if query_vector is not None:
+            from amplifier_data.lenses.vector import VectorLens
+
+            # When a temporal filter narrowed the eligible set, request a
+            # wider vector pool so an eligible-but-lower-cosine candidate
+            # is not crowded out of the top-n_pool by ineligible ones.
+            vector_pool_k = (
+                max(n_pool, len(scoped_refs)) if eligible is not None else n_pool
+            )
+            raw_candidates = (
+                VectorLens()
+                .query(
+                    kernel=fold,
+                    vector=list(query_vector),
+                    k=max(1, vector_pool_k),
+                    scope=scope_ref,
+                )
+                .output
+            )
+            rank = 0
+            for ref, cosine in raw_candidates:
+                if eligible is not None and ref not in eligible:
+                    continue
+                rank += 1
+                if rank > n_pool:
+                    break
+                semantic_rank[ref] = rank
+                cosine_by_ref[ref] = cosine
+
+        bm25_hits = index.score(
+            lexical_query or "", candidates=candidate_refs, k=n_pool
+        )
+        bm25_rank: dict[Any, int] = {
+            ref: i + 1 for i, (ref, _score) in enumerate(bm25_hits)
+        }
+
+        fused: list[tuple[Any, float]] = []
+        for ref in set(semantic_rank) | set(bm25_rank):
+            rrf = 0.0
+            if ref in semantic_rank:
+                rrf += 1.0 / (_RRF_K + semantic_rank[ref])
+            if ref in bm25_rank:
+                rrf += 1.0 / (_RRF_K + bm25_rank[ref])
+            fused.append((ref, rrf))
+        fused.sort(key=lambda pair: (-pair[1], pair[0]))
+        top = fused[: max(0, k)]
+
+        times = self.drawer_times([ref for ref, _rrf in top], _fold=fold)
+        results: list[dict[str, Any]] = []
+        for ref, rrf in top:
+            content = self._payload_text(ref, fold)
+            wing_name, room_name = self._resolve_wing_room(ref, fold)
+            category = self._first_fact_value(ref, "has_category", fold)
+            source = self._first_fact_value(ref, "has_source", fold)
+            if ref in cosine_by_ref:
+                blended = 0.85 * cosine_by_ref[ref] + 0.15 * lexical_score(
+                    lexical_query or "", content
+                )
+            else:
+                blended = lexical_score(lexical_query or "", content)
+            results.append(
+                {
+                    "ref": ref,
+                    "score": blended,
+                    "rrf": rrf,
+                    "arms": {
+                        "semantic": semantic_rank.get(ref),
+                        "bm25": bm25_rank.get(ref),
+                    },
                     "content": content,
                     "wing": wing_name,
                     "room": room_name,

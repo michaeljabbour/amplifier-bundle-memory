@@ -94,10 +94,27 @@ class MemoryClient(GatewayClient):
         *,
         wing: str | None = None,
         room: str | None = None,
+        fusion: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
     ) -> dict[str, Any]:
-        """``{results: [...], degraded: null|"lexical_only"}`` (\u00a75.4)."""
+        """``{results: [...], degraded: null|"lexical_only"}`` (\u00a75.4).
+
+        ``fusion`` (T1.2): ``"rrf"`` | ``"legacy"`` | ``None`` (server
+        default). ``since``/``until`` (T1.3): ISO-8601 bounds on each
+        drawer's earliest ``filed_at``.
+        """
         return self._call(
-            "search", {"query": query, "k": k, "wing": wing, "room": room}
+            "search",
+            {
+                "query": query,
+                "k": k,
+                "wing": wing,
+                "room": room,
+                "fusion": fusion,
+                "since": since,
+                "until": until,
+            },
         )
 
     def status(self) -> dict[str, Any]:

@@ -125,9 +125,13 @@ class TestSearchResultEquivalence:
     ) -> None:
         store = _build_synthetic_store()
         query = [1.0, 0.1, 0.0]
-        new = store.search(query, 3, wing="w", room="r", lexical_query="auth manifest")
+        new = store.search(
+            query, 3, wing="w", room="r", lexical_query="auth manifest", fusion="legacy"
+        )
         _force_old_path(store, monkeypatch)
-        old = store.search(query, 3, wing="w", room="r", lexical_query="auth manifest")
+        old = store.search(
+            query, 3, wing="w", room="r", lexical_query="auth manifest", fusion="legacy"
+        )
         assert new == old  # same refs, scores, ORDER, and every result field
         assert [r["ref"] for r in new] == [r["ref"] for r in old]
 
@@ -136,9 +140,9 @@ class TestSearchResultEquivalence:
     ) -> None:
         store = _build_synthetic_store()
         query = [0.0, 0.0, 1.0]
-        new = store.search(query, 10, lexical_query="deploy auth")
+        new = store.search(query, 10, lexical_query="deploy auth", fusion="legacy")
         _force_old_path(store, monkeypatch)
-        old = store.search(query, 10, lexical_query="deploy auth")
+        old = store.search(query, 10, lexical_query="deploy auth", fusion="legacy")
         assert new == old
 
     def test_pending_drawer_union_identical(
@@ -146,9 +150,13 @@ class TestSearchResultEquivalence:
     ) -> None:
         store = _build_synthetic_store()
         query = [1.0, 0.0, 0.0]
-        new = store.search(query, 5, wing="w", room="r", lexical_query="auth")
+        new = store.search(
+            query, 5, wing="w", room="r", lexical_query="auth", fusion="legacy"
+        )
         _force_old_path(store, monkeypatch)
-        old = store.search(query, 5, wing="w", room="r", lexical_query="auth")
+        old = store.search(
+            query, 5, wing="w", room="r", lexical_query="auth", fusion="legacy"
+        )
         assert new == old
         # the hardening path itself still works through the snapshot
         assert any("pending" in r["content"] for r in new)
@@ -157,7 +165,11 @@ class TestSearchResultEquivalence:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         store = _build_synthetic_store()
-        new = store.search(None, 5, wing="w", room="r", lexical_query="auth manifest")
+        new = store.search(
+            None, 5, wing="w", room="r", lexical_query="auth manifest", fusion="legacy"
+        )
         _force_old_path(store, monkeypatch)
-        old = store.search(None, 5, wing="w", room="r", lexical_query="auth manifest")
+        old = store.search(
+            None, 5, wing="w", room="r", lexical_query="auth manifest", fusion="legacy"
+        )
         assert new == old

@@ -133,9 +133,16 @@ class TestSearch:
         assert results[0]["ref"] == vectored_ref
 
     def test_no_needs_embedding_facts_skips_lexical_union(self) -> None:
-        """Steady-state (no pending facts): search must not silently pick up
-        an un-embedded, out-of-scope drawer via a full scan -- the hardening
-        path is gated behind an actual `needs_embedding` fact existing."""
+        """Steady-state (no pending facts): the LEGACY (v2.0.1) formula must
+        not silently pick up an un-embedded, out-of-scope drawer via a full
+        scan -- its hardening path is gated behind an actual
+        `needs_embedding` fact existing. Pinned to fusion="legacy" (T1.2):
+        under RRF, the BM25 arm indexes every scoped drawer's text
+        regardless of embedding status -- by design, this is exactly what
+        recovers an un-embedded exact-identifier hit (see
+        test_search_rrf.py::TestIdentifierRecovery) -- so this specific
+        no-leak invariant is legacy-formula-specific, not a general search
+        contract."""
         store = NativeMemoryStore(record_access=False)
         s = store.store
         vectored_ref = _file(store, wing="w9", room="r", content="embedded only")
@@ -146,7 +153,12 @@ class TestSearch:
         unmarked_ref = _file(store, wing="w9", room="r", content="embedded only too")
 
         results = store.search(
-            [1.0, 0.0, 0.0], 5, wing="w9", room="r", lexical_query="embedded"
+            [1.0, 0.0, 0.0],
+            5,
+            wing="w9",
+            room="r",
+            lexical_query="embedded",
+            fusion="legacy",
         )
         refs = {r["ref"] for r in results}
         assert refs == {vectored_ref}

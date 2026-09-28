@@ -485,7 +485,16 @@ def _dispatch_domain(
                 degraded = "lexical_only"
         else:
             degraded = "lexical_only"
-        results = mem_store.search(vector, k, wing=wing, room=room, lexical_query=query)
+        results = mem_store.search(
+            vector,
+            k,
+            wing=wing,
+            room=room,
+            lexical_query=query,
+            fusion=args.get("fusion"),
+            since=args.get("since"),
+            until=args.get("until"),
+        )
         return {"results": results, "degraded": degraded}
 
     if tool == "status":

@@ -361,6 +361,32 @@ class MemoryTool(Tool):
                 "description": "Result limit. Defaults: search=5, events=50 (max 200).",
                 "default": 5,
             },
+            "fusion": {
+                "type": "string",
+                "enum": ["rrf", "legacy"],
+                "description": (
+                    "Search ranking strategy (T1.2). 'rrf' fuses semantic + "
+                    "BM25 lexical arms by reciprocal rank fusion (default "
+                    "when available); 'legacy' reproduces the v2.0.1 "
+                    "cosine+lexical rerank. Omit for the server default."
+                ),
+            },
+            "since": {
+                "type": "string",
+                "description": (
+                    "ISO-8601 lower bound (inclusive) on a drawer's earliest "
+                    "filed_at (search operation, T1.3). Undated drawers are "
+                    "excluded when either since or until is given."
+                ),
+            },
+            "until": {
+                "type": "string",
+                "description": (
+                    "ISO-8601 upper bound (inclusive) on a drawer's earliest "
+                    "filed_at (search operation, T1.3). Undated drawers are "
+                    "excluded when either since or until is given."
+                ),
+            },
             # Knowledge graph parameters
             "entity": {
                 "type": "string",
@@ -498,6 +524,9 @@ class MemoryTool(Tool):
                         k=int(kwargs.get("limit", 5)),
                         wing=kwargs.get("wing") or None,
                         room=kwargs.get("room") or None,
+                        fusion=kwargs.get("fusion") or None,
+                        since=kwargs.get("since") or None,
+                        until=kwargs.get("until") or None,
                     )
                 except Exception as exc:
                     return _client_error_to_tool_result(exc)
