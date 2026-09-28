@@ -12,7 +12,7 @@ dependencies = [
     # amplifier-core is a peer dependency -- provided by the host runtime.
     # Do NOT declare it here (amplifier-foundation BUNDLE_GUIDE anti-pattern).
     # THE store now (native cutover, D8 of
-    # docs/plans/2026-07-07-native-cutover-design.md) -- was the [substrate]
+    # the native-cutover design history) -- was the [substrate]
     # extra; promoted to a hard dependency once the tool and hooks are
     # rewired onto the native daemon. Full SHA (not @main), never bumped
     # without moving the conductor's mirrored pin AND the mirrored pins in
@@ -31,15 +31,11 @@ dependencies = [
     # process pays the model-load cost.
     "fastembed>=0.3",
 ]
-# NOTE: the legacy vendor package is NOT a dependency anymore -- there is no
-# vendor subprocess left in this package. [substrate] extra: DELETED
-# (D8, folded into the hard dependencies above).
-
-[project.optional-dependencies]
-# Read-only import of a legacy vendor store (§9 of the design doc). ONLY
-# chromadb -- never the vendor package itself, which is not installed by
-# this migration path. Used exclusively by migrate.py.
-migrate = ["chromadb>=0.5"]
+# NOTE: no external vendor subprocess or dependency remains in this
+# package. [substrate] extra: DELETED (D8, folded into the hard
+# dependencies above). The one-time legacy-store import capability
+# (formerly the [migrate] extra) has been removed entirely; see
+# PROVENANCE.md for history.
 
 [project.entry-points."amplifier.modules"]
 tool-memory = "amplifier_module_tool_memory:mount"
@@ -52,8 +48,6 @@ memory-write-cells = "amplifier_module_tool_memory.scripts.write_cells:main"
 memory-daemon-concurrency-check = "amplifier_module_tool_memory.scripts.server_concurrency_check:main"
 # Authenticated MCP-shaped gateway / native memory daemon over amplifier-data.
 memory-daemon = "amplifier_module_tool_memory.daemon:main"
-# One-shot, read-only import of a legacy vendor store (§9; D7).
-amplifier-memory-import = "amplifier_module_tool_memory.migrate:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -73,7 +67,6 @@ dev = [
     "pytest-asyncio>=0.21",
     "ruff>=0.1",
     "pyright>=1.1",
-    "chromadb>=0.5",
 ]
 
 [tool.pytest.ini_options]
