@@ -422,12 +422,20 @@ class MemoryTool(Tool):
                 ),
                 "default": "files",
             },
-            # Events parameters
+            # Events parameters (also used by 'remember': session provenance)
             "session_id": {
                 "type": "string",
                 "description": (
-                    "Which session's events to read (events operation only). "
-                    "Defaults to the current session."
+                    "Which session's events to read (events operation only, "
+                    "defaults to the current session), or the session filing "
+                    "a drawer (remember operation, optional provenance)."
+                ),
+            },
+            "commit": {
+                "type": "string",
+                "description": (
+                    "Git commit SHA active when filing a drawer "
+                    "(remember operation, optional provenance)."
                 ),
             },
             "hook_filter": {
@@ -503,6 +511,8 @@ class MemoryTool(Tool):
                         room=kwargs.get("room", "notes"),
                         content=kwargs.get("content", ""),
                         source=kwargs.get("source", "") or "",
+                        session_id=kwargs.get("session_id"),
+                        commit=kwargs.get("commit"),
                     )
                 except Exception as exc:
                     return _client_error_to_tool_result(exc)

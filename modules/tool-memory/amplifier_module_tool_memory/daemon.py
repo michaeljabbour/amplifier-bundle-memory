@@ -458,6 +458,9 @@ def _dispatch_domain(
                 category=args.get("category"),
                 importance=args.get("importance"),
                 embedding=vector,
+                filed_at=args.get("filed_at"),
+                session_id=args.get("session_id"),
+                commit=args.get("commit"),
             )
             if vector is None:
                 mem_store.store.assert_fact(  # type: ignore[attr-defined]

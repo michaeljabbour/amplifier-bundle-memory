@@ -149,16 +149,21 @@ class TestMemoryStoreSeam:
             category="pattern",
             importance=0.5,
         )
-        assert store.filed == [
-            {
-                "wing": "w",
-                "room": "r",
-                "content": "c",
-                "source": "s",
-                "category": "pattern",
-                "importance": 0.5,
-            }
-        ]
+        assert len(store.filed) == 1
+        rec = store.filed[0]
+        # T0.2: filed_at defaults to now (asserted separately, not pinned to
+        # an exact value); session_id/commit default to None when omitted.
+        assert rec.pop("filed_at")
+        assert rec == {
+            "wing": "w",
+            "room": "r",
+            "content": "c",
+            "source": "s",
+            "category": "pattern",
+            "importance": 0.5,
+            "session_id": None,
+            "commit": None,
+        }
 
     def test_amplifierdata_store_files_when_available(self) -> None:
         # The amplifier-data seam is now WIRED (full coverage in

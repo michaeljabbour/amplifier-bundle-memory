@@ -112,6 +112,186 @@ def test_filed_records_tracked() -> None:
     assert "ref" in rec
 
 
+# ---------------------------------------------------------------------------
+# T0.2 -- filed_at/in_session/at_commit provenance facts (D8)
+# ---------------------------------------------------------------------------
+
+
+def test_filed_at_defaults_and_is_asserted_atomically() -> None:
+    """No explicit filed_at -> a real ISO-8601 UTC filed_at fact is asserted
+    in the SAME atomic batch as has_category/has_importance (T0.2)."""
+    store = NativeMemoryStore(record_access=False)
+    assert store._supports_atomic_update()  # confirms this exercises the batch path
+    ref = _file(store, wing="w", room="r", content="x", category="decision")
+    s = store.store
+    filed_at_fact = s.query_facts(subject=ref, predicate="filed_at")
+    assert filed_at_fact.success and len(filed_at_fact.output) == 1
+    value = s.regenerate(filed_at_fact.output[0].object).payload.decode("utf-8")
+    # Round-trips through fromisoformat -- proves it's a real ISO-8601 UTC stamp.
+    from datetime import datetime
+
+    parsed = datetime.fromisoformat(value)
+    assert parsed.tzinfo is not None
+
+
+def test_explicit_filed_at_session_and_commit_are_asserted() -> None:
+    store = NativeMemoryStore(record_access=False)
+    ref = _file(
+        store,
+        wing="w",
+        room="r",
+        content="x",
+        filed_at="2026-01-01T00:00:00+00:00",
+        session_id="sess-123",
+        commit="deadbeef",
+    )
+    s = store.store
+
+    def _fact_value(predicate: str) -> str:
+        res = s.query_facts(subject=ref, predicate=predicate)
+        assert res.success and len(res.output) == 1
+        return s.regenerate(res.output[0].object).payload.decode("utf-8")
+
+    assert _fact_value("filed_at") == "2026-01-01T00:00:00+00:00"
+    assert _fact_value("in_session") == "sess-123"
+    assert _fact_value("at_commit") == "deadbeef"
+
+
+def test_session_id_and_commit_omitted_when_none() -> None:
+    """session_id/commit are None -> in_session/at_commit facts are NOT
+    asserted at all (never a fact carrying a null/empty placeholder)."""
+    store = NativeMemoryStore(record_access=False)
+    ref = _file(store, wing="w", room="r", content="x")
+    s = store.store
+    assert s.query_facts(subject=ref, predicate="in_session").output == []
+    assert s.query_facts(subject=ref, predicate="at_commit").output == []
+    # filed_at is ALWAYS asserted (defaults to now), unlike the other two.
+    assert len(s.query_facts(subject=ref, predicate="filed_at").output) == 1
+
+
+def test_sequential_path_also_asserts_filed_at() -> None:
+    """The non-atomic (sequential) fallback path asserts the same facts."""
+    store = NativeMemoryStore(record_access=False)
+    store._supports_atomic_update = lambda: False  # type: ignore[method-assign]
+    ref = _file(
+        store,
+        wing="w",
+        room="r",
+        content="sequential path content",
+        filed_at="2026-02-02T00:00:00+00:00",
+        session_id="sess-seq",
+        commit="cafef00d",
+    )
+    s = store.store
+    assert (
+        s.regenerate(
+            s.query_facts(subject=ref, predicate="filed_at").output[0].object
+        ).payload.decode("utf-8")
+        == "2026-02-02T00:00:00+00:00"
+    )
+    assert (
+        s.regenerate(
+            s.query_facts(subject=ref, predicate="in_session").output[0].object
+        ).payload.decode("utf-8")
+        == "sess-seq"
+    )
+    assert (
+        s.regenerate(
+            s.query_facts(subject=ref, predicate="at_commit").output[0].object
+        ).payload.decode("utf-8")
+        == "cafef00d"
+    )
+
+
+def test_refiled_content_keeps_earliest_filed_at() -> None:
+    """Content-addressing caveat: identical content re-filed under a
+    different filed_at yields the SAME ref and a second filed_at fact --
+    drawer_times() reports the EARLIEST one as first-seen."""
+    store = NativeMemoryStore(record_access=False)
+    ref_a = _file(
+        store,
+        wing="w",
+        room="r",
+        content="same bytes",
+        filed_at="2026-03-03T00:00:00+00:00",
+    )
+    ref_b = _file(
+        store,
+        wing="w",
+        room="r",
+        content="same bytes",
+        filed_at="2026-01-01T00:00:00+00:00",  # earlier, filed second
+    )
+    assert ref_a == ref_b  # content addressing: identical content, same ref
+    times = store.drawer_times([ref_a])
+    assert times[ref_a] == "2026-01-01T00:00:00+00:00"
+
+
+def test_drawer_times_none_for_unknown_ref() -> None:
+    store = NativeMemoryStore(record_access=False)
+    ref = _file(store, wing="w", room="r", content="undated-by-fiat")
+    # A ref that was never filed at all (synthetic, never had a filed_at
+    # fact asserted against it) maps to None, not KeyError/exception.
+    fake_ref = store.store.write_cell(b"never filed")  # type: ignore[attr-defined]
+    times = store.drawer_times([ref, fake_ref])
+    assert times[ref] is not None
+    assert times[fake_ref] is None
+
+
+def test_drawer_times_no_fold_backend_falls_back_to_query_facts() -> None:
+    """Backends with no foldable kernel (RemoteStore/GatewayClient shape)
+    still resolve filed_at correctly via the query_facts fallback path."""
+
+    class KernellessBackend:
+        def __init__(self, real_store: object) -> None:
+            self._real = real_store
+
+        def __getattr__(self, name: str):
+            if name == "kernel":
+                raise AttributeError(name)  # remote-shaped: no local kernel
+            return getattr(self._real, name)
+
+    store = NativeMemoryStore(record_access=False)
+    ref = _file(
+        store, wing="w", room="r", content="x", filed_at="2026-04-04T00:00:00+00:00"
+    )
+    wrapped = NativeMemoryStore(store=KernellessBackend(store.store))
+    assert wrapped._fold_snapshot() is None  # no .kernel attribute exposed
+    times = wrapped.drawer_times([ref])
+    assert times[ref] == "2026-04-04T00:00:00+00:00"
+
+
+def test_list_drawers_includes_filed_at() -> None:
+    store = NativeMemoryStore(record_access=False)
+    ref = _file(
+        store,
+        wing="wing_ld",
+        room="r",
+        content="listed content",
+        filed_at="2026-05-05T00:00:00+00:00",
+    )
+    listed = store.list_drawers(wing="wing_ld")
+    by_ref = {d["ref"]: d for d in listed}
+    assert by_ref[ref]["filed_at"] == "2026-05-05T00:00:00+00:00"
+
+
+def test_search_hits_include_filed_at() -> None:
+    store = NativeMemoryStore(record_access=False)
+    ref = _file(
+        store,
+        wing="wing_search",
+        room="r",
+        content="searchable content",
+        filed_at="2026-06-06T00:00:00+00:00",
+        embedding=[1.0, 0.0, 0.0],
+    )
+    results = store.search(
+        [1.0, 0.0, 0.0], 5, wing="wing_search", lexical_query="searchable"
+    )
+    by_ref = {r["ref"]: r for r in results}
+    assert by_ref[ref]["filed_at"] == "2026-06-06T00:00:00+00:00"
+
+
 def test_remote_store_via_companion_server(tmp_path: Path) -> None:
     """The store works through the single-writer companion server (RemoteStore)."""
     import threading

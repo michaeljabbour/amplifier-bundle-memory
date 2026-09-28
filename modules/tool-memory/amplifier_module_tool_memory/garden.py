@@ -28,11 +28,12 @@ Design notes:
 - category/importance ride along on every ``list_drawers`` entry already --
   no separate per-drawer KG lookup round trip needed (the old
   ``_lookup_categories``/``_lookup_importances`` helpers are gone).
-- Honest limitation: the native store does not track a drawer's filing
-  timestamp, so ``lookback_days`` is currently a documented no-op (every
-  drawer in scope is analyzed regardless of age) -- never silently
-  fabricated. Revisit if/when the substrate grows a temporal-cell
-  convention for filing time.
+- ``lookback_days`` is real (T0.2): drawers carry a ``filed_at`` provenance
+  fact (D8, ``NativeMemoryStore.file()``), so ``_filter_by_lookback`` drops
+  any drawer filed before the cutoff. A drawer with NO ``filed_at`` (legacy,
+  pre-T0.2) is never silently dropped just because it predates provenance
+  tracking -- it is INCLUDED and counted separately as ``undated`` in the
+  result.
 - Budget: max_drawers clamped to [1, 500]. Progress events every 50 drawers.
 - Phase 3 rubric imported from .phase3 for importance backfill (Step 8).
 """
@@ -43,6 +44,7 @@ import hashlib
 import re
 from collections import Counter
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .client import MemoryClient, ensure_daemon
@@ -281,15 +283,17 @@ def _get_drawers_in_scope(
 ) -> list[dict[str, Any]]:
     """Enumerate drawers in scope via the daemon's native ``list_drawers`` tool.
 
-    Returns list of drawer dicts: ``{id, text, room, metadata}`` -- ``id``/
-    ``text``/``room`` are lifted from ``list_drawers``' ``{ref, content,
-    wing, room, category, importance}`` shape; category/importance ride
-    along in ``metadata`` so downstream code needs no extra round trip.
+    Returns list of drawer dicts: ``{id, text, room, filed_at, metadata}`` --
+    ``id``/``text``/``room``/``filed_at`` are lifted from ``list_drawers``'
+    ``{ref, content, wing, room, category, importance, filed_at}`` shape;
+    category/importance ride along in ``metadata`` so downstream code needs
+    no extra round trip.
 
-    NOTE on lookback_days: intentionally NOT applied here -- the native
-    store does not track a filing timestamp, so there is nothing honest to
-    filter on (see module docstring). Every drawer ``list_drawers`` returns
-    for the scope is considered in-scope.
+    NOTE on lookback_days: NOT applied here -- age filtering happens in
+    :func:`_filter_by_lookback`, over the ``filed_at`` field this function
+    attaches to every drawer. Every drawer ``list_drawers`` returns for the
+    scope is returned; the caller decides what's in/out of the lookback
+    window.
     """
     raw = client.list_drawers(wing=wing, room=room, limit=max_drawers)
     drawers: list[dict[str, Any]] = []
@@ -299,6 +303,7 @@ def _get_drawers_in_scope(
                 "id": str(d.get("ref", "")),
                 "text": d.get("content", "") or "",
                 "room": d.get("room") or (room or "unknown"),
+                "filed_at": d.get("filed_at"),
                 "metadata": {
                     "category": d.get("category"),
                     "importance": d.get("importance"),
@@ -306,6 +311,39 @@ def _get_drawers_in_scope(
             }
         )
     return drawers
+
+
+def _filter_by_lookback(
+    drawers: list[dict[str, Any]], lookback_days: int
+) -> tuple[list[dict[str, Any]], int]:
+    """Filter *drawers* to those filed within *lookback_days* (T0.2, real).
+
+    A drawer with NO ``filed_at`` (legacy, pre-T0.2 -- never carried the
+    provenance fact) is never silently dropped just because it predates
+    timestamp tracking: it is INCLUDED and counted separately as
+    ``undated`` so callers can see how much of the scope is still
+    unaccounted for. ``lookback_days <= 0`` disables filtering entirely
+    (every drawer in scope, dated or not, is analyzed).
+
+    Returns ``(kept_drawers, undated_count)``.
+    """
+    if lookback_days <= 0:
+        return drawers, 0
+
+    cutoff = (datetime.now(UTC) - timedelta(days=lookback_days)).isoformat(
+        timespec="seconds"
+    )
+    kept: list[dict[str, Any]] = []
+    undated = 0
+    for d in drawers:
+        filed_at = d.get("filed_at")
+        if filed_at is None:
+            kept.append(d)
+            undated += 1
+            continue
+        if filed_at >= cutoff:
+            kept.append(d)
+    return kept, undated
 
 
 def _build_adjacency(
@@ -390,7 +428,8 @@ def execute_garden(
     kg_edges_created = 0
 
     # ── Step 1: Enumerate drawers ────────────────────────────────────
-    drawers = _get_drawers_in_scope(client, effective_wing, room, max_drawers)
+    raw_drawers = _get_drawers_in_scope(client, effective_wing, room, max_drawers)
+    drawers, undated_count = _filter_by_lookback(raw_drawers, lookback_days)
     n_drawers = len(drawers)
 
     if not drawers:
@@ -404,6 +443,7 @@ def execute_garden(
             "clusters": [],
             "kg_edges_created": 0,
             "importance_backfilled": 0,
+            "undated": undated_count,
             "diary_entry": "skipped (no drawers found)",
         }
 
@@ -529,5 +569,6 @@ def execute_garden(
         "clusters": output_clusters,
         "kg_edges_created": kg_edges_created,
         "importance_backfilled": importance_backfilled,
+        "undated": undated_count,
         "diary_entry": "written",
     }

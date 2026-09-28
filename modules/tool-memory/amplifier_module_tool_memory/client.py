@@ -67,6 +67,9 @@ class MemoryClient(GatewayClient):
         source: str = "",
         category: str | None = None,
         importance: float | None = None,
+        filed_at: str | None = None,
+        session_id: str | None = None,
+        commit: str | None = None,
     ) -> str:
         out = self._call(
             "remember",
@@ -77,6 +80,9 @@ class MemoryClient(GatewayClient):
                 "source": source,
                 "category": category,
                 "importance": importance,
+                "filed_at": filed_at,
+                "session_id": session_id,
+                "commit": commit,
             },
         )
         return str(out["ref"])
@@ -337,7 +343,9 @@ def ensure_daemon(home: Path | str | None = None) -> MemoryClient | None:
     """
     global _unavailable_emitted
 
-    resolved_home = Path(home).expanduser() if home is not None else default_memory_home()
+    resolved_home = (
+        Path(home).expanduser() if home is not None else default_memory_home()
+    )
     try:
         resolved_home.mkdir(mode=0o700, parents=True, exist_ok=True)
         client = _discover(resolved_home)

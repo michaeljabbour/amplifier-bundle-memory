@@ -16,12 +16,14 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 from amplifier_module_tool_memory import MemoryTool
 from amplifier_module_tool_memory.garden import (
+    _filter_by_lookback,
     classify_cluster,
     cluster_id,
     extract_common_terms,
@@ -104,6 +106,7 @@ def _drawer(
     room: str = "r1",
     category: str | None = None,
     importance: float | None = None,
+    filed_at: str | None = None,
 ) -> dict[str, Any]:
     return {
         "ref": ref,
@@ -112,6 +115,7 @@ def _drawer(
         "room": room,
         "category": category,
         "importance": importance,
+        "filed_at": filed_at,
     }
 
 
@@ -382,19 +386,21 @@ class TestCrossRoomDetection:
 
 
 # ---------------------------------------------------------------------------
-# Honest lookback_days limitation (native store has no filing timestamp)
+# lookback_days is real (T0.2): filters by the drawer's filed_at provenance
+# fact. A drawer with no filed_at (legacy, pre-T0.2) is never silently
+# dropped -- it is included and counted separately as `undated`.
 # ---------------------------------------------------------------------------
 
 
-class TestLookbackIsHonestNoOp:
-    """The native store does not track a drawer's filing timestamp, so
-    lookback_days is a documented no-op: every drawer list_drawers returns
-    for the scope is analyzed regardless of age. This replaces the old
-    TestLookbackFilter suite (which pinned filtering behavior the native
-    store cannot honestly support without fabricating a timestamp)."""
-
-    def test_lookback_days_does_not_filter_any_drawer(self) -> None:
-        drawers = [_drawer(f"d{i}", f"content {i}") for i in range(5)]
+class TestLookbackFiltersByAge:
+    def test_old_drawer_excluded_by_lookback(self) -> None:
+        now = datetime.now(UTC)
+        recent = (now - timedelta(days=1)).isoformat(timespec="seconds")
+        old = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        drawers = [
+            _drawer("d_recent", "recent content", filed_at=recent),
+            _drawer("d_old", "old content", filed_at=old),
+        ]
         fake_client = _FakeMemoryClient(drawers)
 
         with patch(
@@ -407,15 +413,93 @@ class TestLookbackIsHonestNoOp:
                     {
                         "operation": "garden",
                         "wing": "wing_test",
-                        "lookback_days": 1,  # would exclude everything if honored
+                        "lookback_days": 90,
                         "max_drawers": 50,
                     }
                 )
             )
         assert result.success
         payload = _result_json(result)
-        assert payload["drawers_analyzed"] == 5
-        assert payload["scope"]["lookback_days"] == 1
+        assert payload["drawers_analyzed"] == 1
+        assert payload["undated"] == 0
+
+    def test_undated_drawer_included_and_counted(self) -> None:
+        recent = (datetime.now(UTC) - timedelta(days=1)).isoformat(timespec="seconds")
+        drawers = [
+            _drawer("d_recent", "recent content", filed_at=recent),
+            _drawer("d_undated", "undated content", filed_at=None),
+        ]
+        fake_client = _FakeMemoryClient(drawers)
+
+        with patch(
+            "amplifier_module_tool_memory.garden.ensure_daemon",
+            return_value=fake_client,
+        ):
+            tool = MemoryTool()
+            result = _run(
+                tool.execute(
+                    {
+                        "operation": "garden",
+                        "wing": "wing_test",
+                        "lookback_days": 90,
+                        "max_drawers": 50,
+                    }
+                )
+            )
+        assert result.success
+        payload = _result_json(result)
+        # both are KEPT (undated is included, never silently dropped) --
+        # but reported separately so callers know how much is unaccounted.
+        assert payload["drawers_analyzed"] == 2
+        assert payload["undated"] == 1
+
+    def test_zero_lookback_disables_filtering(self) -> None:
+        old = (datetime.now(UTC) - timedelta(days=9999)).isoformat(timespec="seconds")
+        drawers = [_drawer("d_ancient", "ancient content", filed_at=old)]
+        fake_client = _FakeMemoryClient(drawers)
+
+        with patch(
+            "amplifier_module_tool_memory.garden.ensure_daemon",
+            return_value=fake_client,
+        ):
+            tool = MemoryTool()
+            result = _run(
+                tool.execute(
+                    {
+                        "operation": "garden",
+                        "wing": "wing_test",
+                        "lookback_days": 0,
+                        "max_drawers": 50,
+                    }
+                )
+            )
+        assert result.success
+        payload = _result_json(result)
+        assert payload["drawers_analyzed"] == 1
+        assert payload["undated"] == 0
+
+
+class TestFilterByLookbackPure:
+    """Direct unit coverage of the pure helper (no daemon/tool involved)."""
+
+    def test_excludes_old_includes_undated(self) -> None:
+        now = datetime.now(UTC)
+        recent = (now - timedelta(days=1)).isoformat(timespec="seconds")
+        old = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        drawers = [
+            {"id": "a", "filed_at": recent},
+            {"id": "b", "filed_at": old},
+            {"id": "c", "filed_at": None},
+        ]
+        kept, undated = _filter_by_lookback(drawers, 90)
+        assert {d["id"] for d in kept} == {"a", "c"}
+        assert undated == 1
+
+    def test_non_positive_lookback_is_a_no_op(self) -> None:
+        drawers = [{"id": "a", "filed_at": None}, {"id": "b", "filed_at": "x"}]
+        kept, undated = _filter_by_lookback(drawers, 0)
+        assert kept == drawers
+        assert undated == 0
 
 
 # ---------------------------------------------------------------------------

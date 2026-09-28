@@ -116,6 +116,59 @@ class TestSimplePassthroughOperations:
 
 
 # ---------------------------------------------------------------------------
+# T0.2 -- remember op threads session_id/commit through to _call_client
+# ---------------------------------------------------------------------------
+
+
+class TestRememberProvenanceInputs:
+    def test_session_id_and_commit_forwarded_to_call_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        def _fake_call_client(method: str, **kw: Any) -> Any:
+            captured["method"] = method
+            captured.update(kw)
+            return "ref-123"
+
+        monkeypatch.setattr(tm, "_call_client", _fake_call_client)
+        tool = MemoryTool()
+        result = _run(
+            tool.execute(
+                {
+                    "operation": "remember",
+                    "content": "verbatim text",
+                    "session_id": "sess-tool",
+                    "commit": "abc1234",
+                }
+            )
+        )
+        _assert_contract_success(result)
+        assert captured["session_id"] == "sess-tool"
+        assert captured["commit"] == "abc1234"
+
+    def test_session_id_and_commit_default_to_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backward compatible: a caller that omits session_id/commit still
+        works, and _call_client receives explicit None (never a KeyError)."""
+        captured: dict[str, Any] = {}
+
+        def _fake_call_client(method: str, **kw: Any) -> Any:
+            captured.update(kw)
+            return "ref-456"
+
+        monkeypatch.setattr(tm, "_call_client", _fake_call_client)
+        tool = MemoryTool()
+        result = _run(
+            tool.execute({"operation": "remember", "content": "verbatim text"})
+        )
+        _assert_contract_success(result)
+        assert captured["session_id"] is None
+        assert captured["commit"] is None
+
+
+# ---------------------------------------------------------------------------
 # kg -- query / add / invalidate / timeline / stats
 # ---------------------------------------------------------------------------
 

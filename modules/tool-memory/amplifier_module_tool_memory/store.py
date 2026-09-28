@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 from amplifier_module_tool_memory.scripts.mutation import (
@@ -33,6 +34,13 @@ from amplifier_module_tool_memory.scripts.mutation import (
     ReversibleDelta,
     new_mutation,
 )
+
+#: Fact predicates carrying time/provenance on a drawer (D8: consumer-supplied
+#: facts, never kernel event fields -- amplifier-data deliberately excludes
+#: wall-clock time from events to keep byte-identical regeneration).
+_FILED_AT_PREDICATE = "filed_at"
+_IN_SESSION_PREDICATE = "in_session"
+_AT_COMMIT_PREDICATE = "at_commit"
 
 
 def _resolve_batch_ref(commit_result: Any, ref: Any) -> Any:
@@ -80,7 +88,7 @@ class _SearchFold:
     """
 
     def __init__(self, kernel: Any) -> None:
-        from amplifier_data.models import CellWriteEvent
+        from amplifier_data.models import CellWriteEvent, RelationshipEvent
 
         self._events: Any = kernel.all_events()
         payloads: dict[Any, bytes] = {}
@@ -88,6 +96,24 @@ class _SearchFold:
             if isinstance(ev, CellWriteEvent):
                 payloads[ev.cell_ref()] = ev.payload
         self.payloads: dict[Any, bytes] = payloads
+
+        # T0.2: earliest `filed_at` per subject ref, in a second O(log) pass
+        # over the SAME materialized event list (still no per-hit re-fold).
+        # `filed_at` is never invalidated (append-only provenance); a ref
+        # re-filed under a different `filed_at` carries multiple assertions,
+        # so "first-seen" is the lexicographically (== chronologically,
+        # ISO-8601) smallest value. See NativeMemoryStore.drawer_times.
+        filed_at: dict[Any, str] = {}
+        for _pos, ev in self._events:
+            if isinstance(ev, RelationshipEvent) and ev.type == _FILED_AT_PREDICATE:
+                raw = payloads.get(ev.to_ref)
+                if raw is None:
+                    continue  # defensive: object cell not seen in this fold
+                value = raw.decode("utf-8", errors="replace")
+                existing = filed_at.get(ev.from_ref)
+                if existing is None or value < existing:
+                    filed_at[ev.from_ref] = value
+        self.filed_at: dict[Any, str] = filed_at
 
     def all_events(self) -> Any:
         """The read accessor the fold lenses use (mirrors ``StorageKernel``)."""
@@ -108,6 +134,9 @@ class MemoryStore(Protocol):
         category: str | None = None,
         importance: float | None = None,
         embedding: Sequence[float] | None = None,
+        filed_at: str | None = None,
+        session_id: str | None = None,
+        commit: str | None = None,
     ) -> None:
         """Persist one consolidated cell.
 
@@ -115,6 +144,10 @@ class MemoryStore(Protocol):
         alongside the cell. The seam NEVER computes embeddings itself (the
         embedder is bundle policy, per COMPOSITION.md) — it only carries a
         vector a caller already has.
+
+        ``filed_at``/``session_id``/``commit`` are time/provenance facts
+        (D8): ``filed_at`` defaults to now (UTC) when omitted; ``session_id``
+        and ``commit`` are omitted entirely when ``None``.
         """
         ...
 
@@ -143,11 +176,19 @@ class RecordingMemoryStore:
         category: str | None = None,
         importance: float | None = None,
         embedding: Sequence[float] | None = None,
+        filed_at: str | None = None,
+        session_id: str | None = None,
+        commit: str | None = None,
     ) -> None:
         record: dict[str, object] = {
             "wing": wing,
             "room": room,
             "content": content,
+            "filed_at": filed_at
+            if filed_at is not None
+            else datetime.now(UTC).isoformat(timespec="seconds"),
+            "session_id": session_id,
+            "commit": commit,
             "source": source,
             "category": category,
             "importance": importance,
@@ -280,6 +321,9 @@ class NativeMemoryStore:
         category: str | None = None,
         importance: float | None = None,
         embedding: Sequence[float] | None = None,
+        filed_at: str | None = None,
+        session_id: str | None = None,
+        commit: str | None = None,
     ) -> Any:
         """Persist one drawer; returns the content-addressed cell ref.
 
@@ -291,8 +335,21 @@ class NativeMemoryStore:
         type varies by backend (str for GatewayClient/RemoteStore, a `Hash`
         for the direct AmplifierStore path) -- the same reason `Any` is used
         for `self.store` itself on this class.
+
+        Time/provenance facts (D8, T0.2): ``filed_at``/``in_session``/
+        ``at_commit`` are asserted on the drawer ref in the SAME atomic batch
+        as the existing has_source/has_category/has_importance facts.
+        ``filed_at`` defaults to now (UTC, ISO-8601, second precision) when
+        omitted -- it is ALWAYS asserted. ``in_session``/``at_commit`` are
+        omitted entirely when ``session_id``/``commit`` is ``None``.
+        Content-addressing caveat: identical content re-filed yields the
+        SAME ref, so re-filing asserts another `filed_at` fact rather than
+        replacing one (append-only) -- readers use the EARLIEST `filed_at`
+        as first-seen (see :meth:`drawer_times`).
         """
         s = self.store
+        if filed_at is None:
+            filed_at = datetime.now(UTC).isoformat(timespec="seconds")
         if self._supports_atomic_update():
             # Batch path: cell + 2 scope edges + facts + optional embedding,
             # staged on ONE WriteBatch and committed as ONE atomic append_batch.
@@ -310,6 +367,13 @@ class NativeMemoryStore:
                 b.assert_fact(
                     ref, "has_importance", b.write_cell(str(importance).encode())
                 )
+            b.assert_fact(ref, _FILED_AT_PREDICATE, b.write_cell(filed_at.encode()))
+            if session_id is not None:
+                b.assert_fact(
+                    ref, _IN_SESSION_PREDICATE, b.write_cell(session_id.encode())
+                )
+            if commit is not None:
+                b.assert_fact(ref, _AT_COMMIT_PREDICATE, b.write_cell(commit.encode()))
             if embedding is not None:
                 # Byte-identical to add_embedding's own packing (store.py):
                 # LE-f32, so E1/regeneration equivalence holds across paths.
@@ -335,6 +399,17 @@ class NativeMemoryStore:
                 s.assert_fact(  # type: ignore[attr-defined]
                     ref, "has_importance", s.write_cell(str(importance).encode())
                 )
+            s.assert_fact(  # type: ignore[attr-defined]
+                ref, _FILED_AT_PREDICATE, s.write_cell(filed_at.encode())
+            )
+            if session_id is not None:
+                s.assert_fact(  # type: ignore[attr-defined]
+                    ref, _IN_SESSION_PREDICATE, s.write_cell(session_id.encode())
+                )
+            if commit is not None:
+                s.assert_fact(  # type: ignore[attr-defined]
+                    ref, _AT_COMMIT_PREDICATE, s.write_cell(commit.encode())
+                )
             if embedding is not None:
                 # Sequential path: the substrate's own add_embedding (dim-agnostic).
                 s.add_embedding(ref, list(embedding))  # type: ignore[attr-defined]
@@ -348,6 +423,9 @@ class NativeMemoryStore:
                 "category": category,
                 "importance": importance,
                 "embedding": list(embedding) if embedding is not None else None,
+                "filed_at": filed_at,
+                "session_id": session_id,
+                "commit": commit,
             }
         )
         return ref
@@ -379,12 +457,12 @@ class NativeMemoryStore:
         """
         return self.store.write_cell(f"entity:{name}".encode())  # type: ignore[attr-defined]
 
-    def assert_kg(self, subject: str, predicate: str, object: str) -> None:  # noqa: A002
+    def assert_kg(self, subject: str, predicate: str, object: str) -> None:
         """String-keyed KG assert: strings in, anchor-cell fact in the substrate."""
         s = self.store
         s.assert_fact(self._anchor(subject), predicate, self._anchor(object))  # type: ignore[attr-defined]
 
-    def invalidate_kg(self, subject: str, predicate: str, object: str) -> None:  # noqa: A002
+    def invalidate_kg(self, subject: str, predicate: str, object: str) -> None:
         s = self.store
         s.invalidate_fact(self._anchor(subject), predicate, self._anchor(object))  # type: ignore[attr-defined]
 
@@ -408,7 +486,7 @@ class NativeMemoryStore:
         s = self.store
         payload = s.regenerate(ref, record_access=False).payload.decode("utf-8")  # type: ignore[attr-defined]
         prefix = "entity:"
-        return payload[len(prefix) :] if payload.startswith(prefix) else payload
+        return payload.removeprefix(prefix)
 
     def kg_timeline(self, subject: str) -> list[dict[str, Any]]:
         """SeqPos-ordered assert/invalidate history for one entity (wraps
@@ -610,6 +688,41 @@ class NativeMemoryStore:
             return None
         return self._payload_text(res.output[0].object, fold)
 
+    def drawer_times(
+        self, refs: Sequence[Any], *, _fold: _SearchFold | None = None
+    ) -> dict[Any, str | None]:
+        """Earliest ``filed_at`` per ref (T0.2), read from the one-fold snapshot.
+
+        Reuses the SAME shared :class:`_SearchFold` a caller may already hold
+        (``_fold``, mirroring :meth:`list_drawers`'s private perf seam) --
+        never a per-ref ``regenerate``/re-fold (perf rationale: lines 53-95).
+        When no ``_fold`` is supplied, computes its own snapshot (still ONE
+        fold for the whole batch of *refs*, not one per ref). Falls back to a
+        per-ref ``query_facts`` walk only for backends with no foldable
+        kernel (RemoteStore/GatewayClient). A ref with no ``filed_at`` fact
+        (legacy drawer, pre-T0.2) maps to ``None``.
+        """
+        fold = _fold if _fold is not None else self._fold_snapshot()
+        out: dict[Any, str | None] = {}
+        if fold is not None:
+            for ref in refs:
+                out[ref] = fold.filed_at.get(ref)
+            return out
+        s = self.store
+        for ref in refs:
+            res = s.query_facts(subject=ref, predicate=_FILED_AT_PREDICATE)  # type: ignore[attr-defined]
+            if not res.output:
+                out[ref] = None
+                continue
+            values = [
+                s.regenerate(f.object, record_access=False).payload.decode(  # type: ignore[attr-defined]
+                    "utf-8", errors="replace"
+                )
+                for f in res.output
+            ]
+            out[ref] = min(values)
+        return out
+
     def _resolve_wing_room(
         self, ref: Any, fold: _SearchFold | None = None
     ) -> tuple[str | None, str | None]:
@@ -672,8 +785,11 @@ class NativeMemoryStore:
         else:
             member_refs = set(scope_index.membership.keys())
 
+        selected_refs = sorted(member_refs)[: max(0, limit)]
+        times = self.drawer_times(selected_refs, _fold=_fold)
+
         out: list[dict[str, Any]] = []
-        for ref in sorted(member_refs)[: max(0, limit)]:
+        for ref in selected_refs:
             content = self._payload_text(ref, _fold)
             wing_name, room_name = self._resolve_wing_room(ref, _fold)
             category = self._first_fact_value(ref, "has_category", _fold)
@@ -688,6 +804,7 @@ class NativeMemoryStore:
                     "importance": float(importance_raw)
                     if importance_raw is not None
                     else None,
+                    "filed_at": times.get(ref),
                 }
             )
         return out
@@ -747,9 +864,16 @@ class NativeMemoryStore:
             if fold is not None:
                 from amplifier_data.lenses.vector import VectorLens
 
-                candidates = VectorLens().query(
-                    kernel=fold, vector=list(query_vector), k=max(1, k * 3), scope=scope_ref
-                ).output
+                candidates = (
+                    VectorLens()
+                    .query(
+                        kernel=fold,
+                        vector=list(query_vector),
+                        k=max(1, k * 3),
+                        scope=scope_ref,
+                    )
+                    .output
+                )
             else:
                 candidates = s.query_vector(  # type: ignore[attr-defined]
                     list(query_vector), max(1, k * 3), scope=scope_ref
@@ -805,8 +929,10 @@ class NativeMemoryStore:
                 )
 
         scored.sort(key=lambda pair: (-pair[1], pair[0]))
+        top = scored[: max(0, k)]
+        times = self.drawer_times([ref for ref, _score in top], _fold=fold)
         results: list[dict[str, Any]] = []
-        for ref, score in scored[: max(0, k)]:
+        for ref, score in top:
             content = self._payload_text(ref, fold)
             wing_name, room_name = self._resolve_wing_room(ref, fold)
             category = self._first_fact_value(ref, "has_category", fold)
@@ -820,6 +946,7 @@ class NativeMemoryStore:
                     "room": room_name,
                     "category": category,
                     "source": source,
+                    "filed_at": times.get(ref),
                 }
             )
         return results

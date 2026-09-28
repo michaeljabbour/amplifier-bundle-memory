@@ -27,6 +27,7 @@ from amplifier_module_tool_memory.daemon import (  # noqa: E402
     daemon_version,
     make_daemon,
 )
+from amplifier_module_tool_memory.client import MemoryClient  # noqa: E402
 
 from amplifier_data import AmplifierStore  # noqa: E402
 
@@ -146,6 +147,93 @@ class TestDomainToolRoundTrips:
             assert search_out["results"]
             assert search_out["results"][0]["ref"] == out["ref"]
             assert "manifest" in search_out["results"][0]["content"]
+        finally:
+            next(gen, None)
+
+    def test_remember_threads_filed_at_session_id_commit(self) -> None:
+        """T0.2: the `remember` dispatch tool passes filed_at/session_id/commit
+        from the request payload through to NativeMemoryStore.file(), so a
+        remote/gateway caller's provenance facts land exactly like a direct
+        in-process caller's."""
+        store = AmplifierStore(record_access=False)
+        embedder = _FakeEmbedder(ready=True)
+        url = next(gen := _serve(store, embedder))
+        try:
+            out = _call(
+                url,
+                "remember",
+                {
+                    "wing": "w",
+                    "room": "r",
+                    "content": "provenance round trip",
+                    "filed_at": "2026-07-07T00:00:00+00:00",
+                    "session_id": "sess-remote",
+                    "commit": "feedface",
+                },
+            )
+            ref = out["ref"]
+
+            def _fact_value(predicate: str) -> str:
+                res = store.query_facts(subject=ref, predicate=predicate)
+                assert res.success and len(res.output) == 1
+                return store.regenerate(res.output[0].object).payload.decode("utf-8")
+
+            assert _fact_value("filed_at") == "2026-07-07T00:00:00+00:00"
+            assert _fact_value("in_session") == "sess-remote"
+            assert _fact_value("at_commit") == "feedface"
+        finally:
+            next(gen, None)
+
+    def test_memory_client_remember_carries_session_id_and_commit(self) -> None:
+        """T0.2: MemoryClient.remember(...) itself (not just a raw dict
+        payload) puts filed_at/session_id/commit on the wire and the daemon
+        asserts them as facts -- the full client-to-store round trip."""
+        store = AmplifierStore(record_access=False)
+        embedder = _FakeEmbedder(ready=True)
+        url = next(gen := _serve(store, embedder))
+        try:
+            client = MemoryClient(url, _TOKEN)
+            ref = client.remember(
+                wing="w",
+                room="r",
+                content="via MemoryClient",
+                session_id="sess-client",
+                commit="0ff1ce",
+            )
+            assert (
+                store.regenerate(
+                    store.query_facts(subject=ref, predicate="in_session")
+                    .output[0]
+                    .object
+                ).payload.decode("utf-8")
+                == "sess-client"
+            )
+            assert (
+                store.regenerate(
+                    store.query_facts(subject=ref, predicate="at_commit")
+                    .output[0]
+                    .object
+                ).payload.decode("utf-8")
+                == "0ff1ce"
+            )
+        finally:
+            next(gen, None)
+
+    def test_remember_without_provenance_still_gets_default_filed_at(self) -> None:
+        """Backward compatible: old callers that omit filed_at/session_id/
+        commit entirely still get a real filed_at fact (defaulted) and no
+        in_session/at_commit facts at all."""
+        store = AmplifierStore(record_access=False)
+        embedder = _FakeEmbedder(ready=True)
+        url = next(gen := _serve(store, embedder))
+        try:
+            out = _call(
+                url, "remember", {"wing": "w", "room": "r", "content": "plain call"}
+            )
+            ref = out["ref"]
+            assert len(store.query_facts(subject=ref, predicate="filed_at").output) == 1
+            assert store.query_facts(subject=ref, predicate="in_session").output == []
+            assert store.query_facts(subject=ref, predicate="at_commit").output == []
         finally:
             next(gen, None)
 
