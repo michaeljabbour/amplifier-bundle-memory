@@ -309,6 +309,24 @@ def default_memory_home() -> Path:
 _NEEDS_EMBEDDING_PREDICATE = "needs_embedding"
 
 
+def _embeddable_text(payload_text: str) -> str:
+    """P2: what to actually embed for a scoped cell's payload text.
+
+    A fact cell's payload is a JSON envelope (``{"kind": "fact", "text": ...,
+    ...}``) -- embedding the raw JSON would pollute the vector with schema
+    keys instead of the fact's own sentence. Drawers (plain verbatim text,
+    the pre-P2 shape) pass through unchanged; any payload that fails to
+    parse as our fact envelope is treated as a drawer too.
+    """
+    try:
+        body = json.loads(payload_text)
+    except (ValueError, TypeError):
+        return payload_text
+    if isinstance(body, dict) and body.get("kind") == "fact":
+        return str(body.get("text", payload_text))
+    return payload_text
+
+
 def _sweep_needs_embedding(
     mem_store: NativeMemoryStore,
     embedder: FastEmbedEmbedder,
@@ -485,6 +503,7 @@ def _dispatch_domain(
                 degraded = "lexical_only"
         else:
             degraded = "lexical_only"
+        layers = args.get("layers")
         results = mem_store.search(
             vector,
             k,
@@ -494,6 +513,7 @@ def _dispatch_domain(
             fusion=args.get("fusion"),
             since=args.get("since"),
             until=args.get("until"),
+            layers=list(layers) if layers is not None else None,
         )
         return {"results": results, "degraded": degraded}
 
@@ -565,6 +585,98 @@ def _dispatch_domain(
             limit=int(args.get("limit", 200)),
         )
         return {"drawers": drawers}
+
+    if tool == "fact_add":
+        _maybe_sweep(mem_store, embedder, lock)
+        text = str(args.get("text", ""))
+        vector: list[float] | None = None
+        if embedder is not None and embedder.ready:
+            try:
+                vector = embedder.embed(text)
+            except Exception:
+                vector = None  # loud-but-graceful (KG-N3): needs_embedding fallback
+        with lock:
+            result = mem_store.fact_add(
+                text=text,
+                fact_type=str(args.get("fact_type", "")),
+                source_refs=list(args.get("source_refs") or []),
+                wing=str(args.get("wing", "general")),
+                room=args.get("room"),
+                valid_at=args.get("valid_at"),
+                invalid_at=args.get("invalid_at"),
+                predicate=args.get("predicate"),
+                supersedes=args.get("supersedes"),
+                conflicts_with=args.get("conflicts_with"),
+                observed_at=args.get("observed_at"),
+                embedding=vector,
+            )
+            if vector is None and not result["deduped"]:
+                mem_store.store.assert_fact(  # type: ignore[attr-defined]
+                    result["ref"],
+                    "needs_embedding",
+                    mem_store.store.write_cell(b"true"),  # type: ignore[attr-defined]
+                )
+        return {
+            "ref": str(result["ref"]),
+            "deduped": result["deduped"],
+            "proof_count": result["proof_count"],
+            "superseded": [str(r) for r in result["superseded"]],
+            "tension": str(result["tension"])
+            if result["tension"] is not None
+            else None,
+        }
+
+    if tool == "facts":
+        rows = mem_store.facts(
+            query=args.get("query"),
+            wing=args.get("wing"),
+            room=args.get("room"),
+            current_only=bool(args.get("current_only", True)),
+            k=int(args.get("k", 10)),
+            since=args.get("since"),
+            until=args.get("until"),
+        )
+        return {"facts": rows}
+
+    if tool == "reflection_job_add":
+        with lock:
+            result = mem_store.reflection_job_add(
+                span_text=str(args.get("span_text", "")),
+                session_id=args.get("session_id"),
+                trigger=str(args.get("trigger", "")),
+                wing=str(args.get("wing", "general")),
+                room=args.get("room"),
+                observed_at=args.get("observed_at"),
+            )
+        return {
+            "job_ref": str(result["job_ref"]),
+            "span_ref": str(result["span_ref"]),
+            "state": result["state"],
+            "redactions": result["redactions"],
+        }
+
+    if tool == "reflection_jobs":
+        rows = mem_store.reflection_jobs(
+            state=str(args.get("state", "pending")),
+            wing=args.get("wing"),
+            limit=int(args.get("limit", 10)),
+        )
+        return {"jobs": rows}
+
+    if tool == "reflection_job_done":
+        with lock:
+            result = mem_store.reflection_job_done(
+                job_ref=str(args.get("job_ref", "")),
+                fact_refs=list(args.get("fact_refs") or []),
+                noop=bool(args.get("noop", False)),
+                note=args.get("note"),
+            )
+        return {
+            "job_ref": str(result["job_ref"]),
+            "state": result["state"],
+            "fact_refs": [str(r) for r in result["fact_refs"]],
+            "noop": result["noop"],
+        }
 
     return None
 

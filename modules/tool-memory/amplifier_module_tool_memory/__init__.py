@@ -315,7 +315,9 @@ class MemoryTool(Tool):
     name = "memory"
     description = (
         "Memory operations. Operations: search, remember, status, "
-        "kg (knowledge graph), traverse, diary, mine, events, garden."
+        "kg (knowledge graph), traverse, diary, mine, events, garden, "
+        "fact_add, facts (L2 durable facts), reflection_job_add, "
+        "reflection_jobs, reflection_job_done (durable reflection queue)."
     )
 
     def __init__(self, *, bridge_emit: SyncBridge | None = None) -> None:
@@ -337,6 +339,11 @@ class MemoryTool(Tool):
                     "mine",
                     "events",
                     "garden",
+                    "fact_add",
+                    "facts",
+                    "reflection_job_add",
+                    "reflection_jobs",
+                    "reflection_job_done",
                 ],
                 "description": "The memory operation to perform.",
             },
@@ -375,17 +382,139 @@ class MemoryTool(Tool):
                 "type": "string",
                 "description": (
                     "ISO-8601 lower bound (inclusive) on a drawer's earliest "
-                    "filed_at (search operation, T1.3). Undated drawers are "
-                    "excluded when either since or until is given."
+                    "filed_at (search/facts operations, T1.3). Undated drawers "
+                    "are excluded when either since or until is given."
                 ),
             },
             "until": {
                 "type": "string",
                 "description": (
                     "ISO-8601 upper bound (inclusive) on a drawer's earliest "
-                    "filed_at (search operation, T1.3). Undated drawers are "
-                    "excluded when either since or until is given."
+                    "filed_at (search/facts operations, T1.3). Undated drawers "
+                    "are excluded when either since or until is given."
                 ),
+            },
+            "layers": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["fact", "drawer"]},
+                "description": (
+                    "Which memory layers are eligible search hits (search "
+                    "operation, T2.2). Omit for the server default (both)."
+                ),
+            },
+            # Fact parameters (fact_add / facts)
+            "text": {
+                "type": "string",
+                "description": (
+                    "The fact's self-contained text, 3-120 words (fact_add "
+                    "operation; context/reflection-rubric.md targets 15-80). "
+                    "Rejected if it contains secret-shaped content."
+                ),
+            },
+            "fact_type": {
+                "type": "string",
+                "enum": [
+                    "world",
+                    "experience",
+                    "preference",
+                    "procedure",
+                    "correction",
+                ],
+                "description": "Kind of fact (fact_add operation).",
+            },
+            "source_refs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Evidence drawer refs (fact_add operation). At least one "
+                    "existing drawer ref is required -- provenance is mandatory."
+                ),
+            },
+            "valid_at": {
+                "type": "string",
+                "description": "ISO-8601 start of validity (fact_add operation).",
+            },
+            "invalid_at": {
+                "type": "string",
+                "description": "ISO-8601 end of validity (fact_add operation).",
+            },
+            "supersedes": {
+                "type": "string",
+                "description": (
+                    "Ref of a prior fact this new fact retires (fact_add "
+                    "operation). Never deletes -- invalidates the old fact's "
+                    "@memory:current and asserts expired_at on it."
+                ),
+            },
+            "conflicts_with": {
+                "type": "string",
+                "description": (
+                    "Ref of a current fact this new fact contradicts, "
+                    "without either being provably wrong (fact_add "
+                    "operation). Records an unresolved tension; both facts "
+                    "stay current."
+                ),
+            },
+            "observed_at": {
+                "type": "string",
+                "description": (
+                    "ISO-8601 date the fact/span was actually observed "
+                    "(fact_add / reflection_job_add operations) -- used to "
+                    "resolve relative dates in the source text."
+                ),
+            },
+            "current_only": {
+                "type": "boolean",
+                "description": "Only return currently-valid facts (facts operation).",
+                "default": True,
+            },
+            # Reflection job parameters
+            "span_text": {
+                "type": "string",
+                "description": (
+                    "Verbatim conversation span to queue for reflection "
+                    "(reflection_job_add operation). Redacted before storage."
+                ),
+            },
+            "trigger": {
+                "type": "string",
+                "description": (
+                    "What caused this reflection job to be queued (e.g. "
+                    "'context:compaction', 'session:end') -- reflection_job_add "
+                    "operation."
+                ),
+            },
+            "job_ref": {
+                "type": "string",
+                "description": "Reflection job ref (reflection_job_done operation).",
+            },
+            "fact_refs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Fact refs produced while resolving a reflection job "
+                    "(reflection_job_done operation)."
+                ),
+            },
+            "noop": {
+                "type": "boolean",
+                "description": (
+                    "True if the job was closed without writing any facts "
+                    "(reflection_job_done operation)."
+                ),
+                "default": False,
+            },
+            "note": {
+                "type": "string",
+                "description": (
+                    "One-line reason, required when noop=true "
+                    "(reflection_job_done operation)."
+                ),
+            },
+            "state": {
+                "type": "string",
+                "default": "pending",
+                "description": "Reflection job state filter (reflection_jobs operation).",
             },
             # Knowledge graph parameters
             "entity": {
@@ -398,7 +527,13 @@ class MemoryTool(Tool):
             },
             "predicate": {
                 "type": "string",
-                "description": "KG fact predicate (for kg add/invalidate).",
+                "description": (
+                    "KG fact predicate (kg add/invalidate), or a "
+                    "single-valued fact predicate (fact_add operation, T2.7) "
+                    "-- e.g. 'package_manager'. Setting it auto-supersedes "
+                    "every other current fact with the same predicate in "
+                    "the same wing, newest wins, no LLM."
+                ),
             },
             "object": {
                 "type": "string",
@@ -527,6 +662,7 @@ class MemoryTool(Tool):
                         fusion=kwargs.get("fusion") or None,
                         since=kwargs.get("since") or None,
                         until=kwargs.get("until") or None,
+                        layers=kwargs.get("layers") or None,
                     )
                 except Exception as exc:
                     return _client_error_to_tool_result(exc)
@@ -827,6 +963,82 @@ class MemoryTool(Tool):
                     pass
 
                 return ToolResult(output=json.dumps(garden_result, indent=2))
+
+            elif operation == "fact_add":
+                try:
+                    result = _call_client(
+                        "fact_add",
+                        text=kwargs.get("text", ""),
+                        fact_type=kwargs.get("fact_type", ""),
+                        source_refs=kwargs.get("source_refs") or [],
+                        wing=kwargs.get("wing", "general"),
+                        room=kwargs.get("room"),
+                        valid_at=kwargs.get("valid_at"),
+                        invalid_at=kwargs.get("invalid_at"),
+                        predicate=kwargs.get("predicate"),
+                        supersedes=kwargs.get("supersedes"),
+                        conflicts_with=kwargs.get("conflicts_with"),
+                        observed_at=kwargs.get("observed_at"),
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(result)
+
+            elif operation == "facts":
+                try:
+                    result = _call_client(
+                        "facts",
+                        query=kwargs.get("query"),
+                        wing=kwargs.get("wing") or None,
+                        room=kwargs.get("room") or None,
+                        current_only=bool(kwargs.get("current_only", True)),
+                        k=int(kwargs.get("limit", 10)),
+                        since=kwargs.get("since") or None,
+                        until=kwargs.get("until") or None,
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(result, wrap_key="facts")
+
+            elif operation == "reflection_job_add":
+                try:
+                    result = _call_client(
+                        "reflection_job_add",
+                        span_text=kwargs.get("span_text", ""),
+                        session_id=kwargs.get("session_id"),
+                        trigger=kwargs.get("trigger", ""),
+                        wing=kwargs.get("wing", "general"),
+                        room=kwargs.get("room"),
+                        observed_at=kwargs.get("observed_at"),
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(result)
+
+            elif operation == "reflection_jobs":
+                try:
+                    result = _call_client(
+                        "reflection_jobs",
+                        state=kwargs.get("state", "pending"),
+                        wing=kwargs.get("wing") or None,
+                        limit=int(kwargs.get("limit", 10)),
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(result, wrap_key="jobs")
+
+            elif operation == "reflection_job_done":
+                try:
+                    result = _call_client(
+                        "reflection_job_done",
+                        job_ref=kwargs.get("job_ref", ""),
+                        fact_refs=kwargs.get("fact_refs") or [],
+                        noop=bool(kwargs.get("noop", False)),
+                        note=kwargs.get("note"),
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(result)
 
             else:
                 return ToolResult(

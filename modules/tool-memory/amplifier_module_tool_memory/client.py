@@ -28,6 +28,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -97,12 +98,15 @@ class MemoryClient(GatewayClient):
         fusion: str | None = None,
         since: str | None = None,
         until: str | None = None,
+        layers: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """``{results: [...], degraded: null|"lexical_only"}`` (\u00a75.4).
 
         ``fusion`` (T1.2): ``"rrf"`` | ``"legacy"`` | ``None`` (server
         default). ``since``/``until`` (T1.3): ISO-8601 bounds on each
-        drawer's earliest ``filed_at``.
+        drawer's earliest ``filed_at``. ``layers`` (T2.2): which of
+        ``"fact"``/``"drawer"`` are eligible hits; ``None`` -> server
+        default (both).
         """
         return self._call(
             "search",
@@ -114,6 +118,119 @@ class MemoryClient(GatewayClient):
                 "fusion": fusion,
                 "since": since,
                 "until": until,
+                "layers": list(layers) if layers is not None else None,
+            },
+        )
+
+    def fact_add(
+        self,
+        *,
+        text: str,
+        fact_type: str,
+        source_refs: Sequence[str],
+        wing: str,
+        room: str | None = None,
+        valid_at: str | None = None,
+        invalid_at: str | None = None,
+        predicate: str | None = None,
+        supersedes: str | None = None,
+        conflicts_with: str | None = None,
+        observed_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Add/reinforce one L2 fact (T2.1). See
+        :meth:`~amplifier_module_tool_memory.store.NativeMemoryStore.fact_add`."""
+        return self._call(
+            "fact_add",
+            {
+                "text": text,
+                "fact_type": fact_type,
+                "source_refs": list(source_refs),
+                "wing": wing,
+                "room": room,
+                "valid_at": valid_at,
+                "invalid_at": invalid_at,
+                "predicate": predicate,
+                "supersedes": supersedes,
+                "conflicts_with": conflicts_with,
+                "observed_at": observed_at,
+            },
+        )
+
+    def facts(
+        self,
+        *,
+        query: str | None = None,
+        wing: str | None = None,
+        room: str | None = None,
+        current_only: bool = True,
+        k: int = 10,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List/query L2 facts (T2.1)."""
+        out = self._call(
+            "facts",
+            {
+                "query": query,
+                "wing": wing,
+                "room": room,
+                "current_only": current_only,
+                "k": k,
+                "since": since,
+                "until": until,
+            },
+        )
+        return list(out["facts"])
+
+    def reflection_job_add(
+        self,
+        *,
+        span_text: str,
+        trigger: str,
+        wing: str,
+        session_id: str | None = None,
+        room: str | None = None,
+        observed_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Queue one durable reflection job (T2.5/D10)."""
+        return self._call(
+            "reflection_job_add",
+            {
+                "span_text": span_text,
+                "session_id": session_id,
+                "trigger": trigger,
+                "wing": wing,
+                "room": room,
+                "observed_at": observed_at,
+            },
+        )
+
+    def reflection_jobs(
+        self, *, state: str = "pending", wing: str | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Queued reflection jobs in *state* (oldest first)."""
+        out = self._call(
+            "reflection_jobs", {"state": state, "wing": wing, "limit": limit}
+        )
+        return list(out["jobs"])
+
+    def reflection_job_done(
+        self,
+        *,
+        job_ref: str,
+        fact_refs: Sequence[str] = (),
+        noop: bool = False,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Close a pending reflection job. Raises on the daemon side if the
+        job is not currently pending."""
+        return self._call(
+            "reflection_job_done",
+            {
+                "job_ref": job_ref,
+                "fact_refs": list(fact_refs),
+                "noop": noop,
+                "note": note,
             },
         )
 

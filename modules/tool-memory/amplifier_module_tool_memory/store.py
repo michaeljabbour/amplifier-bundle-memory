@@ -24,6 +24,7 @@ primary + shadow -- there is no shadow anymore, the daemon IS the store).
 
 from __future__ import annotations
 
+import json
 import logging
 import struct
 from collections.abc import Sequence
@@ -37,6 +38,27 @@ from amplifier_module_tool_memory.scripts.mutation import (
 )
 
 _logger = logging.getLogger(__name__)
+
+#: P2 (T2.1/T2.7, D12) -- reuse amplifier-data's convergent-integrity edge
+#: names/conventions for an unresolved ``conflicts_with`` contradiction when
+#: the library is new enough to export them; otherwise fall back to our own
+#: ``@memory:`` namespace. Either way a tension is an ordinary cell with
+#: reserved-namespace edges (never a gate on the write) -- see
+#: amplifier_data.integrity's module docstring for the pattern this mirrors.
+try:
+    from amplifier_data.integrity import (
+        CONFLICTS_WITH as _TENSION_CONFLICTS_WITH,
+    )
+    from amplifier_data.integrity import (
+        IN_TENSION as _TENSION_IN_TENSION,
+    )
+    from amplifier_data.integrity import (
+        TENSION as _TENSION_EDGE,
+    )
+except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
+    _TENSION_EDGE = "@memory:tension"
+    _TENSION_IN_TENSION = "@memory:in_tension"
+    _TENSION_CONFLICTS_WITH = "@memory:conflicts_with"
 
 #: T1.2 (D9) capability check, not a hard dependency: BM25Index lives
 #: upstream in amplifier-data (lenses/bm25.py). When it is not importable
@@ -62,6 +84,37 @@ _AT_COMMIT_PREDICATE = "at_commit"
 
 #: RRF constant (T1.2, D9): rrf = \u03a3_arms 1 / (_RRF_K + rank), rank 1-based.
 _RRF_K = 60
+
+#: P2 (T2.1) -- L2 fact model constants (design \u00a72 data model, \u00a74 T2.1;
+#: context/reflection-rubric.md's 15-80 word guidance is a distiller-facing
+#: *target*; 3-120 is the mechanism's hard gate).
+_FACT_TYPES = frozenset(
+    {"world", "experience", "preference", "procedure", "correction"}
+)
+_FACT_MIN_WORDS = 3
+_FACT_MAX_WORDS = 120
+
+#: Reserved ``@memory:`` edge/fact namespace (mirrors amplifier_data.integrity's
+#: ``@integrity:``/``@plan:`` reserved-namespace convention: user code must
+#: never mint these).
+_MEMORY_CURRENT = "@memory:current"
+_MEMORY_DERIVED_FROM = "@memory:derived_from"
+_MEMORY_SUPERSEDES = "@memory:supersedes"
+_MEMORY_PREDICATE = "@memory:predicate"
+_MEMORY_JOB_STATE = "@memory:job_state"
+_MEMORY_JOB_PRODUCED = "@memory:job_produced"
+
+#: Time/provenance facts on a fact cell (D8: consumer-supplied facts, mirrors
+#: the drawer predicates above).
+_RECORDED_AT_PREDICATE = "recorded_at"
+_EXPIRED_AT_PREDICATE = "expired_at"
+_OBSERVED_AT_PREDICATE = "observed_at"
+
+#: Content-addressed boolean marker cell -- always the SAME ref (idempotent
+#: ``write_cell``), so a later supersede can invalidate exactly the object
+#: cell an earlier ``fact_add`` asserted for ``@memory:current`` without
+#: having to look it up first.
+_TRUE_CELL_BYTES = b"true"
 
 #: T1.4 hot-path latency gate (design \u00a76 measurement bar): search p95 on a
 #: 5k-drawer synthetic store must stay under this budget. A module constant
@@ -859,8 +912,19 @@ class NativeMemoryStore:
         fusion: str | None = None,
         since: str | None = None,
         until: str | None = None,
+        layers: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Hybrid rank (§6, T1.2/D9 RRF fusion) or lexical-only (§6.2).
+
+        ``layers`` (T2.2, default ``("fact", "drawer")`` when omitted) picks
+        which cell kinds are eligible hits. Fact cells already share the same
+        BM25/vector candidate pool as drawers (both are scoped and indexed
+        identically) -- this only decides which resulting hits are kept,
+        relabels each with ``layer``, and (for a fact hit) replaces the raw
+        JSON payload's ``content`` with the fact's own ``text`` and adds
+        ``derived_from``. Non-current facts are always excluded. Internally
+        widens the candidate pool whenever a layer might be filtered out, so
+        filtering never starves the caller's requested result count.
 
         ``fusion`` selects the ranking strategy:
 
@@ -913,6 +977,17 @@ class NativeMemoryStore:
         setting the wire-level ``degraded`` flag based on whether it passed
         a real vector.
         """
+        layer_set = set(layers) if layers is not None else {"fact", "drawer"}
+        # Only widen the internal pool when a layer is actually excluded
+        # (facts and drawers share one candidate pool, so a restricted
+        # request could otherwise under-fill after filtering). The default
+        # (both layers) requests EXACTLY k, same as pre-P2 -- T1.4's p95
+        # budget is measured against this default path and must not pay
+        # for a widening it never needed (the internal RRF/legacy engines
+        # already widen their OWN sub-pools proportionally to whatever k
+        # they're given, so requesting a larger k here compounds).
+        pool_k = k if layer_set == {"fact", "drawer"} else max(k * 3, 50)
+
         s = self.store
         scope_ref = None
         if room is not None:
@@ -945,9 +1020,9 @@ class NativeMemoryStore:
             eligible = self._temporal_eligible(universe, fold, since, until)
 
         if use_rrf:
-            return self._search_rrf(
+            raw = self._search_rrf(
                 query_vector,
-                k,
+                pool_k,
                 wing=wing,
                 room=room,
                 lexical_query=lexical_query,
@@ -955,16 +1030,38 @@ class NativeMemoryStore:
                 fold=fold,
                 eligible=eligible,
             )
-        return self._search_legacy(
-            query_vector,
-            k,
-            wing=wing,
-            room=room,
-            lexical_query=lexical_query,
-            scope_ref=scope_ref,
-            fold=fold,
-            eligible=eligible,
-        )
+        else:
+            raw = self._search_legacy(
+                query_vector,
+                pool_k,
+                wing=wing,
+                room=room,
+                lexical_query=lexical_query,
+                scope_ref=scope_ref,
+                fold=fold,
+                eligible=eligible,
+            )
+
+        filtered: list[dict[str, Any]] = []
+        for hit in raw:
+            kind = self._classify_ref(hit["ref"], fold)
+            layer = "fact" if kind == "fact" else "drawer"
+            if layer not in layer_set:
+                continue
+            if layer == "fact":
+                if not self._is_current(hit["ref"]):
+                    continue
+                try:
+                    body = json.loads(hit["content"])
+                except (ValueError, TypeError):
+                    body = {}
+                hit = {**hit, "content": body.get("text", "")}
+                hit["derived_from"] = self._derived_from_refs(hit["ref"])
+            hit["layer"] = layer
+            filtered.append(hit)
+            if len(filtered) >= max(0, k):
+                break
+        return filtered
 
     def _temporal_eligible(
         self,
@@ -1342,3 +1439,610 @@ class NativeMemoryStore:
                     wings.add(label[len("wing:") :])
         kg = self.kg_stats()
         return {"drawers": drawers, "wings": sorted(wings), "kg_facts": kg["facts"]}
+
+    # ------------------------------------------------------------------
+    # P2 -- L2 facts (T2.1/T2.2/T2.7, D12) and the reflection job queue
+    # (D10). See docs/plans/2026-09-27-memory-layers-design.md \u00a72/\u00a74 and
+    # context/reflection-rubric.md for the policy this mechanism serves.
+    # ------------------------------------------------------------------
+
+    def _classify_ref(self, ref: Any, fold: _SearchFold | None = None) -> str | None:
+        """``"drawer"`` | ``"fact"`` | ``"reflection_job"`` | ``None``.
+
+        ``None`` means *ref* carries no scope edge at all (not a known
+        drawer/fact/job -- e.g. a scope cell or an anchor cell). A scoped
+        cell whose payload does not decode as one of our ``{"kind": ...}``
+        envelopes is a plain verbatim drawer (the common case, and the only
+        shape that existed before P2).
+        """
+        wing_name, room_name = self._resolve_wing_room(ref, fold)
+        if wing_name is None and room_name is None:
+            return None
+        text = self._payload_text(ref, fold)
+        try:
+            obj = json.loads(text)
+        except (ValueError, TypeError):
+            return "drawer"
+        if isinstance(obj, dict) and obj.get("kind") in ("fact", "reflection_job"):
+            return str(obj["kind"])
+        return "drawer"
+
+    def _is_current(self, ref: Any) -> bool:
+        """Whether *ref* carries a currently-valid ``@memory:current`` fact."""
+        s = self.store
+        res = s.query_facts(subject=ref, predicate=_MEMORY_CURRENT)  # type: ignore[attr-defined]
+        return bool(res.output)
+
+    def _derived_from_refs(self, ref: Any) -> list[Any]:
+        s = self.store
+        res = s.query_facts(subject=ref, predicate=_MEMORY_DERIVED_FROM)  # type: ignore[attr-defined]
+        return [f.object for f in res.output]
+
+    def _superseded_by(self, ref: Any) -> list[Any]:
+        """Facts whose ``@memory:supersedes`` currently points AT *ref*."""
+        s = self.store
+        res = s.query_facts(predicate=_MEMORY_SUPERSEDES)  # type: ignore[attr-defined]
+        return [f.subject for f in res.output if f.object == ref]
+
+    def _current_facts_with_predicate(
+        self, predicate: str, *, wing: str, exclude: Any
+    ) -> list[Any]:
+        """T2.7: currently-valid facts in *wing* asserting the same
+        single-valued *predicate*, excluding *exclude* (the new fact being
+        written). Newest-wins auto-supersede is driven entirely off this --
+        no LLM, no critic, deterministic."""
+        s = self.store
+        res = s.query_facts(predicate=_MEMORY_PREDICATE)  # type: ignore[attr-defined]
+        out: list[Any] = []
+        for f in res.output:
+            if f.subject == exclude:
+                continue
+            if self._payload_text(f.object, None) != predicate:
+                continue
+            if not self._is_current(f.subject):
+                continue
+            wing_name, _room_name = self._resolve_wing_room(f.subject)
+            if wing_name != wing:
+                continue
+            out.append(f.subject)
+        return out
+
+    @staticmethod
+    def _fact_payload(
+        *,
+        text: str,
+        fact_type: str,
+        valid_at: str | None,
+        invalid_at: str | None,
+        predicate: str | None,
+    ) -> bytes:
+        """Canonical, content-addressed fact-cell payload (design \u00a72 data
+        model): identical normalized text/type/predicate (and valid/invalid
+        window) always yields the SAME cell ref."""
+        body = {
+            "kind": "fact",
+            "text": text,
+            "fact_type": fact_type,
+            "valid_at": valid_at,
+            "invalid_at": invalid_at,
+            "predicate": predicate,
+        }
+        return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def fact_add(
+        self,
+        *,
+        text: str,
+        fact_type: str,
+        source_refs: Sequence[Any],
+        wing: str,
+        room: str | None = None,
+        valid_at: str | None = None,
+        invalid_at: str | None = None,
+        predicate: str | None = None,
+        supersedes: Any | None = None,
+        conflicts_with: Any | None = None,
+        observed_at: str | None = None,
+        embedding: Sequence[float] | None = None,
+    ) -> dict[str, Any]:
+        """Add or reinforce one durable L2 fact (T2.1, D12).
+
+        Validates ``fact_type`` (one of ``_FACT_TYPES``), word count
+        (``_FACT_MIN_WORDS``-``_FACT_MAX_WORDS``), redacts *text* and REJECTS
+        it if redaction changed anything (facts must never carry secrets),
+        and requires every ``source_refs`` entry to be an existing drawer
+        (provenance is mandatory -- D12).
+
+        Content-addressed dedup: if the fact cell this call would produce
+        already exists and is current, this call only adds any NEW
+        ``derived_from`` edges and returns ``deduped=True`` -- no duplicate
+        ``recorded_at``/``@memory:current`` assertions.
+
+        ``supersedes`` explicitly retires one prior fact; ``predicate``
+        additionally retires (T2.7) every OTHER currently-valid fact in the
+        same *wing* asserting the same predicate (newest-wins, no LLM).
+        Superseding never deletes: the old fact's ``@memory:current`` is
+        invalidated and an ``expired_at`` fact is asserted on it.
+
+        ``conflicts_with`` records an unresolved contradiction as a tension
+        cell (reusing amplifier_data.integrity's edge names when
+        importable) -- both facts stay current; a person resolves it later.
+
+        All writes for one call land in ONE atomic ``WriteBatch`` when the
+        backend supports it (:meth:`_supports_atomic_update`), else
+        sequentially (mirrors :meth:`file`).
+
+        Returns ``{"ref", "deduped", "proof_count", "superseded", "tension"}``.
+        """
+        if fact_type not in _FACT_TYPES:
+            raise ValueError(
+                f"fact_type must be one of {sorted(_FACT_TYPES)}, got {fact_type!r}"
+            )
+        normalized_text = " ".join(text.split())
+        word_count = len(normalized_text.split()) if normalized_text else 0
+        if not (_FACT_MIN_WORDS <= word_count <= _FACT_MAX_WORDS):
+            raise ValueError(
+                f"fact text must be {_FACT_MIN_WORDS}-{_FACT_MAX_WORDS} words "
+                f"(got {word_count})"
+            )
+
+        from .redact import redact as _redact
+
+        _scrubbed, redaction_counts = _redact(normalized_text)
+        if redaction_counts:
+            raise ValueError(
+                "fact text appears to contain secret-shaped content and was "
+                f"rejected (categories: {sorted(redaction_counts)})"
+            )
+        if not source_refs:
+            raise ValueError(
+                "fact_add requires at least one source_ref (provenance is "
+                "mandatory, D12)"
+            )
+        source_list = list(source_refs)
+        for src in source_list:
+            if self._classify_ref(src) != "drawer":
+                raise ValueError(
+                    f"source_ref {src!r} is not a known drawer; provenance is mandatory"
+                )
+        if supersedes is not None and self._classify_ref(supersedes) != "fact":
+            raise ValueError(f"supersedes={supersedes!r} is not an existing fact")
+        if conflicts_with is not None and self._classify_ref(conflicts_with) != "fact":
+            raise ValueError(
+                f"conflicts_with={conflicts_with!r} is not an existing fact"
+            )
+
+        s = self.store
+        payload = self._fact_payload(
+            text=normalized_text,
+            fact_type=fact_type,
+            valid_at=valid_at,
+            invalid_at=invalid_at,
+            predicate=predicate,
+        )
+        probe_ref = s.write_cell(payload)  # type: ignore[attr-defined] -- idempotent probe
+
+        if self._is_current(probe_ref):
+            existing = set(self._derived_from_refs(probe_ref))
+            new_sources = [r for r in source_list if r not in existing]
+            for src in new_sources:
+                s.assert_fact(probe_ref, _MEMORY_DERIVED_FROM, src)  # type: ignore[attr-defined]
+            return {
+                "ref": probe_ref,
+                "deduped": True,
+                "proof_count": len(existing | set(new_sources)),
+                "superseded": [],
+                "tension": None,
+            }
+
+        recorded_at = datetime.now(UTC).isoformat(timespec="seconds")
+
+        to_supersede: list[Any] = []
+        if supersedes is not None:
+            to_supersede.append(supersedes)
+        if predicate is not None:
+            for auto in self._current_facts_with_predicate(
+                predicate, wing=wing, exclude=probe_ref
+            ):
+                if auto not in to_supersede:
+                    to_supersede.append(auto)
+
+        tension_payload_bytes: bytes | None = None
+        if conflicts_with is not None:
+            parties = sorted([str(probe_ref), str(conflicts_with)])
+            tension_payload_bytes = json.dumps(
+                {"kind": "memory_conflict", "parties": parties},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+
+        atomic = self._supports_atomic_update()
+        tension_cell: Any | None = None
+        if atomic:
+            from amplifier_data.lenses.temporal import INVALIDATE_PREFIX
+
+            b = s.write_batch()  # type: ignore[attr-defined]
+            cell_ref = b.write_cell(payload)
+            b.scope(cell_ref, b.write_cell(f"wing:{wing}".encode()))
+            if room is not None:
+                b.scope(cell_ref, b.write_cell(f"room:{room}".encode()))
+            for src in source_list:
+                b.assert_fact(cell_ref, _MEMORY_DERIVED_FROM, src)
+            b.assert_fact(
+                cell_ref, _RECORDED_AT_PREDICATE, b.write_cell(recorded_at.encode())
+            )
+            current_marker = b.write_cell(_TRUE_CELL_BYTES)
+            b.assert_fact(cell_ref, _MEMORY_CURRENT, current_marker)
+            if predicate is not None:
+                b.assert_fact(
+                    cell_ref, _MEMORY_PREDICATE, b.write_cell(predicate.encode())
+                )
+            if observed_at is not None:
+                b.assert_fact(
+                    cell_ref,
+                    _OBSERVED_AT_PREDICATE,
+                    b.write_cell(observed_at.encode()),
+                )
+            if embedding is not None:
+                from amplifier_data.lenses.vector import EMBEDDING_OF
+
+                vec = list(embedding)
+                emb_ref = b.write_cell(struct.pack(f"<{len(vec)}f", *vec))
+                b.relate(emb_ref, cell_ref, EMBEDDING_OF)
+            for old_ref in to_supersede:
+                b.assert_fact(cell_ref, _MEMORY_SUPERSEDES, old_ref)
+                b.relate(old_ref, current_marker, INVALIDATE_PREFIX + _MEMORY_CURRENT)
+                b.assert_fact(
+                    old_ref,
+                    _EXPIRED_AT_PREDICATE,
+                    b.write_cell(recorded_at.encode()),
+                )
+            if tension_payload_bytes is not None:
+                tension_cell = b.write_cell(tension_payload_bytes)
+                for party in (cell_ref, conflicts_with):
+                    b.assert_fact(tension_cell, _TENSION_EDGE, party)
+                    b.assert_fact(party, _TENSION_IN_TENSION, tension_cell)
+                b.assert_fact(cell_ref, _TENSION_CONFLICTS_WITH, conflicts_with)
+                b.assert_fact(conflicts_with, _TENSION_CONFLICTS_WITH, cell_ref)
+            commit_result = b.commit()
+            fact_ref = _resolve_batch_ref(commit_result, cell_ref)
+            if tension_cell is not None:
+                tension_cell = _resolve_batch_ref(commit_result, tension_cell)
+        else:
+            cell_ref = s.write_cell(payload)  # type: ignore[attr-defined]
+            s.scope(cell_ref, s.write_cell(f"wing:{wing}".encode()))  # type: ignore[attr-defined]
+            if room is not None:
+                s.scope(cell_ref, s.write_cell(f"room:{room}".encode()))  # type: ignore[attr-defined]
+            for src in source_list:
+                s.assert_fact(cell_ref, _MEMORY_DERIVED_FROM, src)  # type: ignore[attr-defined]
+            s.assert_fact(  # type: ignore[attr-defined]
+                cell_ref, _RECORDED_AT_PREDICATE, s.write_cell(recorded_at.encode())
+            )
+            current_marker = s.write_cell(_TRUE_CELL_BYTES)  # type: ignore[attr-defined]
+            s.assert_fact(cell_ref, _MEMORY_CURRENT, current_marker)  # type: ignore[attr-defined]
+            if predicate is not None:
+                s.assert_fact(  # type: ignore[attr-defined]
+                    cell_ref, _MEMORY_PREDICATE, s.write_cell(predicate.encode())
+                )
+            if observed_at is not None:
+                s.assert_fact(  # type: ignore[attr-defined]
+                    cell_ref,
+                    _OBSERVED_AT_PREDICATE,
+                    s.write_cell(observed_at.encode()),
+                )
+            if embedding is not None:
+                s.add_embedding(cell_ref, list(embedding))  # type: ignore[attr-defined]
+            for old_ref in to_supersede:
+                s.assert_fact(cell_ref, _MEMORY_SUPERSEDES, old_ref)  # type: ignore[attr-defined]
+                s.invalidate_fact(old_ref, _MEMORY_CURRENT, current_marker)  # type: ignore[attr-defined]
+                s.assert_fact(  # type: ignore[attr-defined]
+                    old_ref,
+                    _EXPIRED_AT_PREDICATE,
+                    s.write_cell(recorded_at.encode()),
+                )
+            if tension_payload_bytes is not None:
+                tension_cell = s.write_cell(tension_payload_bytes)  # type: ignore[attr-defined]
+                for party in (cell_ref, conflicts_with):
+                    s.assert_fact(tension_cell, _TENSION_EDGE, party)  # type: ignore[attr-defined]
+                    s.assert_fact(party, _TENSION_IN_TENSION, tension_cell)  # type: ignore[attr-defined]
+                s.assert_fact(cell_ref, _TENSION_CONFLICTS_WITH, conflicts_with)  # type: ignore[attr-defined]
+                s.assert_fact(conflicts_with, _TENSION_CONFLICTS_WITH, cell_ref)  # type: ignore[attr-defined]
+            fact_ref = cell_ref
+
+        return {
+            "ref": fact_ref,
+            "deduped": False,
+            "proof_count": len(set(source_list)),
+            "superseded": to_supersede,
+            "tension": tension_cell,
+        }
+
+    def facts(
+        self,
+        *,
+        query: str | None = None,
+        wing: str | None = None,
+        room: str | None = None,
+        current_only: bool = True,
+        k: int = 10,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List/query L2 facts (T2.1). Ranked by lexical match when *query*
+        is given, else newest ``recorded_at`` first. See :meth:`fact_add`."""
+        from amplifier_data.lenses._scope import fold_scope
+
+        s = self.store
+        scope_ref = None
+        if room is not None:
+            scope_ref = self._scope_ref("room", room)
+        elif wing is not None:
+            scope_ref = self._scope_ref("wing", wing)
+        fold = self._fold_snapshot()
+
+        scope_index = fold_scope(fold if fold is not None else s.kernel)  # type: ignore[attr-defined]
+        universe = (
+            set(scope_index.cells_in_scope(scope_ref))
+            if scope_ref is not None
+            else set(scope_index.membership.keys())
+        )
+        candidates = [
+            ref for ref in universe if self._classify_ref(ref, fold) == "fact"
+        ]
+
+        if since is not None or until is not None:
+            eligible = self._temporal_eligible(set(candidates), fold, since, until)
+            candidates = [r for r in candidates if r in eligible]
+
+        rows: list[dict[str, Any]] = []
+        for ref in candidates:
+            row = self._fact_row(ref, fold)
+            if current_only and not row["current"]:
+                continue
+            rows.append(row)
+
+        if query:
+            from .embedder import lexical_score
+
+            rows.sort(key=lambda r: lexical_score(query, r["text"]), reverse=True)
+        else:
+            rows.sort(key=lambda r: r["recorded_at"] or "", reverse=True)
+
+        return rows[: max(0, k)]
+
+    def _fact_row(self, ref: Any, fold: _SearchFold | None) -> dict[str, Any]:
+        text_raw = self._payload_text(ref, fold)
+        try:
+            body = json.loads(text_raw)
+        except (ValueError, TypeError):
+            body = {}
+        return {
+            "ref": ref,
+            "text": body.get("text", ""),
+            "fact_type": body.get("fact_type"),
+            "predicate": body.get("predicate"),
+            "valid_at": body.get("valid_at"),
+            "invalid_at": body.get("invalid_at"),
+            "proof_count": len(self._derived_from_refs(ref)),
+            "derived_from": self._derived_from_refs(ref),
+            "recorded_at": self._first_fact_value(ref, _RECORDED_AT_PREDICATE, fold),
+            "current": self._is_current(ref),
+            "superseded_by": self._superseded_by(ref),
+        }
+
+    # ------------------------------------------------------------------
+    # P2 -- durable reflection job queue (T2.5/D10)
+    # ------------------------------------------------------------------
+
+    def _job_state(self, job_ref: Any) -> str | None:
+        return self._first_fact_value(job_ref, _MEMORY_JOB_STATE)
+
+    def reflection_job_add(
+        self,
+        *,
+        span_text: str,
+        session_id: str | None,
+        trigger: str,
+        wing: str,
+        room: str | None = None,
+        observed_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Queue one durable reflection job (T2.5/D10): redact *span_text*,
+        file it as a conversation drawer, and create a pending job cell
+        pointing at it. Idempotent: the same span/session/trigger always
+        content-addresses to the SAME job ref, and re-adding an existing job
+        leaves its state untouched (no duplicate ``pending`` assertion).
+
+        Returns ``{"job_ref", "span_ref", "state", "redactions"}``.
+        """
+        from .redact import redact as _redact
+
+        redacted_text, redaction_counts = _redact(span_text)
+        s = self.store
+        room_resolved = room if room is not None else "conversation"
+        filed_at = datetime.now(UTC).isoformat(timespec="seconds")
+        atomic = self._supports_atomic_update()
+
+        if atomic:
+            b = s.write_batch()  # type: ignore[attr-defined]
+            span_ref = b.write_cell(redacted_text.encode("utf-8"))
+            b.scope(span_ref, b.write_cell(f"wing:{wing}".encode()))
+            b.scope(span_ref, b.write_cell(f"room:{room_resolved}".encode()))
+            b.assert_fact(span_ref, "has_source", b.write_cell(b"reflection"))
+            b.assert_fact(span_ref, "has_category", b.write_cell(b"conversation"))
+            b.assert_fact(
+                span_ref, _FILED_AT_PREDICATE, b.write_cell(filed_at.encode())
+            )
+            if session_id is not None:
+                b.assert_fact(
+                    span_ref, _IN_SESSION_PREDICATE, b.write_cell(session_id.encode())
+                )
+            commit_result = b.commit()
+            span_ref = _resolve_batch_ref(commit_result, span_ref)
+        else:
+            span_ref = s.write_cell(redacted_text.encode("utf-8"))  # type: ignore[attr-defined]
+            s.scope(span_ref, s.write_cell(f"wing:{wing}".encode()))  # type: ignore[attr-defined]
+            s.scope(span_ref, s.write_cell(f"room:{room_resolved}".encode()))  # type: ignore[attr-defined]
+            s.assert_fact(span_ref, "has_source", s.write_cell(b"reflection"))  # type: ignore[attr-defined]
+            s.assert_fact(span_ref, "has_category", s.write_cell(b"conversation"))  # type: ignore[attr-defined]
+            s.assert_fact(  # type: ignore[attr-defined]
+                span_ref, _FILED_AT_PREDICATE, s.write_cell(filed_at.encode())
+            )
+            if session_id is not None:
+                s.assert_fact(  # type: ignore[attr-defined]
+                    span_ref,
+                    _IN_SESSION_PREDICATE,
+                    s.write_cell(session_id.encode()),
+                )
+
+        job_payload = json.dumps(
+            {
+                "kind": "reflection_job",
+                "span": span_ref,
+                "session": session_id,
+                "trigger": trigger,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        job_ref = s.write_cell(job_payload)  # type: ignore[attr-defined] -- idempotent probe
+
+        existing_state = self._job_state(job_ref)
+        if existing_state is not None:
+            return {
+                "job_ref": job_ref,
+                "span_ref": span_ref,
+                "state": existing_state,
+                "redactions": redaction_counts,
+            }
+
+        if atomic:
+            b = s.write_batch()  # type: ignore[attr-defined]
+            jref = b.write_cell(job_payload)
+            b.scope(jref, b.write_cell(f"wing:{wing}".encode()))
+            b.assert_fact(jref, _MEMORY_JOB_STATE, b.write_cell(b"pending"))
+            b.assert_fact(jref, _RECORDED_AT_PREDICATE, b.write_cell(filed_at.encode()))
+            if observed_at is not None:
+                b.assert_fact(
+                    jref, _OBSERVED_AT_PREDICATE, b.write_cell(observed_at.encode())
+                )
+            commit_result = b.commit()
+            job_ref = _resolve_batch_ref(commit_result, jref)
+        else:
+            s.scope(job_ref, s.write_cell(f"wing:{wing}".encode()))  # type: ignore[attr-defined]
+            s.assert_fact(job_ref, _MEMORY_JOB_STATE, s.write_cell(b"pending"))  # type: ignore[attr-defined]
+            s.assert_fact(  # type: ignore[attr-defined]
+                job_ref, _RECORDED_AT_PREDICATE, s.write_cell(filed_at.encode())
+            )
+            if observed_at is not None:
+                s.assert_fact(  # type: ignore[attr-defined]
+                    job_ref,
+                    _OBSERVED_AT_PREDICATE,
+                    s.write_cell(observed_at.encode()),
+                )
+
+        return {
+            "job_ref": job_ref,
+            "span_ref": span_ref,
+            "state": "pending",
+            "redactions": redaction_counts,
+        }
+
+    def reflection_jobs(
+        self, *, state: str = "pending", wing: str | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Queued reflection jobs in *state* (oldest first). See
+        :meth:`reflection_job_add`/:meth:`reflection_job_done`."""
+        s = self.store
+        res = s.query_facts(predicate=_MEMORY_JOB_STATE)  # type: ignore[attr-defined]
+        rows: list[dict[str, Any]] = []
+        for f in res.output:
+            job_ref = f.subject
+            if self._payload_text(f.object, None) != state:
+                continue
+            if wing is not None:
+                job_wing, _room = self._resolve_wing_room(job_ref)
+                if job_wing != wing:
+                    continue
+            try:
+                body = json.loads(self._payload_text(job_ref, None))
+            except (ValueError, TypeError):
+                body = {}
+            span_ref = body.get("span")
+            span_text = self._payload_text(span_ref, None) if span_ref else ""
+            span_wing, span_room = (
+                self._resolve_wing_room(span_ref) if span_ref else (None, None)
+            )
+            rows.append(
+                {
+                    "job_ref": job_ref,
+                    "span_ref": span_ref,
+                    "span_text": span_text,
+                    "session_id": body.get("session"),
+                    "trigger": body.get("trigger"),
+                    "wing": span_wing,
+                    "room": span_room,
+                    "observed_at": self._first_fact_value(
+                        job_ref, _OBSERVED_AT_PREDICATE
+                    ),
+                    "recorded_at": self._first_fact_value(
+                        job_ref, _RECORDED_AT_PREDICATE
+                    ),
+                }
+            )
+        rows.sort(key=lambda r: r["recorded_at"] or "")
+        return rows[: max(0, limit)]
+
+    def reflection_job_done(
+        self,
+        *,
+        job_ref: Any,
+        fact_refs: Sequence[Any] = (),
+        noop: bool = False,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Close a pending reflection job (T2.5). Raises :class:`ValueError`
+        if *job_ref* is not currently pending -- a job is closed exactly
+        once."""
+        current_state = self._job_state(job_ref)
+        if current_state != "pending":
+            raise ValueError(
+                f"reflection job {job_ref!r} is not pending (state={current_state!r})"
+            )
+        s = self.store
+        pending_marker = s.write_cell(b"pending")  # type: ignore[attr-defined]
+        done_marker = s.write_cell(b"done")  # type: ignore[attr-defined]
+
+        if self._supports_atomic_update():
+            from amplifier_data.lenses.temporal import INVALIDATE_PREFIX
+
+            b = s.write_batch()  # type: ignore[attr-defined]
+            b.relate(job_ref, pending_marker, INVALIDATE_PREFIX + _MEMORY_JOB_STATE)
+            b.assert_fact(job_ref, _MEMORY_JOB_STATE, done_marker)
+            for fref in fact_refs:
+                b.assert_fact(job_ref, _MEMORY_JOB_PRODUCED, fref)
+            if note is not None:
+                b.assert_fact(
+                    job_ref,
+                    "noop_note" if noop else "note",
+                    b.write_cell(note.encode()),
+                )
+            b.commit()
+        else:
+            s.invalidate_fact(job_ref, _MEMORY_JOB_STATE, pending_marker)  # type: ignore[attr-defined]
+            s.assert_fact(job_ref, _MEMORY_JOB_STATE, done_marker)  # type: ignore[attr-defined]
+            for fref in fact_refs:
+                s.assert_fact(job_ref, _MEMORY_JOB_PRODUCED, fref)  # type: ignore[attr-defined]
+            if note is not None:
+                s.assert_fact(  # type: ignore[attr-defined]
+                    job_ref,
+                    "noop_note" if noop else "note",
+                    s.write_cell(note.encode()),
+                )
+
+        return {
+            "job_ref": job_ref,
+            "state": "done",
+            "fact_refs": list(fact_refs),
+            "noop": noop,
+        }
