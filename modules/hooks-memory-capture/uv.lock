@@ -11,7 +11,7 @@ resolution-markers = [
 [[package]]
 name = "amplifier-data"
 version = "0.2.0"
-source = { git = "https://github.com/michaeljabbour/amplifier-data?rev=3ef751b6fac7f6899824b78774b74809f09bcd81#3ef751b6fac7f6899824b78774b74809f09bcd81" }
+source = { git = "https://github.com/michaeljabbour/amplifier-data?rev=2ecdce3e5c81e30fdab139d7f5d73a070a63af76#2ecdce3e5c81e30fdab139d7f5d73a070a63af76" }
 
 [[package]]
 name = "amplifier-module-hooks-memory-capture"
@@ -28,7 +28,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "amplifier-data", git = "https://github.com/michaeljabbour/amplifier-data?rev=3ef751b6fac7f6899824b78774b74809f09bcd81" }]
+requires-dist = [{ name = "amplifier-data", git = "https://github.com/michaeljabbour/amplifier-data?rev=2ecdce3e5c81e30fdab139d7f5d73a070a63af76" }]
 
 [package.metadata.requires-dev]
 dev = [
