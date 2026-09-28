@@ -104,11 +104,26 @@ _MEMORY_PREDICATE = "@memory:predicate"
 _MEMORY_JOB_STATE = "@memory:job_state"
 _MEMORY_JOB_PRODUCED = "@memory:job_produced"
 
+#: P3 (T3.1/T3.3, D19 -- index is mechanism-first) reserved ``@memory:``
+#: predicates. ``_MEMORY_CURRENT_INDEX`` lives on the ROOM SCOPE CELL
+#: (subject) pointing at the currently-curated index cell for that room --
+#: mirrors the has_importance UPDATE pattern (invalidate-old + assert-new).
+#: ``_MEMORY_CURRENT_ANSWER`` is the same pattern on a standing QUESTION
+#: cell, pointing at its current answer cell. ``_MEMORY_CITES`` is the
+#: navigation-to-evidence edge (index cell / standing-answer cell -> fact
+#: refs) -- never a provenance edge (that's ``_MEMORY_DERIVED_FROM``).
+_MEMORY_CITES = "@memory:cites"
+_MEMORY_CURRENT_INDEX = "@memory:current_index"
+_MEMORY_CURRENT_ANSWER = "@memory:current_answer"
+
 #: Time/provenance facts on a fact cell (D8: consumer-supplied facts, mirrors
 #: the drawer predicates above).
 _RECORDED_AT_PREDICATE = "recorded_at"
 _EXPIRED_AT_PREDICATE = "expired_at"
 _OBSERVED_AT_PREDICATE = "observed_at"
+_BUILT_AT_PREDICATE = "built_at"
+_BUILT_FROM_COUNT_PREDICATE = "built_from_count"
+_ANSWERED_AT_PREDICATE = "answered_at"
 
 #: Content-addressed boolean marker cell -- always the SAME ref (idempotent
 #: ``write_cell``), so a later supersede can invalidate exactly the object
@@ -121,6 +136,15 @@ _TRUE_CELL_BYTES = b"true"
 #: (not a magic number in the test) so the budget is visible and tunable in
 #: one place.
 SEARCH_P95_BUDGET_MS = 300
+
+#: P3 (T3.1, design \u00a72 data model) -- L3 index length caps and default
+#: staleness gate. A curated index cell is served as-is (``source:"curated"``)
+#: while the room has accumulated at most this many facts/drawers since it
+#: was built; beyond that, reads fall back to a computed-on-read derived
+#: index (mechanism-first, D19) until a curator overwrites it.
+_INDEX_ABSTRACT_MAX_CHARS = 256
+_INDEX_OVERVIEW_MAX_CHARS = 4000
+_INDEX_STALE_AFTER_DEFAULT = 10
 
 
 def _resolve_batch_ref(commit_result: Any, ref: Any) -> Any:
@@ -1463,12 +1487,30 @@ class NativeMemoryStore:
             obj = json.loads(text)
         except (ValueError, TypeError):
             return "drawer"
-        if isinstance(obj, dict) and obj.get("kind") in ("fact", "reflection_job"):
+        if isinstance(obj, dict) and obj.get("kind") in (
+            "fact",
+            "reflection_job",
+            "index",
+            "standing_question",
+            "standing_answer",
+        ):
             return str(obj["kind"])
         return "drawer"
 
-    def _is_current(self, ref: Any) -> bool:
-        """Whether *ref* carries a currently-valid ``@memory:current`` fact."""
+    def _is_current(self, ref: Any, fold: _SearchFold | None = None) -> bool:
+        """Whether *ref* carries a currently-valid ``@memory:current`` fact.
+
+        Accepts an optional one-fold snapshot (P3, T3.1/T3.3) so callers
+        already holding a :class:`_SearchFold` (:meth:`index`/:meth:`standing`)
+        never trigger a second ``kernel.all_events()`` materialization.
+        """
+        if fold is not None:
+            from amplifier_data.lenses.temporal import TemporalLens
+
+            res = TemporalLens().query(
+                kernel=fold, subject=ref, predicate=_MEMORY_CURRENT
+            )
+            return bool(res.output)
         s = self.store
         res = s.query_facts(subject=ref, predicate=_MEMORY_CURRENT)  # type: ignore[attr-defined]
         return bool(res.output)
@@ -1476,6 +1518,25 @@ class NativeMemoryStore:
     def _derived_from_refs(self, ref: Any) -> list[Any]:
         s = self.store
         res = s.query_facts(subject=ref, predicate=_MEMORY_DERIVED_FROM)  # type: ignore[attr-defined]
+        return [f.object for f in res.output]
+
+    def _current_fact_refs(
+        self, ref: Any, predicate: str, fold: _SearchFold | None = None
+    ) -> list[Any]:
+        """Object refs of every currently-valid *predicate* fact on *ref*.
+
+        Generalizes :meth:`_derived_from_refs` for any reserved ``@memory:``
+        predicate whose object is itself a meaningful cell ref (not a plain
+        decoded value) -- used by the P3 index/standing machinery for
+        ``@memory:current_index``, ``@memory:current_answer`` and
+        ``@memory:cites``.
+        """
+        if fold is not None:
+            from amplifier_data.lenses.temporal import TemporalLens
+
+            res = TemporalLens().query(kernel=fold, subject=ref, predicate=predicate)
+        else:
+            res = self.store.query_facts(subject=ref, predicate=predicate)  # type: ignore[attr-defined]
         return [f.object for f in res.output]
 
     def _superseded_by(self, ref: Any) -> list[Any]:
@@ -2046,3 +2107,419 @@ class NativeMemoryStore:
             "fact_refs": list(fact_refs),
             "noop": noop,
         }
+
+    # ------------------------------------------------------------------
+    # P3 -- L3 index (T3.1) and standing questions (T3.3), D19.
+    #
+    # D19 (index is mechanism-first): an LLM-free deterministic index is
+    # ALWAYS available (:meth:`index` computes a derived view on read, no
+    # write, when no curated cell exists or it has drifted too far); the
+    # curator agent MAY overwrite it with better prose via :meth:`index_set`.
+    # L3 text is navigation only -- never cited as evidence (see
+    # project-context/GLOSSARY.md's "Index / abstract" entry).
+    # ------------------------------------------------------------------
+
+    def _room_members(
+        self, room: str, fold: _SearchFold | None
+    ) -> tuple[list[Any], list[Any]]:
+        """``(current_fact_refs, drawer_refs)`` scoped to *room*, in ONE pass
+        over the room's scope membership -- shared by :meth:`index` (via
+        :meth:`_index_for_room`) and :meth:`index_set` (freshness count)."""
+        from amplifier_data.lenses._scope import fold_scope
+
+        room_scope_ref = self._scope_ref("room", room)
+        scope_index = fold_scope(fold if fold is not None else self.store.kernel)  # type: ignore[attr-defined]
+        member_refs = scope_index.cells_in_scope(room_scope_ref)
+        facts: list[Any] = []
+        drawers: list[Any] = []
+        for ref in member_refs:
+            kind = self._classify_ref(ref, fold)
+            if kind == "fact":
+                if self._is_current(ref, fold):
+                    facts.append(ref)
+            elif kind == "drawer":
+                drawers.append(ref)
+        return facts, drawers
+
+    def _rooms_in_wing(self, wing: str, fold: _SearchFold | None) -> list[str]:
+        """Distinct room names among every cell scoped to *wing* (T3.1:
+        ``index(wing)`` with no ``room`` enumerates one entry per room)."""
+        from amplifier_data.lenses._scope import fold_scope
+
+        wing_scope_ref = self._scope_ref("wing", wing)
+        scope_index = fold_scope(fold if fold is not None else self.store.kernel)  # type: ignore[attr-defined]
+        member_refs = scope_index.cells_in_scope(wing_scope_ref)
+        rooms: set[str] = set()
+        for ref in member_refs:
+            _wing_name, room_name = self._resolve_wing_room(ref, fold)
+            if room_name:
+                rooms.add(room_name)
+        return sorted(rooms)
+
+    def _current_index_ref(self, room: str, fold: _SearchFold | None) -> Any | None:
+        room_scope_ref = self._scope_ref("room", room)
+        refs = self._current_fact_refs(room_scope_ref, _MEMORY_CURRENT_INDEX, fold)
+        return refs[-1] if refs else None
+
+    def _index_body(self, cell_ref: Any, fold: _SearchFold | None) -> dict[str, Any]:
+        text = self._payload_text(cell_ref, fold)
+        try:
+            body = json.loads(text)
+        except (ValueError, TypeError):
+            body = {}
+        built_from_count = self._first_fact_value(
+            cell_ref, _BUILT_FROM_COUNT_PREDICATE, fold
+        )
+        return {
+            "abstract": body.get("abstract", ""),
+            "overview": body.get("overview", ""),
+            "built_from_count": int(built_from_count)
+            if built_from_count is not None
+            else 0,
+            "built_at": self._first_fact_value(cell_ref, _BUILT_AT_PREDICATE, fold),
+        }
+
+    def _derive_index_from_members(
+        self,
+        room: str,
+        fact_refs: list[Any],
+        drawer_refs: list[Any],
+        fold: _SearchFold | None,
+        current_count: int,
+    ) -> dict[str, Any]:
+        """Compute a navigation-only index for *room* with NO write (D19).
+
+        Abstract/overview are built from the most-supported CURRENT facts
+        (``proof_count`` desc, then ``recorded_at`` desc); a room with no
+        facts falls back to its latest drawer's first line. Overview then
+        appends every drawer's first line (newest first) up to the char cap.
+        """
+        fact_rows = [self._fact_row(r, fold) for r in fact_refs]
+        fact_rows.sort(
+            key=lambda r: (r["proof_count"], r["recorded_at"] or ""), reverse=True
+        )
+
+        def _first_line(ref: Any) -> str:
+            text = self._payload_text(ref, fold)
+            return text.splitlines()[0] if text else ""
+
+        ordered_drawers: list[Any] = []
+        if drawer_refs:
+            times = self.drawer_times(sorted(drawer_refs), _fold=fold)
+            ordered_drawers = sorted(
+                drawer_refs, key=lambda r: times.get(r) or "", reverse=True
+            )
+
+        if fact_rows:
+            abstract_source = "; ".join(r["text"] for r in fact_rows)
+            overview_parts = [r["text"] for r in fact_rows]
+        elif ordered_drawers:
+            abstract_source = _first_line(ordered_drawers[0])
+            overview_parts = []
+        else:
+            abstract_source = ""
+            overview_parts = []
+
+        overview_parts.extend(_first_line(r) for r in ordered_drawers)
+
+        return {
+            "scope": f"room:{room}",
+            "abstract": abstract_source[:_INDEX_ABSTRACT_MAX_CHARS],
+            "overview": "\n".join(p for p in overview_parts if p)[
+                :_INDEX_OVERVIEW_MAX_CHARS
+            ],
+            "source": "derived",
+            "built_from_count": current_count,
+            "current_count": current_count,
+            "pending_changes": 0,
+            "built_at": None,
+        }
+
+    def _index_for_room(self, room: str, fold: _SearchFold | None) -> dict[str, Any]:
+        fact_refs, drawer_refs = self._room_members(room, fold)
+        current_count = len(fact_refs) + len(drawer_refs)
+        cur_ref = self._current_index_ref(room, fold)
+        if cur_ref is not None:
+            body = self._index_body(cur_ref, fold)
+            pending = max(0, current_count - body["built_from_count"])
+            if pending <= _INDEX_STALE_AFTER_DEFAULT:
+                return {
+                    "scope": f"room:{room}",
+                    "abstract": body["abstract"],
+                    "overview": body["overview"],
+                    "source": "curated",
+                    "built_from_count": body["built_from_count"],
+                    "current_count": current_count,
+                    "pending_changes": pending,
+                    "built_at": body["built_at"],
+                }
+        return self._derive_index_from_members(
+            room, fact_refs, drawer_refs, fold, current_count
+        )
+
+    def index(self, *, wing: str, room: str | None = None) -> list[dict[str, Any]]:
+        """L3 index read (T3.1, D19): one entry per room in *wing* (or the
+        one *room*, when given). ONE :class:`_SearchFold` for the whole
+        call regardless of room count -- never a per-room regenerate/re-fold.
+
+        Each entry is either the curated cell (``source:"curated"``) when
+        one exists and ``pending_changes`` (facts/drawers filed since it was
+        built) is within :data:`_INDEX_STALE_AFTER_DEFAULT`, or a computed
+        ``source:"derived"`` view otherwise -- the index is ALWAYS available
+        without an LLM (D19: mechanism-first).
+        """
+        fold = self._fold_snapshot()
+        rooms = [room] if room is not None else self._rooms_in_wing(wing, fold)
+        return [self._index_for_room(r, fold) for r in rooms]
+
+    def index_set(
+        self,
+        *,
+        scope: str,
+        abstract: str,
+        overview: str,
+        cites: Sequence[Any] = (),
+    ) -> dict[str, Any]:
+        """Curator write path (T3.1): overwrite the current index for *scope*
+        (``"room:<name>"``). Validates length caps (rejects over-length,
+        never truncates silently), redacts and REJECTS secret-shaped text,
+        and requires every *cites* entry to be an existing fact (L3 never
+        cites evidence that doesn't exist -- and never IS evidence itself,
+        see the module's P3 docstring).
+
+        Supersede-never-delete (D12's pattern, reused here): the room scope
+        cell's ``@memory:current_index`` fact is invalidated and reasserted
+        to point at the new cell; the old index cell is left untouched.
+        """
+        if len(abstract) > _INDEX_ABSTRACT_MAX_CHARS:
+            raise ValueError(
+                f"abstract must be <= {_INDEX_ABSTRACT_MAX_CHARS} chars "
+                f"(got {len(abstract)})"
+            )
+        if len(overview) > _INDEX_OVERVIEW_MAX_CHARS:
+            raise ValueError(
+                f"overview must be <= {_INDEX_OVERVIEW_MAX_CHARS} chars "
+                f"(got {len(overview)})"
+            )
+        if not scope.startswith("room:"):
+            raise ValueError(f"scope must be 'room:<name>' (got {scope!r})")
+        room = scope[len("room:") :]
+
+        from .redact import redact as _redact
+
+        _scrub_a, redactions_a = _redact(abstract)
+        _scrub_o, redactions_o = _redact(overview)
+        if redactions_a or redactions_o:
+            raise ValueError(
+                "index text appears to contain secret-shaped content and was rejected"
+            )
+
+        cite_list = list(cites)
+        for c in cite_list:
+            if self._classify_ref(c) != "fact":
+                raise ValueError(f"cite {c!r} is not an existing fact")
+
+        s = self.store
+        room_scope_ref = self._scope_ref("room", room)
+        fact_refs, drawer_refs = self._room_members(room, None)
+        current_count = len(fact_refs) + len(drawer_refs)
+        built_at = datetime.now(UTC).isoformat(timespec="seconds")
+        payload = json.dumps(
+            {
+                "kind": "index",
+                "scope": scope,
+                "abstract": abstract,
+                "overview": overview,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        old_current = self._current_fact_refs(room_scope_ref, _MEMORY_CURRENT_INDEX)
+
+        if self._supports_atomic_update():
+            from amplifier_data.lenses.temporal import INVALIDATE_PREFIX
+
+            b = s.write_batch()  # type: ignore[attr-defined]
+            cell_ref = b.write_cell(payload)
+            b.scope(cell_ref, room_scope_ref)
+            b.assert_fact(
+                cell_ref, _BUILT_AT_PREDICATE, b.write_cell(built_at.encode())
+            )
+            b.assert_fact(
+                cell_ref,
+                _BUILT_FROM_COUNT_PREDICATE,
+                b.write_cell(str(current_count).encode()),
+            )
+            for c in cite_list:
+                b.assert_fact(cell_ref, _MEMORY_CITES, c)
+            for old in old_current:
+                b.relate(room_scope_ref, old, INVALIDATE_PREFIX + _MEMORY_CURRENT_INDEX)
+            b.assert_fact(room_scope_ref, _MEMORY_CURRENT_INDEX, cell_ref)
+            commit_result = b.commit()
+            cell_ref = _resolve_batch_ref(commit_result, cell_ref)
+        else:
+            cell_ref = s.write_cell(payload)  # type: ignore[attr-defined]
+            s.scope(cell_ref, room_scope_ref)  # type: ignore[attr-defined]
+            s.assert_fact(  # type: ignore[attr-defined]
+                cell_ref, _BUILT_AT_PREDICATE, s.write_cell(built_at.encode())
+            )
+            s.assert_fact(  # type: ignore[attr-defined]
+                cell_ref,
+                _BUILT_FROM_COUNT_PREDICATE,
+                s.write_cell(str(current_count).encode()),
+            )
+            for c in cite_list:
+                s.assert_fact(cell_ref, _MEMORY_CITES, c)  # type: ignore[attr-defined]
+            for old in old_current:
+                s.invalidate_fact(room_scope_ref, _MEMORY_CURRENT_INDEX, old)  # type: ignore[attr-defined]
+            s.assert_fact(room_scope_ref, _MEMORY_CURRENT_INDEX, cell_ref)  # type: ignore[attr-defined]
+
+        return {
+            "ref": cell_ref,
+            "built_from_count": current_count,
+            "built_at": built_at,
+        }
+
+    # -- Standing questions (T3.3) --------------------------------------
+
+    def standing_add(self, *, question: str, wing: str) -> dict[str, Any]:
+        """Content-addressed, idempotent standing-question cell, scoped to
+        *wing*. Re-adding the same question text is a no-op read (the
+        ``write_cell``/``scope`` calls are themselves idempotent)."""
+        normalized = " ".join(question.split())
+        payload = json.dumps(
+            {"kind": "standing_question", "question": normalized},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        s = self.store
+        ref = s.write_cell(payload)  # type: ignore[attr-defined]
+        s.scope(ref, self._scope_ref("wing", wing))  # type: ignore[attr-defined]
+        return {"ref": ref}
+
+    def standing_answer(
+        self,
+        *,
+        question_ref: Any,
+        answer: str,
+        cites: Sequence[Any] = (),
+    ) -> dict[str, Any]:
+        """Supersede the current answer for *question_ref* (D12's pattern:
+        never deletes -- invalidates the question's ``@memory:current_answer``
+        fact and reasserts it at the new answer cell). *cites* must each be
+        an existing fact; the answer text is redacted and REJECTED if it
+        appears to contain secret-shaped content."""
+        if self._classify_ref(question_ref) != "standing_question":
+            raise ValueError(
+                f"question_ref {question_ref!r} is not a known standing question"
+            )
+
+        from .redact import redact as _redact
+
+        _scrub, redactions = _redact(answer)
+        if redactions:
+            raise ValueError(
+                "standing answer appears to contain secret-shaped content and "
+                "was rejected"
+            )
+
+        cite_list = list(cites)
+        for c in cite_list:
+            if self._classify_ref(c) != "fact":
+                raise ValueError(f"cite {c!r} is not an existing fact")
+
+        s = self.store
+        answered_at = datetime.now(UTC).isoformat(timespec="seconds")
+        payload = json.dumps(
+            {"kind": "standing_answer", "question": question_ref, "answer": answer},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        old_current = self._current_fact_refs(question_ref, _MEMORY_CURRENT_ANSWER)
+
+        if self._supports_atomic_update():
+            from amplifier_data.lenses.temporal import INVALIDATE_PREFIX
+
+            b = s.write_batch()  # type: ignore[attr-defined]
+            ans_ref = b.write_cell(payload)
+            b.assert_fact(
+                ans_ref, _ANSWERED_AT_PREDICATE, b.write_cell(answered_at.encode())
+            )
+            for c in cite_list:
+                b.assert_fact(ans_ref, _MEMORY_CITES, c)
+            for old in old_current:
+                b.relate(question_ref, old, INVALIDATE_PREFIX + _MEMORY_CURRENT_ANSWER)
+            b.assert_fact(question_ref, _MEMORY_CURRENT_ANSWER, ans_ref)
+            commit_result = b.commit()
+            ans_ref = _resolve_batch_ref(commit_result, ans_ref)
+        else:
+            ans_ref = s.write_cell(payload)  # type: ignore[attr-defined]
+            s.assert_fact(  # type: ignore[attr-defined]
+                ans_ref, _ANSWERED_AT_PREDICATE, s.write_cell(answered_at.encode())
+            )
+            for c in cite_list:
+                s.assert_fact(ans_ref, _MEMORY_CITES, c)  # type: ignore[attr-defined]
+            for old in old_current:
+                s.invalidate_fact(question_ref, _MEMORY_CURRENT_ANSWER, old)  # type: ignore[attr-defined]
+            s.assert_fact(question_ref, _MEMORY_CURRENT_ANSWER, ans_ref)  # type: ignore[attr-defined]
+
+        return {"ref": ans_ref, "answered_at": answered_at}
+
+    def standing(self, *, wing: str) -> list[dict[str, Any]]:
+        """Every standing question scoped to *wing* (T3.3), ONE fold for the
+        whole call. ``stale`` iff there is no answer yet, or any cited fact
+        is no longer current (retraction check) -- L3 navigation text is
+        never trusted past the evidence it points at."""
+        from amplifier_data.lenses._scope import fold_scope
+
+        fold = self._fold_snapshot()
+        wing_scope_ref = self._scope_ref("wing", wing)
+        scope_index = fold_scope(fold if fold is not None else self.store.kernel)  # type: ignore[attr-defined]
+        member_refs = scope_index.cells_in_scope(wing_scope_ref)
+
+        rows: list[dict[str, Any]] = []
+        for ref in member_refs:
+            if self._classify_ref(ref, fold) != "standing_question":
+                continue
+            try:
+                body = json.loads(self._payload_text(ref, fold))
+            except (ValueError, TypeError):
+                body = {}
+            question_text = body.get("question", "")
+
+            answer_refs = self._current_fact_refs(ref, _MEMORY_CURRENT_ANSWER, fold)
+            answer_ref = answer_refs[-1] if answer_refs else None
+
+            answer_text: str | None = None
+            answered_at: str | None = None
+            cites: list[Any] = []
+            stale_reasons: list[Any] = []
+            if answer_ref is not None:
+                try:
+                    answer_body = json.loads(self._payload_text(answer_ref, fold))
+                except (ValueError, TypeError):
+                    answer_body = {}
+                answer_text = answer_body.get("answer")
+                answered_at = self._first_fact_value(
+                    answer_ref, _ANSWERED_AT_PREDICATE, fold
+                )
+                cites = self._current_fact_refs(answer_ref, _MEMORY_CITES, fold)
+                stale_reasons = [c for c in cites if not self._is_current(c, fold)]
+                stale = bool(stale_reasons)
+            else:
+                stale = True
+
+            rows.append(
+                {
+                    "question_ref": ref,
+                    "question": question_text,
+                    "answer": answer_text,
+                    "answered_at": answered_at,
+                    "cites": cites,
+                    "stale": stale,
+                    "stale_reasons": stale_reasons,
+                }
+            )
+        return rows

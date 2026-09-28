@@ -317,7 +317,9 @@ class MemoryTool(Tool):
         "Memory operations. Operations: search, remember, status, "
         "kg (knowledge graph), traverse, diary, mine, events, garden, "
         "fact_add, facts (L2 durable facts), reflection_job_add, "
-        "reflection_jobs, reflection_job_done (durable reflection queue)."
+        "reflection_jobs, reflection_job_done (durable reflection queue), "
+        "index, index_set (L3 room/wing navigation), standing_add, "
+        "standing_answer, standing (standing questions)."
     )
 
     def __init__(self, *, bridge_emit: SyncBridge | None = None) -> None:
@@ -344,6 +346,11 @@ class MemoryTool(Tool):
                     "reflection_job_add",
                     "reflection_jobs",
                     "reflection_job_done",
+                    "index",
+                    "index_set",
+                    "standing_add",
+                    "standing_answer",
+                    "standing",
                 ],
                 "description": "The memory operation to perform.",
             },
@@ -515,6 +522,47 @@ class MemoryTool(Tool):
                 "type": "string",
                 "default": "pending",
                 "description": "Reflection job state filter (reflection_jobs operation).",
+            },
+            # L3 index / standing question parameters (T3.1/T3.3, D19)
+            "abstract": {
+                "type": "string",
+                "description": (
+                    "Room/wing navigation summary, <=256 chars (index_set "
+                    "operation). Never cited as evidence."
+                ),
+            },
+            "overview": {
+                "type": "string",
+                "description": (
+                    "Room/wing navigation overview, <=4000 chars (index_set "
+                    "operation). Never cited as evidence."
+                ),
+            },
+            "cites": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Fact refs an index/standing-answer navigates to "
+                    "(index_set / standing_answer operations). Each must be "
+                    "an existing fact."
+                ),
+            },
+            "question": {
+                "type": "string",
+                "description": "Standing question text (standing_add operation).",
+            },
+            "question_ref": {
+                "type": "string",
+                "description": (
+                    "Ref of an existing standing question (standing_answer operation)."
+                ),
+            },
+            "answer": {
+                "type": "string",
+                "description": (
+                    "Answer text for a standing question (standing_answer "
+                    "operation). Rejected if it contains secret-shaped content."
+                ),
             },
             # Knowledge graph parameters
             "entity": {
@@ -1039,6 +1087,62 @@ class MemoryTool(Tool):
                 except Exception as exc:
                     return _client_error_to_tool_result(exc)
                 return _client_result_to_tool_result(result)
+
+            elif operation == "index":
+                try:
+                    result = _call_client(
+                        "index",
+                        wing=kwargs.get("wing", "general"),
+                        room=kwargs.get("room") or None,
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(result, wrap_key="index")
+
+            elif operation == "index_set":
+                try:
+                    result = _call_client(
+                        "index_set",
+                        scope=kwargs.get("scope", ""),
+                        abstract=kwargs.get("abstract", ""),
+                        overview=kwargs.get("overview", ""),
+                        cites=kwargs.get("cites") or [],
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(result)
+
+            elif operation == "standing_add":
+                try:
+                    result = _call_client(
+                        "standing_add",
+                        question=kwargs.get("question", ""),
+                        wing=kwargs.get("wing", "general"),
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(result)
+
+            elif operation == "standing_answer":
+                try:
+                    result = _call_client(
+                        "standing_answer",
+                        question_ref=kwargs.get("question_ref", ""),
+                        answer=kwargs.get("answer", ""),
+                        cites=kwargs.get("cites") or [],
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(result)
+
+            elif operation == "standing":
+                try:
+                    result = _call_client(
+                        "standing", wing=kwargs.get("wing", "general")
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(result, wrap_key="standing")
 
             else:
                 return ToolResult(

@@ -234,6 +234,54 @@ class MemoryClient(GatewayClient):
             },
         )
 
+    def index(self, *, wing: str, room: str | None = None) -> list[dict[str, Any]]:
+        """L3 index read (T3.1). See
+        :meth:`~amplifier_module_tool_memory.store.NativeMemoryStore.index`."""
+        out = self._call("index", {"wing": wing, "room": room})
+        return list(out["index"])
+
+    def index_set(
+        self,
+        *,
+        scope: str,
+        abstract: str,
+        overview: str,
+        cites: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Curator write path (T3.1). See
+        :meth:`~amplifier_module_tool_memory.store.NativeMemoryStore.index_set`."""
+        return self._call(
+            "index_set",
+            {
+                "scope": scope,
+                "abstract": abstract,
+                "overview": overview,
+                "cites": list(cites),
+            },
+        )
+
+    def standing_add(self, *, question: str, wing: str) -> dict[str, Any]:
+        """Idempotent standing-question cell (T3.3)."""
+        return self._call("standing_add", {"question": question, "wing": wing})
+
+    def standing_answer(
+        self, *, question_ref: str, answer: str, cites: Sequence[str] = ()
+    ) -> dict[str, Any]:
+        """Supersede the current answer for *question_ref* (T3.3)."""
+        return self._call(
+            "standing_answer",
+            {
+                "question_ref": question_ref,
+                "answer": answer,
+                "cites": list(cites),
+            },
+        )
+
+    def standing(self, *, wing: str) -> list[dict[str, Any]]:
+        """Every standing question scoped to *wing* (T3.3)."""
+        out = self._call("standing", {"wing": wing})
+        return list(out["standing"])
+
     def status(self) -> dict[str, Any]:
         return self._call("status", {})
 

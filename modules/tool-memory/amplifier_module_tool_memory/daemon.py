@@ -663,6 +663,58 @@ def _dispatch_domain(
         )
         return {"jobs": rows}
 
+    if tool == "index":
+        rows = mem_store.index(wing=str(args.get("wing", "")), room=args.get("room"))
+        return {"index": [{**row, "scope": row["scope"]} for row in rows]}
+
+    if tool == "index_set":
+        with lock:
+            result = mem_store.index_set(
+                scope=str(args.get("scope", "")),
+                abstract=str(args.get("abstract", "")),
+                overview=str(args.get("overview", "")),
+                cites=list(args.get("cites") or []),
+            )
+        return {
+            "ref": str(result["ref"]),
+            "built_from_count": result["built_from_count"],
+            "built_at": result["built_at"],
+        }
+
+    if tool == "standing_add":
+        with lock:
+            result = mem_store.standing_add(
+                question=str(args.get("question", "")),
+                wing=str(args.get("wing", "general")),
+            )
+        return {"ref": str(result["ref"])}
+
+    if tool == "standing_answer":
+        with lock:
+            result = mem_store.standing_answer(
+                question_ref=str(args.get("question_ref", "")),
+                answer=str(args.get("answer", "")),
+                cites=list(args.get("cites") or []),
+            )
+        return {"ref": str(result["ref"]), "answered_at": result["answered_at"]}
+
+    if tool == "standing":
+        rows = mem_store.standing(wing=str(args.get("wing", "")))
+        return {
+            "standing": [
+                {
+                    "question_ref": str(row["question_ref"]),
+                    "question": row["question"],
+                    "answer": row["answer"],
+                    "answered_at": row["answered_at"],
+                    "cites": [str(c) for c in row["cites"]],
+                    "stale": row["stale"],
+                    "stale_reasons": [str(c) for c in row["stale_reasons"]],
+                }
+                for row in rows
+            ]
+        }
+
     if tool == "reflection_job_done":
         with lock:
             result = mem_store.reflection_job_done(
