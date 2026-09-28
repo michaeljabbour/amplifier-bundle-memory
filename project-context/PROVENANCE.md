@@ -408,3 +408,32 @@ Rejected: rewrite-in-place topic pages (conflicts with supersede-never-delete
 and unproven at scale). A reconstruct-with-citations answer step stays a
 candidate after the baseline shows whether it's needed.
 **Status:** proposed.
+
+### D25 — Agent files never declare relative module sources
+**Decision:** removed `tools:` from `agents/distiller.md`; spawned agents
+inherit the parent's tools, and memory-reflect requires memory.yaml (which
+mounts tool-memory). `tests/test_agent_frontmatter.py` (in CI) fails on any
+relative `source:` in `agents/*.md`.
+**Why:** DTU install check (2026-09-28): foundation copies agent `tools:`
+verbatim and resolves relative sources against the base path of the LAST
+composed bundle (the CLI composes its default behavior last), so every session
+failed strict activation when memory-reflect/memory-index was composed. Unit
+tests could not see it — only a real composition could.
+**Status:** derived (defect fix).
+
+### D26 — First D13 baseline: RRF helps, the bar is not met, scale is the real gap
+**Results (see EXPERIMENT_JOURNAL 2026-09-28):** PrecisionMemBench R@10
+0.941 → 0.970 (met); LongMemEval-S QA 55.8% → 58.2% (+2.4, not significant;
+bar +5 unmet); context tokens unchanged (bar unmet — L1 retrieval returns the
+same volume; the token lever is the L2/L3 briefing, which the harness does not
+exercise); p95 130 ms on a small store but ~9 s on a 316 MB store for both
+fusions, and wing-scoped R@10 drops 0.975 → 0.875 as other wings accumulate.
+LoCoMo and L2 facts unmeasured.
+**Decision:** the next work item is store scale, ahead of any new layer:
+(1) root-cause the scoped-recall loss as the store grows; (2) make per-query
+cost sub-linear in total log size (persistent incremental indexes in the
+single-writer daemon instead of a full-log fold per query).
+**Also recorded:** the benchmark adapter had three defects that made it unable
+to run (no base class; directory passed as store path; scores-only raw
+response scored 0%) — fixed before any number was recorded.
+**Status:** derived; D13 remains the bar.
