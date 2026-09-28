@@ -1,0 +1,64 @@
+bundle:
+  name: memory-reflect-behavior
+  version: 0.1.0
+  description: |
+    OPT-IN cold-path memory reflection (T2.5,
+    docs/plans/2026-09-27-memory-layers-design.md §2/§4; D7/D10 in
+    project-context/PROVENANCE.md).
+
+    This behavior is intentionally NOT included by behaviors/memory.yaml.
+    It REQUIRES the core memory behavior (behaviors/memory.yaml) to already
+    be composed -- it depends on tool-memory's daemon client and the
+    hooks-memory-capture wing detector, and it hands the `memory:distiller`
+    agent a `tool-memory` tool binding.
+
+    What it adds:
+      - hooks-memory-reflect: subscribes to context:compaction,
+        context:pre_compact, session:end and session:start. Watermarks the
+        conversation span since the last reflection, renders it to plain
+        text, and queues a durable `reflection_job` cell via
+        MemoryClient.reflection_job_add(). No-ops in child (spawned)
+        sessions (prevents reflect-on-a-reflection recursion) and against
+        an older tool-memory daemon missing the reflection ops
+        (`store_unsupported`, never an error).
+      - the memory:distiller agent (agents/distiller.md), spawned via the
+        app-layer `session.spawn` capability to process one queued job at a
+        time, reading context/reflection-rubric.md for what is worth
+        writing as a durable fact.
+
+    Cost model: EACH compaction/pre_compact event that produces a
+    sufficiently large span spawns ONE background LLM agent session
+    (model_role: [fast, general] -- routes to the cheapest capable model
+    the active routing matrix offers), bounded by `max_spawns_per_session`.
+    `session:end` only ever queues (never spawns, so session exit is never
+    delayed) -- its job is picked up by `drain_on_start` at the next
+    session:start, or by an explicit "reflect on pending memory jobs" ask.
+
+    Trigger model (D10): background LLM work requires the app layer to
+    register the `session.spawn` capability (true for the amplifier CLI).
+    Without it, this behavior still queues jobs durably -- they simply stay
+    `pending` until an app that DOES register `session.spawn` drains them.
+    This is a Python capability check inside the hook, never a hard YAML
+    dependency -- the behavior degrades to "record-only" rather than error.
+
+# ── Hooks ──────────────────────────────────────────────────────────────────
+hooks:
+  - module: hooks-memory-reflect
+    source: ../modules/hooks-memory-reflect
+    version: 0.1.0
+    config:
+      enabled: true
+      min_new_messages: 6        # gate: skip spans smaller than this many non-system messages
+      max_span_chars: 24000      # cap on the rendered span text handed to the distiller
+      max_tool_result_chars: 1500 # per-message truncation for role=="tool" content
+      max_spawns_per_session: 4  # ceiling on background distiller spawns per session
+      agent: "memory:distiller"
+      drain_on_start: true       # spawn distillers for pending jobs at session:start
+      drain_limit: 3             # at most this many pending jobs drained per session:start
+      drain_timeout_s: 20        # mount() cleanup: await in-flight tasks this long, then cancel
+      emit_events: true          # false to disable JSONL event emission
+
+# ── Agents ─────────────────────────────────────────────────────────────────
+agents:
+  include:
+    - memory:distiller     # cold-path fact writer, spawned by hooks-memory-reflect

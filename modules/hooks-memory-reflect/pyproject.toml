@@ -1,0 +1,58 @@
+[project]
+name = "amplifier-module-hooks-memory-reflect"
+version = "0.1.0"
+description = "Amplifier hook module — cold-path memory reflection: watermarks conversation spans on compaction/session:end and queues durable reflection jobs, optionally spawning the memory:distiller agent"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+    { name = "Michael Jabbour" },
+]
+dependencies = [
+    # amplifier-core is a peer dependency -- provided by the host runtime.
+    # Do NOT declare it here (amplifier-foundation BUNDLE_GUIDE anti-pattern).
+    #
+    # amplifier-module-tool-memory is a sibling module provided by bundle
+    # composition (behaviors/memory-reflect.yaml -> behaviors/memory.yaml),
+    # not pip -- see BUNDLE_GUIDE; availability guarded at import (try/except
+    # ImportError in amplifier_module_hooks_memory_reflect/__init__.py).
+    #
+    # Mirror of tool-memory's amplifier-data pin -- MUST move in lockstep
+    # with modules/tool-memory/pyproject.toml (same SHA). Module activation
+    # installs with `uv pip install --no-sources`, and uv rejects
+    # *transitive* URL dependencies ("URL dependencies must be expressed as
+    # direct requirements") -- so every module that depends on tool-memory
+    # must restate the pin directly. Direct URL restated deliberately: uv
+    # --no-sources rejects transitive URL deps -- NOT the sibling-dep
+    # anti-pattern; amplifier-data is an external library.
+    "amplifier-data @ git+https://github.com/michaeljabbour/amplifier-data@3ef751b6fac7f6899824b78774b74809f09bcd81",
+]
+
+[project.entry-points."amplifier.modules"]
+hooks-memory-reflect = "amplifier_module_hooks_memory_reflect:mount"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["amplifier_module_hooks_memory_reflect"]
+
+
+[dependency-groups]
+dev = [
+    "ruff>=0.1",
+    "pyright>=1.1",
+    "pytest>=7.0",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = false
+reportGeneralTypeIssues = false
+
+# Required: the amplifier-data dependency above is a direct (git+) URL reference;
+# hatchling refuses to build metadata containing direct references without this flag.
+[tool.hatch.metadata]
+allow-direct-references = true
