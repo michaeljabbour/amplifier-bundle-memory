@@ -271,3 +271,30 @@ exists anywhere, so session-end curation described in docs never runs.
 - **Measured:** 5k-drawer p95 search: rrf 160.8 ms, legacy 157.0 ms (budget 300).
 - **Pending owner action:** push `feat/bm25-lens` → merge → bump pin (T1.5).
 **Status:** derived.
+
+### D18 — P2 as built: facts, durable reflection jobs, compaction-observing hook
+- **The conversation span is itself evidence.** `reflection_job_add` files the
+  (redacted, newest-kept, ≤24k-char) span as an L1 drawer (category
+  `conversation`), so every distilled fact can satisfy D12's
+  provenance-mandatory rule by citing it. Evidence stays verbatim; facts stay
+  auditable.
+- **Jobs are cells**, state is a fact (`@memory:job_state` pending → done), so
+  the queue is durable, append-only and survives crashes; no work-tracker
+  dependency (D10 alternative kept deferred).
+- **When the distiller runs:** spawned in the background on `context:compaction`
+  / `context:pre_compact`; at `session:end` jobs are only queued (never delay
+  exit); `session:start` drains up to 3 pending jobs in the background. Cleanup
+  awaits running spawns ≤20 s, then cancels — cancelled jobs stay pending.
+- **Spawn:** `session.spawn(agent_name, instruction, parent_session,
+  agent_configs)` exactly as dot-runner's loop-agent calls it
+  (`session_runner.py:504-541`). Child sessions are detected via
+  `coordinator.parent_id` and never reflect (no recursion).
+- **Redaction** moved into `tool-memory/redact.py` (capture keeps a shim) so the
+  store redacts spans server-side and rejects secret-bearing facts.
+- **Search** returns current facts as first-class hits (`layer: "fact"`,
+  `derived_from`); `layers=` restricts. Legacy fusion unchanged.
+- **Known limits (accepted):** two sessions draining at once may both process a
+  job — the second `reflection_job_done` errors and identical facts dedup by
+  content address. T2.6 (curator handoff event) moves to P3 with the index
+  curator work; the event stays informational until then.
+**Status:** derived. **Unblocks:** P3 (index rollup uses current facts).
