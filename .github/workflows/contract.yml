@@ -56,10 +56,10 @@ jobs:
       - name: Run contract + emission tests
         run: uv run pytest tests/test_contract.py tests/test_hook_emissions.py -v
 
-      - name: Run vendor-sweep gate + remaining hermetic unit tests
-        # tests/test_vendor_sweep.py is the KG-N4 vendor-zero grep gate
-        # (docs/plans/2026-07-07-native-cutover-design.md §12) -- its own
-        # docstring says it "runs in every CI pass"; this step makes that true.
+      - name: Run product-name gate + remaining hermetic unit tests
+        # tests/test_no_product_names.py is the product-name-zero grep gate --
+        # its own docstring says it "runs in every CI pass"; this step makes
+        # that true.
         #
         # The remaining files are the rest of the repo-root unit suite
         # (tests/*.py, excluding tests/integration/ which requires a DTU
@@ -75,7 +75,7 @@ jobs:
         # re-added below.
         run: |
           uv run pytest \
-            tests/test_vendor_sweep.py \
+            tests/test_no_product_names.py \
             tests/test_behavioral_write.py \
             tests/test_benchmark_recall.py \
             tests/test_coordinator_bridge.py \
