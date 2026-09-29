@@ -354,6 +354,41 @@ def _render_hit(
     return f"{prefix}{content}{suffix}"
 
 
+def _drawer_id_for_hit(hit: dict[str, Any]) -> str:
+    """Parent-drawer identity for diversity-first ordering (T7.3): a
+    passage hit's parent is its ``drawer_ref``; anything else (a plain
+    drawer hit, a fact) is its own identity via ``ref``."""
+    if hit.get("layer") == "passage":
+        drawer_ref = hit.get("drawer_ref")
+        if drawer_ref:
+            return str(drawer_ref)
+    return str(hit.get("ref", ""))
+
+
+def _diversify_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reorder rank-ordered *hits* diversity-first (T7.3, same rule as the
+    AMB adapter's budgeted packing): the best-ranked (first-seen) passage of
+    each distinct parent drawer, in rank order, THEN every remaining
+    (second, third, ...) passage of a drawer already seen, again in rank
+    order. Pure reordering within the given hits -- nothing is dropped or
+    duplicated, so the section's existing token-budget truncation (applied
+    by the caller, on the resulting line count/length) is unaffected.
+    """
+    seen: set[str] = set()
+    first_pass: list[dict[str, Any]] = []
+    second_pass: list[dict[str, Any]] = []
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        key = _drawer_id_for_hit(hit)
+        if key not in seen:
+            seen.add(key)
+            first_pass.append(hit)
+        else:
+            second_pass.append(hit)
+    return first_pass + second_pass
+
+
 # -- Helpers -------------------------------------------------------------------
 
 
@@ -791,6 +826,13 @@ def _evidence_section(
     whenever the daemon supports it -- :func:`_call_client` retries without
     it on ``TypeError`` (an older store's ``search`` rejects the kwarg), so
     this degrades silently to whole-drawer hits on an older pinned daemon.
+
+    T7.3: hits are reordered diversity-first (:func:`_diversify_hits`) before
+    rendering -- the best-ranked passage of every distinct parent drawer
+    appears before any drawer's SECOND passage, so a multi-session recall
+    surfaces breadth across sessions first within this section's existing
+    token budget, rather than one session's several passages crowding out
+    every other session's evidence.
     """
     search_result = (
         _call_client(
@@ -806,6 +848,7 @@ def _evidence_section(
     raw_hits = (
         search_result.get("results", []) if isinstance(search_result, dict) else []
     )
+    raw_hits = _diversify_hits(raw_hits) if raw_hits else raw_hits
     retrieved_hits.extend(
         {**h, "ref": str(h.get("ref", "")), "layer": h.get("layer", "drawer")}
         for h in raw_hits

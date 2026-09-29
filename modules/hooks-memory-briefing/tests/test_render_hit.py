@@ -16,6 +16,8 @@ import pytest
 from amplifier_module_hooks_memory_briefing import (
     MemoryBriefingHook,
     _date_stamp,
+    _diversify_hits,
+    _drawer_id_for_hit,
     _render_hit,
 )
 
@@ -111,6 +113,135 @@ class TestRenderHit:
     def test_content_falls_back_to_text_key(self) -> None:
         hit = {"text": "from text key"}
         assert _render_hit(hit) == "from text key"
+
+
+# ---------------------------------------------------------------------------
+# T7.3 -- diversity-first ordering: one passage per parent drawer before any
+# drawer's second passage, applied within the evidence section's existing
+# token budget (a pure reorder -- nothing dropped, nothing duplicated).
+# ---------------------------------------------------------------------------
+
+
+class TestDrawerIdForHit:
+    def test_passage_hit_uses_drawer_ref(self) -> None:
+        hit = {"ref": "p1", "layer": "passage", "drawer_ref": "d1"}
+        assert _drawer_id_for_hit(hit) == "d1"
+
+    def test_passage_hit_without_drawer_ref_falls_back_to_own_ref(self) -> None:
+        hit = {"ref": "p1", "layer": "passage"}
+        assert _drawer_id_for_hit(hit) == "p1"
+
+    def test_plain_drawer_hit_uses_own_ref(self) -> None:
+        hit = {"ref": "d1", "content": "x"}
+        assert _drawer_id_for_hit(hit) == "d1"
+
+    def test_fact_hit_uses_own_ref(self) -> None:
+        hit = {"ref": "f1", "layer": "fact", "text": "x"}
+        assert _drawer_id_for_hit(hit) == "f1"
+
+
+class TestDiversifyHits:
+    def test_one_passage_per_drawer_before_any_second_passage(self) -> None:
+        """Rank order: dA-p1, dA-p2, dB-p1, dC-p1. Diversified order must put
+        every drawer's FIRST (best-ranked) passage ahead of dA's second."""
+        hits = [
+            {"ref": "a1", "layer": "passage", "drawer_ref": "dA"},
+            {"ref": "a2", "layer": "passage", "drawer_ref": "dA"},
+            {"ref": "b1", "layer": "passage", "drawer_ref": "dB"},
+            {"ref": "c1", "layer": "passage", "drawer_ref": "dC"},
+        ]
+        result = _diversify_hits(hits)
+        assert [h["ref"] for h in result] == ["a1", "b1", "c1", "a2"]
+
+    def test_preserves_rank_order_within_each_pass(self) -> None:
+        hits = [
+            {"ref": "a1", "layer": "passage", "drawer_ref": "dA"},
+            {"ref": "b1", "layer": "passage", "drawer_ref": "dB"},
+            {"ref": "a2", "layer": "passage", "drawer_ref": "dA"},
+            {"ref": "b2", "layer": "passage", "drawer_ref": "dB"},
+            {"ref": "c1", "layer": "passage", "drawer_ref": "dC"},
+        ]
+        result = _diversify_hits(hits)
+        assert [h["ref"] for h in result] == ["a1", "b1", "c1", "a2", "b2"]
+
+    def test_no_hit_dropped_or_duplicated(self) -> None:
+        hits = [
+            {"ref": "a1", "layer": "passage", "drawer_ref": "dA"},
+            {"ref": "a2", "layer": "passage", "drawer_ref": "dA"},
+            {"ref": "b1", "layer": "passage", "drawer_ref": "dB"},
+        ]
+        result = _diversify_hits(hits)
+        assert len(result) == len(hits)
+        assert {h["ref"] for h in result} == {"a1", "a2", "b1"}
+
+    def test_already_diverse_hits_are_unchanged(self) -> None:
+        hits = [
+            {"ref": "a1", "layer": "passage", "drawer_ref": "dA"},
+            {"ref": "b1", "layer": "passage", "drawer_ref": "dB"},
+        ]
+        assert _diversify_hits(hits) == hits
+
+    def test_non_dict_entries_are_skipped(self) -> None:
+        hits = [{"ref": "a1", "layer": "passage", "drawer_ref": "dA"}, "garbage", None]
+        result = _diversify_hits(hits)
+        assert result == [{"ref": "a1", "layer": "passage", "drawer_ref": "dA"}]
+
+
+class TestEvidenceSectionDiversifiesBeforeRendering:
+    def test_evidence_lines_are_diversity_ordered(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: the layered briefing's Relevant evidence section
+        renders every drawer's first passage before any drawer's second."""
+        monkeypatch.setattr(briefing_mod, "_detect_project_name", lambda: "proj")
+        monkeypatch.setattr(briefing_mod, "_find_project_context_dir", lambda: None)
+
+        class _Client:
+            def index(self, **kw: Any) -> Any:
+                return None
+
+        responses = {
+            "index": [],
+            "standing": [],
+            "facts": [],
+            "search": {
+                "results": [
+                    {
+                        "ref": "a1",
+                        "layer": "passage",
+                        "drawer_ref": "dA",
+                        "content": "session A, passage 1",
+                    },
+                    {
+                        "ref": "a2",
+                        "layer": "passage",
+                        "drawer_ref": "dA",
+                        "content": "session A, passage 2",
+                    },
+                    {
+                        "ref": "b1",
+                        "layer": "passage",
+                        "drawer_ref": "dB",
+                        "content": "session B, passage 1",
+                    },
+                ]
+            },
+        }
+
+        def fake_call_client(method: str, **kwargs: Any) -> Any:
+            return responses.get(method)
+
+        monkeypatch.setattr(briefing_mod, "ensure_daemon", lambda: _Client())
+        monkeypatch.setattr(briefing_mod, "_call_client", fake_call_client)
+
+        hook = MemoryBriefingHook({"briefing_mode": "layered", "emit_events": False})
+        result = _run(hook("session:start", {"session_id": "s1", "prompt": ""}))
+        text = result.context_injection
+
+        pos_a1 = text.index("session A, passage 1")
+        pos_b1 = text.index("session B, passage 1")
+        pos_a2 = text.index("session A, passage 2")
+        assert pos_a1 < pos_b1 < pos_a2
 
 
 # ---------------------------------------------------------------------------

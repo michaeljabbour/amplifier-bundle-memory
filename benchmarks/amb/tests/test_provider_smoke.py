@@ -23,6 +23,7 @@ from __future__ import annotations
 import sys
 import types
 from pathlib import Path
+from typing import Any
 
 # Make the adapter importable without installing it as a package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -564,6 +565,249 @@ def test_ingest_hands_embedder_and_model_id_to_store(tmp_path: Path) -> None:
     _, kwargs = fake.filed[0]
     assert kwargs["embedder"] is provider._embedder
     assert kwargs["embedding_model_id"] == "fake-model:3"
+
+
+# ---------------------------------------------------------------------------
+# T7.3: budgeted, diversity-first packing (AMPLIFIER_AMB_PACK="budget").
+#
+# Uses a deterministic token estimator (1 token per character) monkeypatched
+# onto the instance, so budget arithmetic is exact and independent of
+# whether tiktoken happens to be installed in the test environment.
+# ---------------------------------------------------------------------------
+
+
+class _FakeBudgetStore(_FakeGranularityStore):
+    """Extends the T6.1/T6.2 fake with ``max_passages_per_drawer`` support
+    and records the requested ``k`` (candidate pool size)."""
+
+    def search(
+        self,
+        query_vector,
+        k,
+        *,
+        wing=None,
+        room=None,
+        lexical_query=None,
+        fusion=None,
+        layers=None,
+        granularity=None,
+        rerank=None,
+        max_passages_per_drawer=None,
+    ):
+        self.search_calls.append(
+            {
+                "k": k,
+                "wing": wing,
+                "lexical_query": lexical_query,
+                "fusion": fusion,
+                "layers": layers,
+                "granularity": granularity,
+                "rerank": rerank,
+                "max_passages_per_drawer": max_passages_per_drawer,
+            }
+        )
+        return list(self.hits_to_return)
+
+
+def _budget_provider(tmp_path: Path, **kwargs: Any) -> AmplifierMemoryProvider:
+    p = AmplifierMemoryProvider(
+        home=tmp_path / "s", embedder="none", pack="budget", **kwargs
+    )
+    # Deterministic, environment-independent token cost: 1 token/char.
+    p._estimate_tokens = lambda text: len(text)  # type: ignore[method-assign]
+    return p
+
+
+def _hit(ref: str, drawer_ref: str, content: str, *, span=(0, 0)) -> dict[str, Any]:
+    return {
+        "ref": ref,
+        "drawer_ref": drawer_ref,
+        "layer": "passage",
+        "content": content,
+        "score": 0.5,
+        "room": "r",
+        "span": list(span),
+    }
+
+
+class TestPackModeDefaultAndEnv:
+    def test_default_pack_mode_is_k(self) -> None:
+        p = AmplifierMemoryProvider(embedder="none")
+        assert p._pack == "k"
+
+    def test_pack_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AMPLIFIER_AMB_PACK", "budget")
+        p = AmplifierMemoryProvider(embedder="none")
+        assert p._pack == "budget"
+        monkeypatch.setenv("AMPLIFIER_AMB_PACK", "bogus")
+        with pytest.raises(ValueError):
+            AmplifierMemoryProvider(embedder="none")
+
+    def test_token_budget_and_candidates_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AMPLIFIER_AMB_TOKEN_BUDGET", "1234")
+        monkeypatch.setenv("AMPLIFIER_AMB_CANDIDATES", "7")
+        p = AmplifierMemoryProvider(embedder="none")
+        assert p._token_budget == 1234
+        assert p._candidates == 7
+
+    def test_token_budget_and_candidates_defaults(self) -> None:
+        p = AmplifierMemoryProvider(embedder="none")
+        assert p._token_budget == 6000
+        assert p._candidates == 40
+
+
+class TestBudgetModeRequestsCandidates:
+    def test_requests_candidates_not_k_and_max_passages_per_drawer(
+        self, tmp_path: Path
+    ) -> None:
+        provider = _budget_provider(tmp_path, candidates=15)
+        fake = _FakeBudgetStore()
+        fake.hits_to_return = [_hit("d1", "d1", "hello")]
+        provider._store = fake
+
+        provider.retrieve("query", k=3, user_id="alice")
+
+        assert len(fake.search_calls) == 1
+        assert fake.search_calls[0]["k"] == 15  # NOT the incoming k=3
+        assert fake.search_calls[0]["max_passages_per_drawer"] == 3
+
+    def test_k_mode_still_requests_incoming_k(self, tmp_path: Path) -> None:
+        provider = AmplifierMemoryProvider(home=tmp_path / "s", embedder="none")
+        fake = _FakeBudgetStore()
+        fake.hits_to_return = [_hit("d1", "d1", "hello")]
+        provider._store = fake
+
+        provider.retrieve("query", k=3, user_id="alice")
+
+        assert fake.search_calls[0]["k"] == 3
+        assert fake.search_calls[0]["max_passages_per_drawer"] is None
+
+
+class TestPackToBudgetDiversityFirst:
+    def test_one_passage_per_drawer_before_any_second_passage(
+        self, tmp_path: Path
+    ) -> None:
+        provider = _budget_provider(tmp_path, token_budget=10_000)
+        hits = [
+            _hit("a1", "dA", "x", span=(0, 1)),
+            _hit("a2", "dA", "y", span=(1, 2)),
+            _hit("b1", "dB", "z", span=(0, 1)),
+        ]
+        # Map each passage's drawer_ref to a distinct "parent doc" so
+        # _doc_id_for_hit resolves through drawer_ref, not a shared default.
+        provider._drawer_to_doc_id = {"dA": "docA", "dB": "docB"}
+
+        kept, _ = provider._pack_to_budget(hits)
+
+        assert [h["ref"] for h in kept] == ["a1", "b1", "a2"]
+
+    def test_respects_token_budget_greedy_by_rank(self, tmp_path: Path) -> None:
+        """Budget fits exactly 2 x 5-char passages; the 3rd (rank order)
+        must be dropped, but budget adherence must never be exceeded."""
+        provider = _budget_provider(tmp_path, token_budget=10)
+        hits = [
+            _hit("a1", "dA", "12345"),  # 5 tokens (1/char)
+            _hit("b1", "dB", "12345"),  # 5 tokens -> exactly fills budget
+            _hit("c1", "dC", "12345"),  # would exceed -> dropped
+        ]
+        provider._drawer_to_doc_id = {"dA": "docA", "dB": "docB", "dC": "docC"}
+
+        kept, used = provider._pack_to_budget(hits)
+
+        assert [h["ref"] for h in kept] == ["a1", "b1"]
+        assert used == 10
+
+    def test_first_item_always_kept_even_if_oversized(self, tmp_path: Path) -> None:
+        provider = _budget_provider(tmp_path, token_budget=3)
+        hits = [_hit("a1", "dA", "way too long for the budget")]
+        provider._drawer_to_doc_id = {"dA": "docA"}
+
+        kept, used = provider._pack_to_budget(hits)
+
+        assert [h["ref"] for h in kept] == ["a1"]
+        assert used == len("way too long for the budget")
+
+    def test_pass_two_only_adds_to_docs_already_seen(self, tmp_path: Path) -> None:
+        """A doc that never got a first passage (budget exhausted in pass 1)
+        must never gain one in pass 2 either."""
+        provider = _budget_provider(tmp_path, token_budget=5)
+        hits = [
+            _hit("a1", "dA", "12345"),  # exactly fills the budget
+            _hit("b1", "dB", "1"),  # a brand-new doc -- never introduced
+            _hit("a2", "dA", "1"),  # a SECOND passage of dA -- also over budget
+        ]
+        provider._drawer_to_doc_id = {"dA": "docA", "dB": "docB"}
+
+        kept, used = provider._pack_to_budget(hits)
+
+        assert [h["ref"] for h in kept] == ["a1"]
+        assert used == 5
+
+
+class TestBudgetModeEndToEnd:
+    def test_groups_per_parent_doc_and_dates_once(self, tmp_path: Path) -> None:
+        provider = _budget_provider(tmp_path, token_budget=10_000, dates=False)
+        fake = _FakeBudgetStore()
+        provider._store = fake
+        provider.ingest([Document(id="doc1", content="whole thing", user_id="alice")])
+        drawer_ref = fake.filed[0][0]
+        fake.hits_to_return = [
+            _hit("p2", drawer_ref, "second half", span=(50, 100)),
+            _hit("p1", drawer_ref, "first half", span=(0, 50)),
+        ]
+
+        docs, _ = provider.retrieve("query", k=5, user_id="alice")
+
+        assert len(docs) == 1
+        assert docs[0].id == "doc1"
+        assert docs[0].content == "first half\n\u2026\nsecond half"
+
+    def test_trace_records_pack_doc_ids_and_tokens(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+
+        trace = tmp_path / "trace.jsonl"
+        monkeypatch.setenv("AMPLIFIER_AMB_TRACE", str(trace))
+        provider = _budget_provider(tmp_path, token_budget=10_000)
+        fake = _FakeBudgetStore()
+        provider._store = fake
+        provider.ingest([Document(id="doc1", content="hello", user_id="alice")])
+        drawer_ref = fake.filed[0][0]
+        fake.hits_to_return = [_hit("p1", drawer_ref, "hello there", span=(0, 5))]
+
+        docs, _ = provider.retrieve("query", k=5, user_id="alice")
+
+        row = json.loads(trace.read_text().splitlines()[-1])
+        assert row["pack"] == "budget"
+        assert row["packed_doc_ids"] == [d.id for d in docs]
+        assert row["packed_passage_count"] == 1
+        assert row["packed_tokens"] == len("hello there")
+        assert provider.last_raw is not None
+        assert provider.last_raw["pack"] == "budget"
+        assert provider.last_raw["packed_tokens"] == len("hello there")
+
+    def test_k_mode_trace_has_no_packed_tokens(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+
+        trace = tmp_path / "trace.jsonl"
+        monkeypatch.setenv("AMPLIFIER_AMB_TRACE", str(trace))
+        provider = AmplifierMemoryProvider(home=tmp_path / "s", embedder="none")
+        fake = _FakeGranularityStore()
+        fake.hits_to_return = [
+            {"ref": "d1", "source": "doc1", "content": "hi", "score": 0.5, "room": "r"}
+        ]
+        provider._store = fake
+
+        provider.retrieve("query", k=5, user_id="alice")
+
+        row = json.loads(trace.read_text().splitlines()[-1])
+        assert row["pack"] == "k"
+        assert row["packed_tokens"] is None
 
 
 def test_passages_off_creates_no_passage_cells(tmp_path: Path) -> None:

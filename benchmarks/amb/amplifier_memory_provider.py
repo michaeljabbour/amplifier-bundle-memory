@@ -100,6 +100,9 @@ class AmplifierMemoryProvider:
         dates: bool | str | None = None,
         embedding_model: str | None = None,
         passages: bool | str | None = None,
+        pack: str | None = None,
+        token_budget: int | str | None = None,
+        candidates: int | str | None = None,
     ) -> None:
         """``embedder``: ``"auto"`` (try FastEmbedEmbedder, degrade to lexical-only
         on any failure -- the default) or ``"none"`` (always lexical-only, never
@@ -159,6 +162,29 @@ class AmplifierMemoryProvider:
         self._passages = self._parse_bool_env(
             passages, "AMPLIFIER_AMB_PASSAGES", default="on"
         )
+        # T7.3: "pack" ("k", default -- unchanged pre-T7.3 behaviour, request
+        # exactly AMB's own k and return every hit) or "budget" (diversity-first
+        # packing to a token budget over a wider candidate pool -- see
+        # _pack_to_budget). Env fallback: AMPLIFIER_AMB_PACK.
+        self._pack = pack or os.environ.get("AMPLIFIER_AMB_PACK", "k")
+        if self._pack not in ("k", "budget"):
+            raise ValueError(f"pack must be 'k' or 'budget', got {self._pack!r}")
+        # T7.3: token budget for "budget" packing (cl100k tiktoken estimate
+        # when available, else chars/4) and how many candidate passages to
+        # request from the store before packing. Env fallbacks:
+        # AMPLIFIER_AMB_TOKEN_BUDGET / AMPLIFIER_AMB_CANDIDATES.
+        self._token_budget = int(
+            token_budget
+            if token_budget is not None
+            else os.environ.get("AMPLIFIER_AMB_TOKEN_BUDGET", "6000")
+        )
+        self._candidates = int(
+            candidates
+            if candidates is not None
+            else os.environ.get("AMPLIFIER_AMB_CANDIDATES", "40")
+        )
+        self._token_encoder: Any = None
+        self._token_encoder_load_attempted = False
         self.last_raw: dict[str, Any] | None = None
         self._store: Any = None
         self._embedder: Any = None
@@ -274,6 +300,89 @@ class AmplifierMemoryProvider:
         if embedder is None:
             return None
         return embedder.embed(text)
+
+    # ------------------------------------------------------------------
+    # T7.3: budgeted, diversity-first packing (the answerer's context
+    # builder -- the harness analogue of the briefing's evidence section).
+    # ------------------------------------------------------------------
+
+    def _get_token_encoder(self) -> Any | None:
+        """Lazy singleton cl100k_base ``tiktoken`` encoder, or ``None`` when
+        tiktoken isn't installed -- callers fall back to a chars/4 estimate,
+        never raise."""
+        if not self._token_encoder_load_attempted:
+            self._token_encoder_load_attempted = True
+            try:
+                import tiktoken
+
+                self._token_encoder = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                self._token_encoder = None
+        return self._token_encoder
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Token count for *text*: exact cl100k count when ``tiktoken`` is
+        importable, else a chars/4 approximation (never raises, never 0 for
+        non-empty text)."""
+        if not text:
+            return 0
+        encoder = self._get_token_encoder()
+        if encoder is not None:
+            return len(encoder.encode(text))
+        return max(1, len(text) // 4)
+
+    def _pack_to_budget(
+        self, hits: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Diversity-first packing of rank-ordered *hits* to
+        ``self._token_budget`` (T7.3).
+
+        Pass 1: the best-ranked (first-seen) passage of each distinct parent
+        drawer, in rank order, while there is room in the budget. Pass 2:
+        every remaining passage (a drawer's second, third, ...), again in
+        rank order, filling whatever budget is left. A single item is never
+        rejected for being oversized if NOTHING has been packed yet (there
+        must always be at least one passage), but every later item is
+        skipped once it would push the running total over budget -- rank
+        order is a greedy scan, not a bin-packing search, so a later,
+        smaller item can still fit even when an earlier, larger one didn't.
+
+        Returns ``(packed_hits, tokens_used)``; ``packed_hits`` preserves a
+        pass-1-then-pass-2 ordering so downstream per-doc grouping still
+        encounters every document for the FIRST time during pass 1.
+        """
+        ordered = [h for h in hits if isinstance(h, dict)]
+        kept: list[dict[str, Any]] = []
+        seen_doc_ids: set[str] = set()
+        used = 0
+
+        def _try_add(hit: dict[str, Any]) -> bool:
+            nonlocal used
+            cost = self._estimate_tokens(self._render_for_amb(hit))
+            if kept and used + cost > self._token_budget:
+                return False
+            kept.append(hit)
+            used += cost
+            return True
+
+        # Pass 1: one passage per distinct parent drawer, rank order.
+        for hit in ordered:
+            doc_id = self._doc_id_for_hit(hit)
+            if doc_id in seen_doc_ids:
+                continue
+            if _try_add(hit):
+                seen_doc_ids.add(doc_id)
+
+        # Pass 2: remaining passages of docs already seen, rank order.
+        for hit in ordered:
+            if hit in kept:
+                continue
+            doc_id = self._doc_id_for_hit(hit)
+            if doc_id not in seen_doc_ids:
+                continue  # never introduce a brand-new doc in pass 2
+            _try_add(hit)
+
+        return kept, used
 
     # ------------------------------------------------------------------
     # Scope helpers
@@ -404,7 +513,18 @@ class AmplifierMemoryProvider:
         if "current_model_id" in search_params and embedder is not None:
             search_kwargs["current_model_id"] = getattr(embedder, "model_id", None)
 
-        hits = store.search(query_vector, k, **search_kwargs)
+        # T7.3: "budget" packing requests a wider candidate pool (up to
+        # max_passages_per_drawer per drawer, when the store supports it)
+        # and then packs diversity-first to a token budget, INSTEAD of
+        # returning exactly AMB's own k -- see _pack_to_budget.
+        packed_tokens: int | None = None
+        if self._pack == "budget":
+            if "max_passages_per_drawer" in search_params:
+                search_kwargs["max_passages_per_drawer"] = 3
+            hits = store.search(query_vector, self._candidates, **search_kwargs)
+            hits, packed_tokens = self._pack_to_budget(hits)
+        else:
+            hits = store.search(query_vector, k, **search_kwargs)
 
         # T6.2/T6.3: group hits by the ORIGINAL AMB doc id; multiple passage
         # hits of the same parent drawer are concatenated, in span order,
@@ -456,6 +576,11 @@ class AmplifierMemoryProvider:
             # Per-doc RRF arm ranks (None under fusion="legacy") and layer.
             "arms": arms,
             "layer": layer,
+            # T7.3: packing mode and (in "budget" mode) how much of the
+            # token budget was actually used and how many passages that took.
+            "pack": self._pack,
+            "packed_passage_count": len(hits),
+            "packed_tokens": packed_tokens,
         }
         trace = os.environ.get("AMPLIFIER_AMB_TRACE")
         if trace:
@@ -476,6 +601,10 @@ class AmplifierMemoryProvider:
                             ),
                             "passages": self._passages,
                             "ids": [d.id for d in documents],
+                            "pack": self._pack,
+                            "packed_doc_ids": [d.id for d in documents],
+                            "packed_passage_count": len(hits),
+                            "packed_tokens": packed_tokens,
                         }
                     )
                     + "\n"
