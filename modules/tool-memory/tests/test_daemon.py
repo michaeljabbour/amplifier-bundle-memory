@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -121,7 +122,8 @@ class TestHealthShape:
             # §5.2 step 1c-bis: the stale-code-same-version fix needs a
             # fingerprint on every daemon's /health, not just ones that
             # bumped their version string.
-            assert isinstance(hc["code_fingerprint"], (int, float))
+            assert isinstance(hc["code_fingerprint"], str)
+            assert hc["code_fingerprint"] != ""
         finally:
             next(gen, None)
 
@@ -137,45 +139,142 @@ class TestHealthShape:
             0,
             token=_TOKEN,
             version="9.9.9-test",
-            code_fp=123.0,
+            code_fp="deadbeefcafef00d",
             durable=False,
         )
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         port = httpd.server_address[1]
         try:
             hc = _health(f"http://127.0.0.1:{port}")
-            assert hc["code_fingerprint"] == 123.0
+            assert hc["code_fingerprint"] == "deadbeefcafef00d"
         finally:
             httpd.shutdown()
 
     def test_daemon_version_helper_resolves_something(self) -> None:
-        # Editable/dev installs may not have package metadata -- the fallback
-        # sentinel is acceptable, but it must never raise.
+        # T6.7: reads the source-level _version.__version__ constant, so it
+        # always resolves in a source checkout (unlike the old
+        # importlib.metadata path, whose fallback sentinel this test used
+        # to document) -- still asserted defensively, never raises.
         assert isinstance(daemon_version(), str)
         assert daemon_version() != ""
 
-    def test_code_fingerprint_is_max_mtime_of_py_files(self, tmp_path) -> None:  # noqa: ANN001
+    def test_code_fingerprint_is_sha256_of_py_file_contents(self, tmp_path) -> None:  # noqa: ANN001
         pkg = tmp_path / "pkg"
         pkg.mkdir()
-        old = pkg / "old.py"
-        new = pkg / "new.py"
-        old.write_text("x = 1\n", encoding="utf-8")
-        new.write_text("y = 2\n", encoding="utf-8")
+        (pkg / "a.py").write_text("x = 1\n", encoding="utf-8")
+        (pkg / "b.py").write_text("y = 2\n", encoding="utf-8")
+
+        fp1 = code_fingerprint(pkg)
+        assert isinstance(fp1, str)
+        assert fp1 != ""
+        # Deterministic and stable across repeated calls with no change.
+        assert code_fingerprint(pkg) == fp1
+
+        # Touching mtime alone (without changing content) must NOT change
+        # the fingerprint -- this is the whole point of moving off mtime.
         import os
 
-        older_time = old.stat().st_mtime - 100
-        os.utime(old, (older_time, older_time))
-        newer_time = new.stat().st_mtime + 100
-        os.utime(new, (newer_time, newer_time))
-        assert code_fingerprint(pkg) == newer_time
+        touched = time.time() + 1000
+        os.utime(pkg / "a.py", (touched, touched))
+        assert code_fingerprint(pkg) == fp1
 
-    def test_code_fingerprint_empty_dir_is_zero(self, tmp_path) -> None:  # noqa: ANN001
+        # An actual content change DOES change the fingerprint.
+        (pkg / "a.py").write_text("x = 2\n", encoding="utf-8")
+        fp2 = code_fingerprint(pkg)
+        assert fp2 != fp1
+
+    def test_code_fingerprint_empty_dir_is_empty_string(self, tmp_path) -> None:  # noqa: ANN001
         empty = tmp_path / "empty"
         empty.mkdir()
-        assert code_fingerprint(empty) == 0.0
+        assert code_fingerprint(empty) == ""
 
     def test_code_fingerprint_missing_dir_never_raises(self, tmp_path) -> None:  # noqa: ANN001
-        assert code_fingerprint(tmp_path / "does-not-exist") == 0.0
+        assert code_fingerprint(tmp_path / "does-not-exist") == ""
+
+    def test_code_fingerprint_default_arg_is_cached_per_process(self) -> None:
+        """The no-arg (own-package) call path is cached -- repeated calls
+        against the real installed package return the identical value
+        without rescanning (T6.7: 'computed once per process')."""
+        first = code_fingerprint()
+        second = code_fingerprint()
+        assert first == second
+        assert isinstance(first, str)
+
+
+class TestRerankDefaults:
+    """D29 P6 rerank defaults: store construction and the daemon CLI both
+    default to the budget-safe shape (measured: 30 pairs x 900 chars p95
+    160ms > the 150ms search budget; 15-20 pairs or <=800 chars ~100ms).
+    Rerank mode itself stays "off" by default -- unchanged.
+    """
+
+    def test_native_memory_store_defaults(self) -> None:
+        from amplifier_module_tool_memory.store import (
+            DEFAULT_RERANK_MAX_CHARS,
+            DEFAULT_RERANK_TOP_N,
+            NativeMemoryStore,
+        )
+
+        store = NativeMemoryStore(record_access=False)
+        try:
+            assert store.rerank_mode == "off"
+            assert store.rerank_top_n == DEFAULT_RERANK_TOP_N == 20
+            assert (
+                store._rerank_config["rerank_max_chars"]  # noqa: SLF001
+                == DEFAULT_RERANK_MAX_CHARS
+                == 800
+            )
+        finally:
+            store.close()
+
+    def test_explicit_rerank_config_overrides_default_max_chars(self) -> None:
+        from amplifier_module_tool_memory.store import NativeMemoryStore
+
+        store = NativeMemoryStore(
+            record_access=False, rerank_config={"rerank_max_chars": 1234}
+        )
+        try:
+            assert store._rerank_config["rerank_max_chars"] == 1234  # noqa: SLF001
+        finally:
+            store.close()
+
+    def test_make_daemon_with_no_config_builds_without_error(self) -> None:
+        """``make_daemon(config=None)`` (the daemon's own no-config-file
+        path) must not raise -- the default resolution inside it falls back
+        to the same constants :class:`NativeMemoryStore` itself defaults to
+        (verified directly in ``test_native_memory_store_defaults`` above)."""
+        store = AmplifierStore(record_access=False)
+        httpd = make_daemon(
+            store,
+            None,
+            "127.0.0.1",
+            0,
+            token=_TOKEN,
+            version="9.9.9-test",
+            config=None,
+        )
+        httpd.server_close()
+
+    def test_cli_parser_rerank_defaults(self) -> None:
+        """``--rerank-top-n``/``--rerank-max-chars`` default to the same
+        constants ``make_daemon``'s config resolution falls back to."""
+        import argparse
+
+        from amplifier_module_tool_memory.store import (
+            DEFAULT_RERANK_MAX_CHARS,
+            DEFAULT_RERANK_TOP_N,
+        )
+
+        # Build a parser identical in shape to daemon.main()'s, to avoid
+        # depending on argparse internals of the real parser object.
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--rerank-top-n", type=int, default=DEFAULT_RERANK_TOP_N)
+        parser.add_argument(
+            "--rerank-max-chars", type=int, default=DEFAULT_RERANK_MAX_CHARS
+        )
+        args = parser.parse_args([])
+        assert args.rerank_top_n == 20
+        assert args.rerank_max_chars == 800
 
 
 class TestDomainToolRoundTrips:

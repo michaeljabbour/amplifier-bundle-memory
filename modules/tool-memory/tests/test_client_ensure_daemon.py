@@ -606,61 +606,52 @@ class TestRetireOnlyOlderDaemons:
 
 
 class TestStaleCodeSameVersionRespawn:
-    """§5.2 step 1c-bis: a daemon reporting the SAME version string as the
-    client, but whose loaded code is demonstrably older (a reinstalled
-    package with no version bump -- the exact incident measured 2026-09-25,
-    both processes reporting ``2.0.2``), still gets retired and replaced.
+    """§5.2 step 1c-bis (T6.7, D28 follow-up 1): a daemon reporting the SAME
+    version string as the client, but whose loaded code is demonstrably
+    DIFFERENT (a reinstalled/refreshed package with no version bump -- the
+    exact incident measured 2026-09-25, both processes reporting ``2.0.2``),
+    still gets retired and replaced. Identity is now a sha256 fingerprint
+    over sorted source bytes (no ordering, just difference) rather than a
+    max-mtime float.
     """
 
     @pytest.mark.parametrize(
-        ("hc", "info", "mine_fp", "expected"),
+        ("hc", "mine_fp", "expected"),
         [
-            # Daemon reports a fingerprint older than ours -> retire.
-            ({"code_fingerprint": 100.0}, {}, 200.0, True),
-            # Daemon reports a fingerprint newer than (or equal to) ours -> keep.
-            ({"code_fingerprint": 300.0}, {}, 200.0, False),
-            ({"code_fingerprint": 200.0}, {}, 200.0, False),
-            # No code_fingerprint field (pre-fix daemon): fall back to
-            # started_at vs our fingerprint. Daemon started BEFORE the
-            # newest local .py file was touched -> its code predates ours.
-            ({}, {"started_at": "2020-01-01T00:00:00+00:00"}, 2000000000.0, True),
-            # Daemon started AFTER our newest file mtime -> its code is not
-            # provably stale; keep it.
-            ({}, {"started_at": "2099-01-01T00:00:00+00:00"}, 200.0, False),
-            # Missing started_at and no code_fingerprint -> fail closed (keep).
-            ({}, {}, 200.0, False),
-            # Unparsable started_at -> fail closed (keep).
-            ({}, {"started_at": "not-a-date"}, 2000000000.0, False),
+            # Daemon reports a DIFFERENT fingerprint than ours -> retire
+            # (there is no "older"/"newer" for a hash -- any difference at
+            # the same version means the daemon's on-disk code no longer
+            # matches this client's freshly-read source).
+            ({"code_fingerprint": "aaaa1111aaaa1111"}, "bbbb2222bbbb2222", True),
+            # Daemon reports the SAME fingerprint as ours -> reuse.
+            ({"code_fingerprint": "bbbb2222bbbb2222"}, "bbbb2222bbbb2222", False),
+            # No code_fingerprint field at all (a daemon started before this
+            # field existed): backward compat -- cannot prove staleness,
+            # leave it running.
+            ({}, "bbbb2222bbbb2222", False),
+            # code_fingerprint present but not a (non-empty) string -> same
+            # fail-closed backward-compat treatment.
+            ({"code_fingerprint": None}, "bbbb2222bbbb2222", False),
+            ({"code_fingerprint": ""}, "bbbb2222bbbb2222", False),
+            # This client's own fingerprint could not be computed (scan
+            # failure) -> never use that as grounds to kill a live daemon.
+            ({"code_fingerprint": "aaaa1111aaaa1111"}, "", False),
         ],
     )
     def test_should_retire_stale_code(
         self,
         monkeypatch: pytest.MonkeyPatch,
         hc: dict,
-        info: dict,
-        mine_fp: float,
+        mine_fp: str,
         expected: bool,
     ) -> None:
         monkeypatch.setattr(client_mod, "code_fingerprint", lambda: mine_fp)
-        assert client_mod._should_retire_stale_code(hc, info) is expected  # noqa: SLF001
-
-    def test_zero_local_fingerprint_never_retires(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A client that can't compute its own fingerprint (scan failure)
-        must never use that as grounds to kill a live daemon."""
-        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: 0.0)
-        assert (
-            client_mod._should_retire_stale_code(  # noqa: SLF001
-                {"code_fingerprint": 1.0}, {"started_at": "2020-01-01T00:00:00+00:00"}
-            )
-            is False
-        )
+        assert client_mod._should_retire_stale_code(hc, {}) is expected  # noqa: SLF001
 
     def test_stale_code_same_version_shuts_down_old_and_spawns_new(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Integration: SAME version string, older code_fingerprint on
+        """Integration: SAME version string, DIFFERENT code_fingerprint on
         /health -> old daemon is retired and a new one spawned."""
         pytest.importorskip("amplifier_data")
         import threading
@@ -678,7 +669,7 @@ class TestStaleCodeSameVersionRespawn:
             0,
             token="tok",
             version="2.0.2",
-            code_fp=100.0,  # deliberately "old" code
+            code_fp="oldoldoldoldoldo",  # deliberately stale code
             durable=False,
         )
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -701,7 +692,7 @@ class TestStaleCodeSameVersionRespawn:
         )
 
         monkeypatch.setattr(client_mod, "daemon_version", lambda: "2.0.2")
-        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: 200.0)
+        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: "freshfreshfresh1")
         monkeypatch.setattr(
             client_mod, "_spawn_daemon_process", lambda h: _spawn_daemon_ephemeral(h)
         )
@@ -725,11 +716,11 @@ class TestStaleCodeSameVersionRespawn:
                 client.shutdown()
             _wait_for_daemon_json_gone(home)
 
-    def test_same_version_fresh_code_reuses_running_daemon(
+    def test_same_version_same_fingerprint_reuses_running_daemon(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Integration: SAME version, fresh (newer-or-equal) code_fingerprint
-        -> the running daemon is reused, nothing is spawned."""
+        """Integration: SAME version, SAME code_fingerprint -> the running
+        daemon is reused, nothing is spawned."""
         pytest.importorskip("amplifier_data")
         import threading
 
@@ -745,7 +736,7 @@ class TestStaleCodeSameVersionRespawn:
             0,
             token="tok",
             version="2.0.2",
-            code_fp=200.0,
+            code_fp="samesamesamesame",
             durable=False,
         )
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -766,7 +757,7 @@ class TestStaleCodeSameVersionRespawn:
             encoding="utf-8",
         )
         monkeypatch.setattr(client_mod, "daemon_version", lambda: "2.0.2")
-        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: 200.0)
+        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: "samesamesamesame")
         spawned: list[Path] = []
         monkeypatch.setattr(client_mod, "_spawn_daemon_process", spawned.append)
         try:
@@ -777,3 +768,45 @@ class TestStaleCodeSameVersionRespawn:
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_missing_fingerprint_daemon_is_never_retired(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backward-compat: a daemon whose /health predates the
+        code_fingerprint field (or omits it) is left running at the SAME
+        version, even when this client's own fingerprint differs -- there is
+        nothing to compare against, so this must fail closed. Uses a
+        monkeypatched ``_health`` (rather than a real subprocess) because
+        the real ``make_daemon`` always computes and reports SOME
+        fingerprint -- this test simulates the legacy pre-T6.7 payload shape
+        that genuinely omits the field.
+        """
+        home = _home(tmp_path)
+        home.mkdir(exist_ok=True)
+        (home / "token").write_text("tok", encoding="utf-8")
+        (home / "daemon.json").write_text(
+            json.dumps(
+                {
+                    "url": "http://127.0.0.1:1",
+                    "port": 1,
+                    "pid": os.getpid(),  # alive (this test process)
+                    "version": "2.0.2",
+                    "token_file": str(home / "token"),
+                    "started_at": "2020-01-01T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(client_mod, "daemon_version", lambda: "2.0.2")
+        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: "clientsidefinger")
+        monkeypatch.setattr(
+            client_mod,
+            "_health",
+            lambda url, *, timeout: {"ok": True, "version": "2.0.2"},
+        )
+        spawned: list[Path] = []
+        monkeypatch.setattr(client_mod, "_spawn_daemon_process", spawned.append)
+
+        client = ensure_daemon(home)
+        assert client is not None and client.base_url == "http://127.0.0.1:1"
+        assert spawned == []  # never retired -- backward compat, fail closed
