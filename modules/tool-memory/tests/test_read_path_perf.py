@@ -189,6 +189,12 @@ class TestCellRefCache:
 
 
 class TestSnapshotReuse:
+    """T7.1-real (D32): the persistent index is built once and then
+    mutated/extended in place -- see test_persistent_indexes.py for the
+    full write-through/no-kernel-read acceptance suite. These tests keep
+    the narrower "one fold object, no repeat construction" contract.
+    """
+
     def test_burst_of_reads_materializes_log_once(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -208,7 +214,12 @@ class TestSnapshotReuse:
         store.query_kg("alice")
         assert calls["n"] == 1
 
-    def test_append_invalidates_snapshot(self) -> None:
+    def test_append_mutates_the_same_persistent_index_in_place(self) -> None:
+        """Superseded contract (T7.1-real): a write no longer swaps in a
+        NEW fold object -- it write-throughs directly into the SAME
+        persistent index (see ``_apply_write_through``), so
+        ``_fold_snapshot()`` returns the identical object before and
+        after, already reflecting the write."""
         store = _build_synthetic_store()
         first = store._fold_snapshot()
         assert store._fold_snapshot() is first
@@ -216,98 +227,59 @@ class TestSnapshotReuse:
             wing="w", room="r", content="freshly filed", embedding=[0.0, 0.7, 0.7]
         )
         second = store._fold_snapshot()
-        assert second is not first
-        assert ref in second.payloads
+        assert second is first
+        # T7.1-real (D32): drawer/passage CONTENT is evicted from the
+        # fold's payload dict into the bounded content LRU right after
+        # write-through applies it (RAM bound) -- `_payload_text` still
+        # resolves it with no kernel round trip.
+        assert store._content_lru_get(ref) is not None
+        assert store._payload_text(ref, second) == "freshly filed"
         hits = store.search([0.0, 0.7, 0.7], 1, wing="w", lexical_query="freshly")
         assert hits[0]["ref"] == ref
 
-    def test_snapshot_expires(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_never_expires_across_an_idle_gap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Superseded contract (T7.1-real): there is no more idle-expiry
+        timer at all -- the persistent index simply never goes away."""
+        import time
+
         store = _build_synthetic_store()
-        monkeypatch.setattr(store, "SNAPSHOT_REUSE_S", 0.0)
-        assert store._fold_snapshot() is not store._fold_snapshot()
+        first = store._fold_snapshot()
+        time.sleep(0.05)
+        assert store._fold_snapshot() is first
 
 
-class TestSnapshotRetentionBounded:
-    """Review MUST-FIX 1: expiry must not pin every fold for SNAPSHOT_REUSE_S.
+class TestNoTimerMachinery:
+    """T7.1-real (D32) removed the idle-expiry timer entirely (superseding
+    the review MUST-FIX 1 fix this class used to pin) -- the persistent
+    index has exactly one owner (``NativeMemoryStore._prior_fold``) and no
+    per-request timer threads are ever created."""
 
-    A per-snapshot ``threading.Timer`` holding the fold kept one ~300-500 MB
-    fold alive per write+read pair for 5 s (3.2 GB peak RSS on the real
-    store). At most ONE fold may stay reachable from the store, and at most
-    one expiry timer may be pending, however writes and reads interleave.
-    """
-
-    @staticmethod
-    def _live(refs: list) -> int:  # noqa: ANN001
-        import gc
-
-        gc.collect()
-        return sum(1 for r in refs if r() is not None)
-
-    def test_interleaved_writes_and_reads_keep_one_fold(self) -> None:
+    def test_no_timer_threads_created_across_writes_and_reads(self) -> None:
         import threading
-        import weakref
 
         store = _build_synthetic_store()
-        assert store.SNAPSHOT_REUSE_S >= 1.0  # the window stays open all loop
         timers_before = sum(
             isinstance(t, threading.Timer) for t in threading.enumerate()
         )
-        refs = []
         for i in range(8):
             store.file(
                 wing="w", room="r", content=f"pair {i}", embedding=[0.5, 0.5, 0.0]
             )
-            refs.append(weakref.ref(store._fold_snapshot()))
             store.search([0.5, 0.5, 0.0], 2, wing="w", lexical_query="pair")
-        assert self._live(refs) <= 1
         timers_after = sum(
             isinstance(t, threading.Timer) for t in threading.enumerate()
         )
-        assert timers_after - timers_before <= 1
+        assert timers_after == timers_before
 
-    def test_snapshot_released_after_idle_expiry(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import time
-        import weakref
-
-        store = _build_synthetic_store()
-        monkeypatch.setattr(store, "SNAPSHOT_REUSE_S", 0.05)
-        ref = weakref.ref(store._fold_snapshot())
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and (
-            store._snapshot is not None or store._expiry_timer is not None
-        ):
-            time.sleep(0.02)
-        assert store._snapshot is None
-        assert store._expiry_timer is None
-        assert self._live([ref]) == 0
-
-    def test_timer_does_not_pin_the_store(self) -> None:
+    def test_store_is_still_garbage_collectable(self) -> None:
+        import gc
         import weakref
 
         store = _build_synthetic_store()
         store._fold_snapshot()
-        assert store._expiry_timer is not None
         sref = weakref.ref(store)
         del store
-        assert self._live([sref]) == 0
-
-    def test_snapshot_built_across_an_append_is_not_published(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        store = _build_synthetic_store()
-        store._fold_snapshot()  # subscribe the observer
-        import amplifier_module_tool_memory.store as store_mod
-
-        orig = store_mod._SearchFold
-
-        def racing(*a, **kw):  # noqa: ANN002, ANN003, ANN202
-            fold = orig(*a, **kw)
-            store._on_append(None, None)  # an append lands mid-build
-            return fold
-
-        store._on_append(None, None)  # invalidate the current slot
-        monkeypatch.setattr(store_mod, "_SearchFold", racing)
-        store._fold_snapshot()
-        assert store._snapshot is None
+        gc.collect()
+        assert sref() is None

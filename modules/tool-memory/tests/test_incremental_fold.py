@@ -185,10 +185,9 @@ class TestIncrementalFoldEquivalence:
             incremental = store.search(
                 [0.5, 0.5, 0.5], 5, wing="w", room="r", lexical_query="drawer"
             )
-            # Force a fresh full fold for comparison (bypass the incremental
-            # base without mutating the store's real prior_fold/snapshot).
+            # Force a fresh full fold for comparison (bypass the
+            # persistent index's write-through state).
             monkeypatch.setattr(store, "_prior_fold", None)
-            monkeypatch.setattr(store, "_snapshot", None)
             fresh = store.search(
                 [0.5, 0.5, 0.5], 5, wing="w", room="r", lexical_query="drawer"
             )

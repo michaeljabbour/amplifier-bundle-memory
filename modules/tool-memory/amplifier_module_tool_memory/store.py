@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import struct
 import threading
 import time
 import weakref
+from collections import OrderedDict
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
@@ -420,11 +422,26 @@ class _SearchFold:
 
     Reads the kernel directly -- no AccessEvents (D4 read-vs-fold boundary).
     Lenses stay pure (D1) and every read sees a current view of the log: a
-    snapshot is reused only by :meth:`NativeMemoryStore._fold_snapshot` while
-    NO event has been appended since it was taken (tracked by a kernel
-    observer), and only for a few seconds, so a burst of reads (the session
-    briefing's search + KG + diary, then the first prompt's interject search)
-    pays for one log materialization instead of one each.
+    short-lived burst-read snapshot is reused only by
+    :meth:`NativeMemoryStore._fold_snapshot` while NO event has been
+    appended since it was taken (tracked by a kernel observer), and only
+    for a few seconds, so a burst of reads (the session briefing's search +
+    KG + diary, then the first prompt's interject search) pays for one log
+    materialization instead of one each.
+
+    T7.1 (D32): the store's OWN persistent extension base
+    (``NativeMemoryStore._prior_fold``) is a SEPARATE, longer-lived thing
+    from that short burst-read snapshot -- it is never idle-expired, so a
+    search arriving after any idle gap (5s, 5 minutes, a day) still only
+    EXTENDS this fold from wherever it last left off, rather than
+    rebuilding every index in this class from scratch. Before this fix,
+    idle expiry dropped the extension base too, so the very next search
+    after an idle gap rebuilt the whole thing -- the measured defect (D31):
+    384-460s on a 1 GB store after a 6s idle gap, because a from-scratch
+    build (``prior=None``) walks every event in the log to rebuild the
+    payload join, per-subject index, vector matrix, scope membership,
+    current-facts history and filing attribution, instead of processing
+    only the newly appended tail.
     """
 
     def __init__(
@@ -575,6 +592,102 @@ class _SearchFold:
         if len(new_events) < n:
             return False
         return bool(new_events[n - 1][0] == self._events[-1][0])
+
+    def apply_tail_in_place(
+        self, new_tail: list[tuple[Any, Any]], payload_of: dict[Any, bytes]
+    ) -> None:
+        """T7.1-real (D32) write-through: mutate THIS fold's own indexes
+        directly with *new_tail* -- the events one write call just
+        committed (real kernel SeqPos + the actual staged ``Event``
+        objects, zipped from a ``WriteBatch``'s ``commit()`` result) --
+        with NO kernel read at all.
+
+        Unlike the constructor's ``prior=`` extension (which builds a
+        brand-new fold by copying every base dict/list once per call --
+        fine for one call per SEARCH, catastrophic for one call per
+        WRITE), this method APPENDS/mutates in place: cost is
+        O(len(new_tail)), never O(store), so it is safe to call on every
+        single write without regressing ingest throughput.
+
+        Concurrency: callers (``NativeMemoryStore._apply_write_through``)
+        hold ``NativeMemoryStore._index_lock`` for the duration, because
+        ``search()`` runs WITHOUT the daemon's write lock (by design, for
+        read latency) and could otherwise observe a dict mutated
+        mid-iteration. Every mutation here is either an append (safe to
+        race with a concurrent reader that only ``.get()``s) or a
+        ``setdefault`` inserting a new key (the one operation that CAN
+        corrupt a concurrent ``dict.items()`` iteration elsewhere --
+        which is exactly why the lock exists).
+        """
+        from amplifier_data.lenses._scope import SCOPED_TO
+        from amplifier_data.lenses.temporal import INVALIDATE_PREFIX
+        from amplifier_data.lenses.vector import EMBEDDING_OF
+        from amplifier_data.models import CellWriteEvent, RelationshipEvent
+
+        self.payloads.update(payload_of)
+        for pos, ev in new_tail:
+            self._events.append((pos, ev))
+            self.refs.append(ev.cell_ref() if isinstance(ev, CellWriteEvent) else None)
+            if self._by_subject is not None and isinstance(ev, RelationshipEvent):
+                self._by_subject.setdefault(ev.from_ref, []).append((pos, ev))
+            if not isinstance(ev, RelationshipEvent):
+                continue
+            etype = ev.type
+            if etype == SCOPED_TO:
+                self.scope_membership.setdefault(ev.from_ref, set()).add(ev.to_ref)
+                self.scope_reverse.setdefault(ev.to_ref, set()).add(ev.from_ref)
+                continue
+            if etype == EMBEDDING_OF:
+                if self._embedding_edges_cache is not None:
+                    self._embedding_edges_cache.append((ev.from_ref, ev.to_ref))
+                continue
+            if etype == _MEMORY_FILED_AS:
+                self._filed_as_edges.append((ev.from_ref, ev.to_ref))
+                raw = self.payloads.get(ev.to_ref)
+                if raw is not None:
+                    try:
+                        body = json.loads(raw.decode("utf-8", errors="replace"))
+                    except (ValueError, TypeError):
+                        body = None
+                    if isinstance(body, dict) and body.get("kind") == "filing":
+                        self.filings.setdefault(ev.from_ref, []).append(
+                            (ev.to_ref, body)
+                        )
+            if etype.startswith(INVALIDATE_PREFIX):
+                predicate = etype[len(INVALIDATE_PREFIX) :]
+                op = "invalidate"
+            else:
+                predicate = etype
+                op = "assert"
+            self._triple_history.setdefault(
+                (ev.from_ref, predicate, ev.to_ref), []
+            ).append((pos, op))
+            sp_objs = self._by_subject_predicate.setdefault(
+                (ev.from_ref, predicate), []
+            )
+            if ev.to_ref not in sp_objs:
+                sp_objs.append(ev.to_ref)
+            po_subs = self._by_predicate_object.setdefault(
+                (predicate, ev.to_ref), []
+            )
+            if ev.from_ref not in po_subs:
+                po_subs.append(ev.from_ref)
+            if predicate == _FILED_AT_PREDICATE:
+                raw = self.payloads.get(ev.to_ref)
+                if raw is not None:
+                    value = raw.decode("utf-8", errors="replace")
+                    existing = self.filed_at.get(ev.from_ref)
+                    if existing is None or value < existing:
+                        self.filed_at[ev.from_ref] = value
+        # The cached (refs, matrix) TUPLE may now be stale, but the
+        # incrementally-extendable state it was built from
+        # (`_matrix_state`/`_scope_matrix_states`) is NOT invalidated --
+        # the next `vector_matrix()`/`scoped_vector_matrix()` call simply
+        # re-checks `embedding_edges()` (now current, appended above) and
+        # extends from wherever it left off, exactly like the constructor
+        # path already does.
+        self._vector_matrix_computed = False
+        self._vector_view = None
 
     def _extend_by_subject(
         self, new_tail_events: list[Any]
@@ -825,11 +938,19 @@ class _SearchFold:
                 # the safe pure-Python path rather than build a ragged matrix.
                 self._vector_matrix = None
                 return None
+            row = struct.unpack(f"<{n}f", raw)
+            if not _is_finite_nonzero_row(row):
+                # T7.1-real (D32) NaN guard: a corrupt/zero-norm embedding
+                # must NEVER enter the matrix -- it would poison every
+                # later cosine score in the same matmul (the numpy
+                # "invalid value encountered in matmul" defect). Silently
+                # excluded from ranking; a maintenance sweep re-embeds it.
+                continue
             new_refs.append(target_ref)
-            new_rows.append(struct.unpack(f"<{n}f", raw))
+            new_rows.append(row)
 
         if new_rows:
-            new_mat = np.asarray(new_rows, dtype=np.float64)
+            new_mat = np.asarray(new_rows, dtype=np.float32)
             mat = (
                 new_mat
                 if prior_mat is None or prior_mat.shape[0] == 0
@@ -837,7 +958,7 @@ class _SearchFold:
             )
             refs = prior_refs + new_refs
         else:
-            mat = prior_mat if prior_mat is not None else np.zeros((0, 0))
+            mat = prior_mat if prior_mat is not None else np.zeros((0, 0), dtype=np.float32)
             refs = prior_refs
 
         self._matrix_state = (refs, mat, len(edges))
@@ -896,11 +1017,17 @@ class _SearchFold:
             elif n != dim:
                 self._scope_matrix_states.pop(scope_ref, None)
                 return None
+            row = struct.unpack(f"<{n}f", raw)
+            if not _is_finite_nonzero_row(row):
+                # NaN guard (T7.1-real, D32) -- see vector_matrix()'s twin
+                # check; never let a corrupt/zero-norm vector into a
+                # per-scope matrix either.
+                continue
             new_refs.append(target_ref)
-            new_rows.append(struct.unpack(f"<{n}f", raw))
+            new_rows.append(row)
 
         if new_rows:
-            new_mat = np.asarray(new_rows, dtype=np.float64)
+            new_mat = np.asarray(new_rows, dtype=np.float32)
             mat = (
                 new_mat
                 if prior_mat is None or prior_mat.shape[0] == 0
@@ -908,7 +1035,7 @@ class _SearchFold:
             )
             refs = prior_refs + new_refs
         else:
-            mat = prior_mat if prior_mat is not None else np.zeros((0, 0))
+            mat = prior_mat if prior_mat is not None else np.zeros((0, 0), dtype=np.float32)
             refs = prior_refs
 
         self._scope_matrix_states[scope_ref] = (refs, mat, len(edges))
@@ -948,6 +1075,24 @@ class _SearchFold:
         return sorted(out)
 
 
+def _is_finite_nonzero_row(row: tuple[float, ...]) -> bool:
+    """T7.1-real (D32) NaN guard: whether *row* (a raw unpacked embedding)
+    is safe to add to a vector matrix -- every component finite AND the
+    vector not all-zero (a zero-norm row divides by zero at cosine-score
+    time). Deliberately pure Python (no numpy import) so it's cheap to
+    call on every single row appended one at a time, at write time.
+    """
+    import math
+
+    saw_nonzero = False
+    for x in row:
+        if math.isnan(x) or math.isinf(x):
+            return False
+        if x != 0.0:
+            saw_nonzero = True
+    return saw_nonzero
+
+
 def _fast_vector_query(
     fold: _SearchFold, query_vector: list[float], k: int, scope_ref: Any
 ) -> list[tuple[str, float]] | None:
@@ -984,10 +1129,16 @@ def _fast_vector_query(
         raise ValueError(
             f"dimension mismatch: query has {q.shape[0]}, stored has {sub_mat.shape[1]}"
         )
+    if not np.all(np.isfinite(q)):
+        # T7.1-real (D32) NaN guard: a non-finite QUERY vector (a
+        # degenerate embed() call, e.g. on empty/malformed text) would
+        # contaminate every row of `dots` via matmul -- treated the same
+        # as a zero-norm query below (every score 0.0), not propagated.
+        q = np.zeros_like(q)
     norms = np.linalg.norm(sub_mat, axis=1)
     qnorm = float(np.linalg.norm(q))
-    dots = sub_mat @ q
-    with np.errstate(invalid="ignore", divide="ignore"):
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        dots = sub_mat @ q
         scores = np.where((norms == 0) | (qnorm == 0), 0.0, dots / (norms * qnorm))
 
     order = sorted(range(len(sub_refs)), key=lambda i: (-scores[i], sub_refs[i]))
@@ -1169,7 +1320,17 @@ class NativeMemoryStore:
         rerank_top_n: int = DEFAULT_RERANK_TOP_N,
         rerank_max_chars: int = DEFAULT_RERANK_MAX_CHARS,
         rerank_config: dict[str, Any] | None = None,
+        payload_lru_size: int = 4096,
     ) -> None:
+        # T7.1-real (D32): the durable log's OWN path, kept ONLY for the
+        # direct in-process backend (the daemon's real production path --
+        # RemoteStore/GatewayClient proxy through a server that owns the
+        # file itself). Used purely for a cheap `os.stat()` external-write
+        # detector (see `_external_write_detected`) -- never opened or
+        # read directly by this class.
+        self._durable_path: str | None = (
+            path if (store is None and base_url is None and token is None) else None
+        )
         if store is None:
             if base_url is not None and token is not None:
                 # Authed MCP gateway: token-protected, single-writer, MCP-shaped.
@@ -1204,21 +1365,19 @@ class NativeMemoryStore:
         # perf/startup-latency: incremental per-event cell-ref memo shared by
         # every fold snapshot this store takes (see _CellRefCache).
         self._ref_cache = _CellRefCache()
-        # Append-generation counter (bumped by a kernel observer) + the last
-        # snapshot, for short-lived reuse across a burst of reads.
-        self._generation = 0
-        self._observing: bool | None = None
-        self._snapshot: tuple[int, float, _SearchFold] | None = None
-        self._building: tuple[int, threading.Event] | None = None
         self._snapshot_lock = threading.Lock()
-        self._expiry_timer: threading.Timer | None = None
-        # perf/incremental-fold: the most recently built fold, kept as the
-        # extension base ACROSS appends (unlike ``_snapshot``, which is
-        # invalidated by every write) so a busy store paying continuous
-        # concurrent writes still only reprocesses the NEW tail per fold,
-        # not the whole log. Bounded to one fold (same guarantee as
-        # ``_snapshot``): dropped together on true idle expiry, see
-        # ``_expire_snapshot``.
+        # T7.1-real (D32): the persistent, write-through derived index --
+        # built once (cold, from the kernel) and then EXTENDED IN PLACE
+        # forever, either synchronously by this store's own writes
+        # (``_apply_write_through``, no kernel read at all) or, rarely, by
+        # a background catch-up thread when an external writer is
+        # detected (see ``_external_write_detected``/
+        # ``_schedule_background_catchup``). Never dropped on idle -- see
+        # ``_fold_snapshot``'s docstring for the full contract and the
+        # measured defect (D31: 384-460s on a 1 GB store after a 6s idle
+        # gap) this supersedes. Mutations are guarded by ``_index_lock``
+        # because ``search()`` deliberately runs WITHOUT the daemon's
+        # write lock.
         self._prior_fold: _SearchFold | None = None
         self._last_build_at: float = 0.0
         self.filed: list[dict[str, object]] = []
@@ -1254,6 +1413,51 @@ class NativeMemoryStore:
             **(rerank_config or {}),
         }
         self.last_search_stats: dict[str, Any] = {}
+        # T7.1-real (D32): write-through concurrency + no-log-read search.
+        #
+        # `_index_lock` guards every MUTATION of `_prior_fold`'s metadata
+        # dicts (write-through appends AND the rare background catch-up
+        # swap) -- `search()` itself runs WITHOUT this lock (the daemon's
+        # own design: a slow write must never block a reader), so any
+        # in-place dict mutation that could be observed mid-iteration by a
+        # concurrent reader must happen only while holding it. Plain
+        # `.get()` reads need no lock (safe under the GIL).
+        self._index_lock = threading.RLock()
+        # `(size, mtime_ns)` of the durable log file as of the last time
+        # THIS process's own write-through brought the index fully
+        # current. A search compares a fresh, cheap `os.stat()` against
+        # this baseline instead of reading the log at all: unchanged means
+        # "nothing happened since we last applied our own writes"; changed
+        # means an EXTERNAL writer (a second process sharing this file --
+        # tests/benchmarks only; production is single-writer) appended
+        # without going through this store's write-through path.
+        self._path_baseline: tuple[int, int] | None = None
+        self._catchup_lock = threading.Lock()
+        self._catchup_running = False
+        # Bounded LRU for drawer/passage CONTENT bytes (the bulk of a real
+        # store's RAM) -- populated at write time (no kernel round trip
+        # for content we just wrote ourselves) and consulted before a
+        # kernel resolve on a genuine miss (old content this process
+        # hasn't touched recently). Small structural payloads (facts,
+        # filings, scope names) stay in `_SearchFold.payloads` itself
+        # (unbounded, but tiny -- a few dozen bytes each).
+        self._content_lru: OrderedDict[Any, bytes] = OrderedDict()
+        self._content_lru_lock = threading.Lock()
+        self._content_lru_size = max(1, payload_lru_size)
+        # In-process external-write signal (complements the durable-path
+        # os.stat check, which only helps across separate processes): a
+        # kernel observer that fires for EVERY appended event, in-process
+        # or not. `_own_commit_depth` suppresses the signal for events
+        # THIS store's own `_commit_and_apply` is in the middle of
+        # committing (write-through already handles those synchronously,
+        # right after `commit()` returns) -- anything else (e.g. a raw
+        # `store.assert_fact`/`write_cell` call bypassing this class's own
+        # write path entirely, as the daemon's low-level generic dispatch
+        # tools do) sets `_external_dirty`, triggering the SAME background
+        # catch-up used for a genuinely external process.
+        self._observing: bool | None = None
+        self._own_commit_depth = 0
+        self._external_dirty = False
 
     def close(self) -> None:
         """Close the backing store if it supports it (RemoteStore does not)."""
@@ -1324,7 +1528,8 @@ class NativeMemoryStore:
             # graph wires exactly as the sequential path below does.
             b = s.write_batch()  # type: ignore[attr-defined]
             ref = b.write_cell(content.encode("utf-8"))
-            b.scope(ref, b.write_cell(f"wing:{wing}".encode()))
+            wing_scope_ref = b.write_cell(f"wing:{wing}".encode())
+            b.scope(ref, wing_scope_ref)
             b.scope(ref, b.write_cell(f"room:{room}".encode()))
             if source:
                 b.assert_fact(ref, "has_source", b.write_cell(source.encode()))
@@ -1378,8 +1583,23 @@ class NativeMemoryStore:
                 )
             )
             b.assert_fact(ref, _MEMORY_FILED_AS, filing_ref)
-            commit_result = b.commit()
+            # T7.2 (D32): stage this drawer's passages on the SAME batch
+            # (one append_batch for the drawer + its facts + all its
+            # passages) instead of a second commit after this one.
+            passage_stage: list[Any] = []
+            if len(content) >= self.passage_min_chars:
+                passage_stage = self._write_passages(
+                    ref, content, wing=wing, room=room, embedder=embedder, batch=b
+                )
+            commit_result = self._commit_and_apply(b, wing_ref=wing_scope_ref)
             ref = _resolve_batch_ref(commit_result, ref)
+            if passage_stage:
+                # Resolved for parity with the sequential path's return
+                # value shape, even though nothing in this module currently
+                # reads _write_passages's return from `file`'s own call.
+                passage_stage = [
+                    _resolve_batch_ref(commit_result, r) for r in passage_stage
+                ]
         else:
             ref = s.write_cell(content.encode("utf-8"))  # type: ignore[attr-defined]
             # wing/room scoping — content-addressed scope cells (idempotent refs).
@@ -1432,8 +1652,13 @@ class NativeMemoryStore:
                 )
             )
             s.assert_fact(ref, _MEMORY_FILED_AS, filing_ref)  # type: ignore[attr-defined]
-        if len(content) >= self.passage_min_chars:
-            self._write_passages(ref, content, wing=wing, room=room, embedder=embedder)
+            # Sequential path: T7.2's shared-batch passage staging only
+            # applies to the atomic branch above (which already wrote its
+            # passages, in the SAME commit, before reaching here).
+            if len(content) >= self.passage_min_chars:
+                self._write_passages(
+                    ref, content, wing=wing, room=room, embedder=embedder
+                )
         self.filed.append(
             {
                 "ref": ref,
@@ -1527,7 +1752,7 @@ class NativeMemoryStore:
             b = s.write_batch()  # type: ignore[attr-defined]
             filing_ref = b.write_cell(payload)
             b.assert_fact(drawer_ref, _MEMORY_FILED_AS, filing_ref)
-            commit_result = b.commit()
+            commit_result = self._commit_and_apply(b)
             filing_ref = _resolve_batch_ref(commit_result, filing_ref)
         else:
             filing_ref = s.write_cell(payload)  # type: ignore[attr-defined]
@@ -1542,6 +1767,7 @@ class NativeMemoryStore:
         wing: str,
         room: str,
         embedder: Any | None,
+        batch: Any | None = None,
     ) -> list[Any]:
         """T6.2 (D29): split *content* into overlapping passages
         (:func:`_split_into_passages`) and file each as its own
@@ -1561,14 +1787,83 @@ class NativeMemoryStore:
         drawers (daemon.py's ``_sweep_needs_embedding``) embeds it once an
         embedder warms, with no daemon change required: that sweep works
         off the predicate alone, not the cell's kind.
+
+        T7.2 (D32) -- one append per drawer+passages: when *batch* is
+        given (:meth:`file`'s own atomic branch passes its SHARED
+        ``WriteBatch``), every passage cell/edge is staged onto THAT batch
+        instead of committing separately -- the drawer, its facts, and all
+        its passages land in ONE ``append_batch`` call. When *batch* is
+        ``None`` (the standalone/backfill caller, :meth:`ensure_passages`)
+        this method stages its OWN batch and commits it once (still one
+        append for however many passages one drawer has), falling back to
+        the pre-T7.2 sequential calls only when the backend has no
+        ``write_batch`` primitive at all (``RemoteStore``).
         """
+        passages = _split_into_passages(
+            content, passage_chars=self.passage_chars, overlap=self.passage_overlap
+        )
+        if not passages:
+            return []
         s = self.store
+        own_batch = batch is None and self._supports_atomic_update()
+        b = batch if batch is not None else (s.write_batch() if own_batch else None)  # type: ignore[attr-defined]
+        passage_refs: list[Any] = []
+        if b is not None:
+            wing_scope = b.write_cell(f"wing:{wing}".encode())
+            room_scope = b.write_cell(f"room:{room}".encode())
+            for start, end, text in passages:
+                payload = json.dumps(
+                    {
+                        "kind": "passage",
+                        "drawer": drawer_ref,
+                        "start": start,
+                        "end": end,
+                        "text": text,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                ref = b.write_cell(payload)
+                b.scope(ref, wing_scope)
+                b.scope(ref, room_scope)
+                b.assert_fact(ref, _MEMORY_PASSAGE_OF, drawer_ref)
+                vector: Sequence[float] | None = None
+                if embedder is not None and getattr(embedder, "ready", False):
+                    try:
+                        vector = embedder.embed(text)
+                    except Exception:  # loud-but-graceful (KG-N3 pattern)
+                        vector = None
+                if vector is not None:
+                    # Byte-identical to add_embedding's own packing -- a
+                    # WriteBatch has no add_embedding sugar (envelope.py),
+                    # so it is staged manually here exactly like `file`'s
+                    # own atomic branch does for the drawer's embedding.
+                    from amplifier_data.lenses.vector import EMBEDDING_OF
+
+                    vec = list(vector)
+                    emb_ref = b.write_cell(struct.pack(f"<{len(vec)}f", *vec))
+                    b.relate(emb_ref, ref, EMBEDDING_OF)
+                    model_id = getattr(embedder, "model_id", None)
+                    if model_id is not None:
+                        b.assert_fact(
+                            ref,
+                            _EMBEDDED_WITH_PREDICATE,
+                            b.write_cell(str(model_id).encode()),
+                        )
+                else:
+                    b.assert_fact(ref, "needs_embedding", b.write_cell(_TRUE_CELL_BYTES))
+                passage_refs.append(ref)
+            if own_batch:
+                commit_result = self._commit_and_apply(b, wing_ref=wing_scope)
+                passage_refs = [
+                    _resolve_batch_ref(commit_result, r) for r in passage_refs
+                ]
+            return passage_refs
+        # Sequential fallback (no write_batch support) -- unchanged from
+        # before T7.2: one call per cell/edge.
         wing_scope = s.write_cell(f"wing:{wing}".encode())  # type: ignore[attr-defined]
         room_scope = s.write_cell(f"room:{room}".encode())  # type: ignore[attr-defined]
-        passage_refs: list[Any] = []
-        for start, end, text in _split_into_passages(
-            content, passage_chars=self.passage_chars, overlap=self.passage_overlap
-        ):
+        for start, end, text in passages:
             payload = json.dumps(
                 {
                     "kind": "passage",
@@ -1584,7 +1879,7 @@ class NativeMemoryStore:
             s.scope(ref, wing_scope)  # type: ignore[attr-defined]
             s.scope(ref, room_scope)  # type: ignore[attr-defined]
             s.assert_fact(ref, _MEMORY_PASSAGE_OF, drawer_ref)  # type: ignore[attr-defined]
-            vector: Sequence[float] | None = None
+            vector = None
             if embedder is not None and getattr(embedder, "ready", False):
                 try:
                     vector = embedder.embed(text)
@@ -1731,13 +2026,36 @@ class NativeMemoryStore:
         return kernel is not None and callable(getattr(kernel, "all_events", None))
 
     def assert_kg(self, subject: str, predicate: str, object: str) -> None:
-        """String-keyed KG assert: strings in, anchor-cell fact in the substrate."""
+        """String-keyed KG assert: strings in, anchor-cell fact in the substrate.
+
+        T7.1-real (D32): staged on a ``WriteBatch`` (when supported) purely
+        so the SAME write-through path (``_apply_write_through``) can apply
+        this assertion to the persistent index with no kernel read --
+        behaviorally identical to the plain ``assert_fact`` call it
+        replaces (one relationship event, same anchor cells).
+        """
         s = self.store
-        s.assert_fact(self._anchor(subject), predicate, self._anchor(object))  # type: ignore[attr-defined]
+        subj_ref = self._anchor(subject)
+        obj_ref = self._anchor(object)
+        if self._supports_atomic_update():
+            b = s.write_batch()  # type: ignore[attr-defined]
+            b.assert_fact(subj_ref, predicate, obj_ref)
+            commit_result = self._commit_and_apply(b)
+        else:
+            s.assert_fact(subj_ref, predicate, obj_ref)  # type: ignore[attr-defined]
 
     def invalidate_kg(self, subject: str, predicate: str, object: str) -> None:
         s = self.store
-        s.invalidate_fact(self._anchor(subject), predicate, self._anchor(object))  # type: ignore[attr-defined]
+        subj_ref = self._anchor(subject)
+        obj_ref = self._anchor(object)
+        if self._supports_atomic_update():
+            from amplifier_data.lenses.temporal import INVALIDATE_PREFIX
+
+            b = s.write_batch()  # type: ignore[attr-defined]
+            b.relate(subj_ref, obj_ref, INVALIDATE_PREFIX + predicate)
+            commit_result = self._commit_and_apply(b)
+        else:
+            s.invalidate_fact(subj_ref, predicate, obj_ref)  # type: ignore[attr-defined]
 
     def query_kg(
         self, subject: str | None = None, predicate: str | None = None
@@ -1811,7 +2129,8 @@ class NativeMemoryStore:
             b.assert_fact(
                 ref, "has_source", b.write_cell(f"diary:{agent_name}".encode())
             )
-            ref = _resolve_batch_ref(b.commit(), ref)
+            commit_result = self._commit_and_apply(b)
+            ref = _resolve_batch_ref(commit_result, ref)
         else:
             ref = s.write_cell(entry.encode("utf-8"))  # type: ignore[attr-defined]
             s.scope(ref, s.write_cell(f"agent:{agent_name}".encode()))  # type: ignore[attr-defined]
@@ -1933,184 +2252,449 @@ class NativeMemoryStore:
         return self._read_ref(f"{kind}:{name}".encode())
 
     def _fold_snapshot(self) -> _SearchFold | None:
-        """One :class:`_SearchFold` over the backing kernel, or ``None``.
+        """The persistent, write-through derived index (T7.1-real, D32).
 
         ``None`` when the backend exposes no foldable kernel (RemoteStore /
         GatewayClient), signalling callers to keep the per-ref store-surface
         path (``regenerate`` / ``query_facts`` / ``graph_neighbors``)
         unchanged.
 
-        perf/incremental-fold + perf/startup-latency: a short-lived snapshot
-        (:data:`SNAPSHOT_REUSE_S`) is reused across a burst of reads while no
-        event has been appended (tracked by a kernel observer); otherwise (or
-        when observation is unsupported) a fresh fold is built by EXTENDING
-        the last-built fold (``_prior_fold``) over only the newly appended
-        tail (perf/incremental-fold) instead of rescanning the whole log.
+        Once warm (``_prior_fold`` built at least once -- the daemon's
+        startup warm-up thread, or whichever request happens to arrive
+        first), this method reads NOTHING from the kernel: a single cheap
+        ``os.stat()`` of the durable log compares against the baseline
+        this store's OWN write-through path maintains (see
+        ``_apply_write_through`` / ``_refresh_path_baseline``).
+
+        * Unchanged (the overwhelmingly common case: every one of this
+          process's own writes already updated the index AND the baseline
+          synchronously, in the write call itself) -> return the current
+          index immediately. No kernel read, no lock contention with a
+          concurrent write beyond a plain attribute read.
+        * Changed -- an EXTERNAL writer (a second process/store instance
+          sharing the same durable file: tests/benchmarks only; production
+          is single-writer) appended without going through THIS store's
+          write-through -- schedules a BACKGROUND catch-up (the proven
+          incremental-extend-from-kernel path, run off the request
+          thread) and returns the CURRENT, briefly-stale index right away.
+          The request is never blocked on it.
+
+        Cold (``_prior_fold`` is still ``None``): builds fresh from the
+        kernel exactly as before T7.1 -- the one unavoidable full-log read,
+        ideally paid once by the daemon's warm-up thread before any real
+        request ever reaches this method.
         """
         if not self._fold_capable():
             return None
         kernel = self.store.kernel
-        if not self._observe(kernel):
-            fold = _SearchFold(kernel, self._ref_cache, prior=self._prior_fold)
-            self._update_prior_fold(fold)
+        self._ensure_observed(kernel)
+        with self._index_lock:
+            fold = self._prior_fold
+        if fold is not None:
+            if self._external_dirty:
+                # In-process signal: something appended to THIS SAME
+                # kernel object without going through write-through (e.g.
+                # the daemon's low-level generic write_cell/assert_fact/
+                # batch dispatch tools). No process boundary is crossed,
+                # so there is no reason to tolerate staleness here --
+                # catch up synchronously (cheap: it's the SAME in-memory
+                # or already-open kernel, not a fresh process's durable
+                # file) and return the NOW-current index.
+                fold = self._catchup_now()
+            elif self._external_write_detected():
+                # Cross-process signal (durable file grew via a SEPARATE
+                # store instance/process): genuinely external, so defer
+                # to a background thread -- this request must never block
+                # on another process's write.
+                self._schedule_background_catchup()
             return fold
-        now = time.monotonic()
-        with self._snapshot_lock:
-            generation = self._generation
-            snap = self._snapshot
-            if (
-                snap is not None
-                and snap[0] == generation
-                and now - snap[1] < self.SNAPSHOT_REUSE_S
-            ):
-                return snap[2]
-            # Single-flight: concurrent readers of the same generation wait
-            # for the one build in progress instead of each materializing
-            # the log (they would only serialize on the kernel anyway).
-            building = self._building
-            if building is not None and building[0] == generation:
-                done = building[1]
-                owner = False
-            else:
-                done = threading.Event()
-                self._building = (generation, done)
-                owner = True
-        if not owner:
-            done.wait()
-            with self._snapshot_lock:
-                snap = self._snapshot
-                if snap is not None and snap[0] == generation:
-                    return snap[2]
-            fold = _SearchFold(kernel, self._ref_cache, prior=self._prior_fold)
-            self._update_prior_fold(fold)
-            return fold
-        # generation was read BEFORE materializing: if anything is appended
-        # meanwhile the counter moves on and this snapshot is never reused.
-        try:
-            fold = _SearchFold(kernel, self._ref_cache, prior=self._prior_fold)
-            self._update_prior_fold(fold)
-            with self._snapshot_lock:
-                # Only publish a snapshot that is still current: one built
-                # across an append could never be reused, so caching it would
-                # only pin its materialized log until expiry.
-                if generation == self._generation:
-                    self._snapshot = (generation, now, fold)
-        finally:
-            with self._snapshot_lock:
-                if self._building is not None and self._building[1] is done:
-                    self._building = None
-            done.set()
-        self._arm_expiry()
+        with self._index_lock:
+            if self._prior_fold is not None:
+                return self._prior_fold
+            fold = _SearchFold(kernel, self._ref_cache)
+            # Eager materialization (T7.1-real): force the embedding-edge
+            # list to exist NOW, at the one-time cold build, so every
+            # LATER vector_matrix()/scoped_vector_matrix() call (at write
+            # time, via _apply_write_through, or at search time) always
+            # finds it non-None and extends incrementally -- never a
+            # lazy from-scratch scan of the growing in-RAM event list on
+            # some later "first touch".
+            fold.embedding_edges()
+            self._prior_fold = fold
+            self._last_build_at = time.monotonic()
+            self._external_dirty = False
+        self._refresh_path_baseline()
         return fold
 
-    def _update_prior_fold(self, fold: _SearchFold) -> None:
-        """Record *fold* as the extension base for the NEXT fold build
-        (perf/incremental-fold), and mark this store as freshly active so
-        the idle-expiry timer knows a fold is worth retaining.
-
-        Monotonic: never replaces a longer (more current) prior with a
-        shorter one -- a slower concurrent builder that finishes after a
-        faster one must not regress the extension base.
+    def _ensure_observed(self, kernel: Any) -> None:
+        """Subscribe (once) to kernel appends -- the in-process half of
+        external-write detection (see ``_on_append``). Best-effort: a
+        kernel without ``subscribe`` (none in practice today) just never
+        sets ``_external_dirty``, falling back to the durable-path
+        ``os.stat`` check alone.
         """
-        with self._snapshot_lock:
-            prior = self._prior_fold
-            if prior is None or len(fold._events) >= len(prior._events):
-                self._prior_fold = fold
-            self._last_build_at = time.monotonic()
-        self._arm_expiry()
+        if self._observing is not None:
+            return
+        subscribe = getattr(kernel, "subscribe", None)
+        if not callable(subscribe):
+            self._observing = False
+            return
+        # The kernel (a Rust object the cycle collector cannot traverse)
+        # must not keep this store alive forever via a bound-method
+        # observer -- subscribe through a weakref, exactly like the
+        # pre-T7.1-real snapshot observer did.
+        store_ref = weakref.ref(self)
 
-    #: How long a snapshot may serve further reads (absent any append).
-    #: Short on purpose: a snapshot pins the materialized log in memory.
-    SNAPSHOT_REUSE_S = 5.0
+        def _observer(pos: Any, event: Any) -> None:
+            store = store_ref()
+            if store is not None:
+                store._on_append(pos, event)
 
-    def _observe(self, kernel: Any) -> bool:
-        """Subscribe (once) to kernel appends; False when unsupported."""
-        if self._observing is None:
-            subscribe = getattr(kernel, "subscribe", None)
-            if not callable(subscribe):
-                self._observing = False
-            else:
-                # The kernel (a Rust object the cycle collector cannot
-                # traverse) must not keep this store -- and its snapshot --
-                # alive: subscribe through a weakref.
-                store_ref = weakref.ref(self)
-
-                def _observer(pos: Any, event: Any) -> None:
-                    store = store_ref()
-                    if store is not None:
-                        store._on_append(pos, event)
-
-                try:
-                    subscribe(_observer)
-                    self._observing = True
-                except Exception:
-                    self._observing = False
-        return bool(self._observing)
+        try:
+            subscribe(_observer)
+            self._observing = True
+        except Exception:  # noqa: BLE001 - observation is an optimization, never required
+            self._observing = False
 
     def _on_append(self, _pos: Any, _event: Any) -> None:
-        with self._snapshot_lock:
-            self._generation += 1
-            self._snapshot = None
-
-    def _arm_expiry(self, delay: float | None = None) -> None:
-        """Ensure ONE idle-expiry timer is pending for the snapshot slot.
-
-        Retention is bounded by construction: the only strong reference to a
-        fold kept by this store is ``self._snapshot`` (at most one fold).
-        The timer holds neither a fold nor the store -- only a weakref to
-        the store -- and at most one timer is pending per store, so a busy
-        daemon interleaving writes and reads never accumulates folds or
-        timer threads.
+        """Kernel observer: fires for EVERY appended event. Anything NOT
+        happening inside THIS store's own ``_commit_and_apply`` (which
+        already applies its own events synchronously, right after
+        ``commit()`` returns) is either a genuinely external writer or a
+        caller bypassing this class's write path (e.g. the daemon's raw
+        ``write_cell``/``assert_fact`` dispatch tools) -- either way, the
+        persistent index is now stale and needs a catch-up.
         """
-        with self._snapshot_lock:
-            if self._expiry_timer is not None:
+        if self._own_commit_depth <= 0:
+            self._external_dirty = True
+
+    def _commit_and_apply(self, batch: Any, *, wing_ref: Any = None) -> Any:
+        """Commit *batch* and apply it to the persistent index
+        write-through, in one step -- the ONLY place that calls
+        ``batch.commit()`` for every write path in this class, so the
+        "is this one of our own writes" signal (``_own_commit_depth``,
+        see ``_on_append``) is centralized rather than duplicated at
+        every call site.
+        """
+        self._own_commit_depth += 1
+        try:
+            commit_result = batch.commit()
+        finally:
+            self._own_commit_depth -= 1
+        self._apply_write_through(batch, commit_result, wing_ref=wing_ref)
+        return commit_result
+
+    def _external_write_detected(self) -> bool:
+        """Cheap ``os.stat()``-based signal that the durable log grew
+        without going through this store's own write-through path.
+
+        Always ``False`` when there is no durable path to stat (an
+        in-memory kernel, or a remote/gateway backend that doesn't own
+        the file directly) -- there is no OTHER process that could share
+        that state anyway.
+        """
+        path = self._durable_path
+        if not path:
+            return False
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False
+        current = (st.st_size, st.st_mtime_ns)
+        with self._index_lock:
+            baseline = self._path_baseline
+        return baseline is not None and current != baseline
+
+    def _refresh_path_baseline(self) -> None:
+        """Record the durable log's current ``(size, mtime_ns)`` as "fully
+        reflected in the index" -- called after every successful
+        write-through application (own writes) and after a background
+        catch-up completes (external writes), so the NEXT ``os.stat()``
+        compare sees "unchanged" until something ELSE appends.
+        """
+        path = self._durable_path
+        if not path:
+            return
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        with self._index_lock:
+            self._path_baseline = (st.st_size, st.st_mtime_ns)
+
+    def _catchup_now(self, *, cross_process: bool = False) -> _SearchFold:
+        """Synchronously catch the persistent index up to current state,
+        using the proven incremental-extend-from-kernel path
+        (:class:`_SearchFold`'s ``prior=`` constructor) -- the SAME
+        mechanism T7.1 already relies on.
+
+        *cross_process* distinguishes the two triggers (see
+        ``_fold_snapshot``):
+
+        * ``False`` (the in-process ``_external_dirty`` signal): reads via
+          THIS store's own, already-open kernel handle -- correct AND
+          necessary, since that handle already sees the bypassing write
+          (same kernel object).
+        * ``True`` (the durable-path ``os.stat`` signal, a genuinely
+          separate process): reads via a FRESHLY-opened kernel handle on
+          the same durable path instead. Confirmed empirically:
+          ``RustFileKernel.all_events()`` on an ALREADY-OPEN handle does
+          NOT observe appends made through a DIFFERENT handle to the same
+          file, even after that writer closes -- only a fresh ``open()``
+          sees them. Closed immediately after use; this store's own
+          kernel handle (what it writes through) is never replaced.
+        """
+        self._external_dirty = False
+        fresh_kernel = None
+        if cross_process and self._durable_path:
+            from amplifier_data.kernel import DurableKernel
+
+            fresh_kernel = DurableKernel.open(self._durable_path)
+            kernel = fresh_kernel
+        else:
+            kernel = self.store.kernel
+        try:
+            with self._index_lock:
+                base = self._prior_fold
+            fold = _SearchFold(kernel, self._ref_cache, prior=base)
+            fold.embedding_edges()
+        finally:
+            if fresh_kernel is not None:
+                fresh_kernel.close()
+        with self._index_lock:
+            current = self._prior_fold
+            if current is None or len(fold._events) >= len(current._events):
+                self._prior_fold = fold
+            else:
+                fold = current
+        self._refresh_path_baseline()
+        return fold
+
+    def _schedule_background_catchup(self) -> None:
+        """Kick off (at most one concurrent) background thread running
+        :meth:`_catchup_now` -- used for the CROSS-PROCESS
+        ``_external_write_detected`` signal, where a search must never
+        block on another process's write.
+        """
+        with self._catchup_lock:
+            if self._catchup_running:
                 return
-            timer = threading.Timer(
-                self.SNAPSHOT_REUSE_S if delay is None else delay,
-                NativeMemoryStore._expire_snapshot_ref,
-                (weakref.ref(self),),
+            self._catchup_running = True
+
+        def _run() -> None:
+            try:
+                self._catchup_now(cross_process=True)
+            except Exception:  # noqa: BLE001 - background best-effort, never crash the daemon
+                _logger.exception("memory: background index catch-up failed")
+            finally:
+                with self._catchup_lock:
+                    self._catchup_running = False
+
+        threading.Thread(
+            target=_run, daemon=True, name="memory-index-catchup"
+        ).start()
+
+    def _apply_write_through(
+        self, batch: Any, commit_result: Any, *, wing_ref: Any = None
+    ) -> None:
+        """T7.1-real (D32): apply EXACTLY the events one write call just
+        committed directly to the persistent index -- no kernel read.
+
+        *batch* is the ``WriteBatch`` the caller staged (``.staged`` gives
+        the real ``Event`` objects in commit order); *commit_result* is
+        whatever ``batch.commit()`` returned. Zipping the two together
+        gives ``(SeqPos, Event)`` pairs identical to what
+        ``kernel.all_events()`` would eventually show -- the kernel
+        assigned those exact positions during ``append_batch`` -- so
+        applying them here is not an approximation, it's the same data,
+        just without asking the kernel for it a second time.
+
+        A safe no-op whenever write-through cannot apply cleanly (no
+        foldable kernel, an empty/degraded batch, or a ``GatewayWriteBatch``
+        pending-token commit result whose refs aren't real content
+        addresses yet) -- the store stays correct either way: the next
+        external-write check (or the next warm-up) picks up anything
+        missed via the background catch-up path.
+
+        *wing_ref*, when given, is the SINGLE wing scope cell this call's
+        drawer/passage content is scoped to (``file()``'s shared batch) --
+        used to EAGERLY extend that wing's partitioned vector matrix and
+        BM25 index right now, so no later search ever pays a "first touch
+        of this wing" cost.
+        """
+        if not self._fold_capable():
+            return
+        if isinstance(commit_result, dict):
+            self._refresh_path_baseline()
+            return
+        staged = getattr(batch, "staged", None)
+        if not staged:
+            self._refresh_path_baseline()
+            return
+        positions = list(commit_result)
+        if len(positions) != len(staged):
+            self._refresh_path_baseline()
+            return
+
+        from amplifier_data.lenses._scope import SCOPED_TO
+        from amplifier_data.lenses.vector import EMBEDDING_OF
+        from amplifier_data.models import CellWriteEvent, RelationshipEvent
+
+        events = list(zip(positions, staged))
+        payload_of = {
+            ev.cell_ref(): ev.payload
+            for _pos, ev in events
+            if isinstance(ev, CellWriteEvent)
+        }
+        with self._index_lock:
+            fold = self._prior_fold
+            if fold is not None:
+                fold.apply_tail_in_place(events, payload_of)
+        if fold is None:
+            # Warm-up hasn't built the persistent index yet -- nothing to
+            # extend; the eventual cold build reads everything from the
+            # kernel anyway.
+            self._refresh_path_baseline()
+            return
+
+        if wing_ref is not None:
+            # Only the WING partition is eagerly primed here -- matching
+            # `_search_rrf`'s actual usage (a room filter NARROWS within
+            # the wing partition via `narrow_ref`; a separate room-keyed
+            # BM25/vector partition is only ever built for a room-only
+            # query with no wing, which write-through does not know about
+            # at write time -- that case still gets it lazily, exactly as
+            # before this fix). Priming both would double the tokenize
+            # work for no benefit this store's own read path ever uses.
+            scoped_here = {
+                ev.from_ref
+                for _pos, ev in events
+                if isinstance(ev, RelationshipEvent)
+                and ev.type == SCOPED_TO
+                and ev.to_ref == wing_ref
+            }
+            if scoped_here:
+                self._prime_bm25_for_refs(wing_ref, scoped_here, payload_of)
+            for _pos, ev in events:
+                if not (
+                    isinstance(ev, RelationshipEvent) and ev.type == EMBEDDING_OF
+                ):
+                    continue
+                target_ref = ev.to_ref
+                if target_ref in scoped_here:
+                    fold.scoped_vector_matrix(wing_ref)
+                    fold.vector_matrix()
+                    break
+
+        # Content bytes go to the bounded LRU (immediately available for a
+        # hit render without a kernel round trip), NOT into fold.payloads
+        # forever -- that dict already grew by *payload_of* above via
+        # apply_tail_in_place, but for content-sized cells that's exactly
+        # the unbounded-RAM growth T7.1-real must avoid. Evict them from
+        # the fold's payload dict right after use and let the LRU own
+        # them from here on.
+        if wing_ref is not None:
+            content_refs = {
+                ev.from_ref
+                for _pos, ev in events
+                if isinstance(ev, RelationshipEvent) and ev.type == SCOPED_TO
+            }
+            for ref in content_refs:
+                raw = payload_of.get(ref)
+                if raw is None:
+                    continue
+                self._content_lru_put(ref, raw)
+                fold.payloads.pop(ref, None)
+
+        self._refresh_path_baseline()
+
+    def _prime_bm25_for_refs(
+        self, scope_ref: Any, refs: set[Any], payload_of: dict[Any, bytes]
+    ) -> None:
+        """Eagerly ``.add()`` *refs* (content this write just scoped to
+        *scope_ref*) into that scope's BM25 partition, using the text
+        already in hand -- no payload lookup, no kernel read. Idempotent
+        (``BM25Index.add`` no-ops for an already-indexed ref)."""
+        if BM25Index is None or not refs:
+            return
+        index = self._scope_bm25_indexes.setdefault(scope_ref, BM25Index())
+        for ref in refs:
+            raw = payload_of.get(ref)
+            if raw is None:
+                continue
+            index.add(ref, raw.decode("utf-8", errors="replace"))
+
+    def _content_lru_put(self, ref: Any, raw: bytes) -> None:
+        with self._content_lru_lock:
+            self._content_lru[ref] = raw
+            self._content_lru.move_to_end(ref)
+            while len(self._content_lru) > self._content_lru_size:
+                self._content_lru.popitem(last=False)
+
+    def _content_lru_get(self, ref: Any) -> bytes | None:
+        with self._content_lru_lock:
+            raw = self._content_lru.get(ref)
+            if raw is not None:
+                self._content_lru.move_to_end(ref)
+            return raw
+
+    def eager_build_all_wings(self) -> int:
+        """T7.1-real (D32): after the cold build, eagerly materialize
+        EVERY wing's vector + BM25 partition (not just the ones a search
+        happens to touch first) -- called by the daemon's startup warm-up
+        thread. Returns the number of wings built. Idempotent (safe to
+        call more than once; already-current partitions are cheap no-ops).
+        """
+        fold = self._fold_snapshot()
+        if fold is None:
+            return 0
+        fold.embedding_edges()
+        with self._index_lock:
+            wing_refs = [
+                ref
+                for ref in fold.scope_reverse
+                if fold.payloads.get(ref, b"").startswith(b"wing:")
+            ]
+        for wing_ref in wing_refs:
+            with self._index_lock:
+                fold.scoped_vector_matrix(wing_ref)
+                members = set(fold.scope_reverse.get(wing_ref, ()))
+            self._prime_bm25_for_refs(
+                wing_ref,
+                members,
+                {ref: self._payload_bytes_for_index(ref, fold) for ref in members},
             )
-            timer.daemon = True
-            self._expiry_timer = timer
-        timer.start()
+        return len(wing_refs)
 
-    @staticmethod
-    def _expire_snapshot_ref(store_ref: weakref.ref[NativeMemoryStore]) -> None:
-        store = store_ref()
-        if store is not None:
-            store._expire_snapshot()
-
-    def _expire_snapshot(self) -> None:
-        """Drop the snapshot -- and the incremental-extension base,
-        ``_prior_fold`` -- once neither has been rebuilt for
-        ``SNAPSHOT_REUSE_S``; re-arm (still a single timer) while a
-        younger build is in the slot.
-        """
-        with self._snapshot_lock:
-            self._expiry_timer = None
-            if self._last_build_at == 0.0:
-                return  # nothing ever built
-            age = time.monotonic() - self._last_build_at
-            if age >= self.SNAPSHOT_REUSE_S:
-                self._snapshot = None
-                self._prior_fold = None
-                return
-        self._arm_expiry(max(self.SNAPSHOT_REUSE_S - age, 0.0))
+    def _payload_bytes_for_index(self, ref: Any, fold: _SearchFold) -> bytes:
+        raw = fold.payloads.get(ref)
+        if raw is not None:
+            return raw
+        cached = self._content_lru_get(ref)
+        if cached is not None:
+            return cached
+        cell = self.store.get_cell(ref, record_access=False)  # type: ignore[attr-defined]
+        return cell.payload
 
     def _payload_text(self, ref: Any, fold: _SearchFold | None) -> str:
-        """Decode ``ref``'s payload, preferring the one-fold snapshot.
-
-        ``fold=None`` (no snapshot) or a snapshot miss (a ref not defined by
-        a ``CellWriteEvent``) reproduces the original
-        ``regenerate(record_access=False)`` read byte-for-byte.
+        """Decode ``ref``'s payload: bounded content LRU first (T7.1-real,
+        D32 -- populated at write time, no kernel round trip for content
+        this process just wrote), then the fold's own (small, metadata-
+        only) payload join, then a kernel resolve on a genuine miss
+        (``get_cell`` -- uses the kernel's OWN materialized cache, so a
+        repeat miss for the SAME ref is cheap; only the very first touch
+        of a ref this process never wrote costs a log read).
         """
+        cached = self._content_lru_get(ref)
+        if cached is not None:
+            return cached.decode("utf-8", errors="replace")
         if fold is not None:
             raw = fold.payloads.get(ref)
             if raw is not None:
                 return raw.decode("utf-8", errors="replace")
-        return self.store.regenerate(ref, record_access=False).payload.decode(  # type: ignore[attr-defined]
-            "utf-8", errors="replace"
-        )
+        raw = self.store.get_cell(ref, record_access=False).payload  # type: ignore[attr-defined]
+        self._content_lru_put(ref, raw)
+        return raw.decode("utf-8", errors="replace")
 
     def _first_fact_value(
         self, ref: Any, predicate: str, fold: _SearchFold | None = None
@@ -2919,17 +3503,27 @@ class NativeMemoryStore:
         # index-maintenance loop below costs O(scope size), never O(store).
         # An unscoped query keeps using the single persistent GLOBAL index
         # (self._bm25_index) so its corpus-wide IDF/union semantics are
-        # unchanged. Either way `.add()` for an already-indexed ref is a
-        # cheap no-op (BM25Index docstring) -- repeat calls across the
-        # store's lifetime only ever tokenize NEW refs in that partition.
+        # unchanged.
+        #
+        # T7.1-real (D32): write-through (`_apply_write_through`) already
+        # `.add()`s every wing/room-scoped drawer/passage AT WRITE TIME
+        # using the text it already has in hand, so in steady state every
+        # ref here is ALREADY indexed by the time a search sees it. The
+        # `ref in index._doc_len` check below skips the (otherwise
+        # unconditional) `_payload_text` lookup entirely for those --
+        # avoiding a kernel/LRU round trip per scoped ref on EVERY search,
+        # which is what made a warm, repeat-touched wing still cost
+        # hundreds of ms before this fix. Only a ref this write-through
+        # pass never saw (external content, or content filed before
+        # warm-up finished) pays the lookup, exactly once, ever.
         if scope_ref is not None:
             index = self._scope_bm25_indexes.setdefault(scope_ref, BM25Index())
-            for ref in sorted(scoped_refs):
-                index.add(ref, self._payload_text(ref, fold))
         else:
             index = self._bm25_index
-            for ref in sorted(scoped_refs):
-                index.add(ref, self._payload_text(ref, fold))
+        for ref in sorted(scoped_refs):
+            if ref in index._doc_len:  # noqa: SLF001 - see docstring above
+                continue
+            index.add(ref, self._payload_text(ref, fold))
 
         n_pool = max(3 * k, 50)
 
@@ -3454,7 +4048,7 @@ class NativeMemoryStore:
                     b.assert_fact(party, _TENSION_IN_TENSION, tension_cell)
                 b.assert_fact(cell_ref, _TENSION_CONFLICTS_WITH, conflicts_with)
                 b.assert_fact(conflicts_with, _TENSION_CONFLICTS_WITH, cell_ref)
-            commit_result = b.commit()
+            commit_result = self._commit_and_apply(b)
             fact_ref = _resolve_batch_ref(commit_result, cell_ref)
             if tension_cell is not None:
                 tension_cell = _resolve_batch_ref(commit_result, tension_cell)
@@ -3629,7 +4223,7 @@ class NativeMemoryStore:
                 b.assert_fact(
                     span_ref, _IN_SESSION_PREDICATE, b.write_cell(session_id.encode())
                 )
-            commit_result = b.commit()
+            commit_result = self._commit_and_apply(b)
             span_ref = _resolve_batch_ref(commit_result, span_ref)
         else:
             span_ref = s.write_cell(redacted_text.encode("utf-8"))  # type: ignore[attr-defined]
@@ -3689,7 +4283,7 @@ class NativeMemoryStore:
                 b.assert_fact(
                     jref, _OBSERVED_AT_PREDICATE, b.write_cell(observed_at.encode())
                 )
-            commit_result = b.commit()
+            commit_result = self._commit_and_apply(b)
             job_ref = _resolve_batch_ref(commit_result, jref)
         else:
             s.scope(job_ref, s.write_cell(f"wing:{wing}".encode()))  # type: ignore[attr-defined]
@@ -4062,7 +4656,7 @@ class NativeMemoryStore:
             for old in old_current:
                 b.relate(room_scope_ref, old, INVALIDATE_PREFIX + _MEMORY_CURRENT_INDEX)
             b.assert_fact(room_scope_ref, _MEMORY_CURRENT_INDEX, cell_ref)
-            commit_result = b.commit()
+            commit_result = self._commit_and_apply(b)
             cell_ref = _resolve_batch_ref(commit_result, cell_ref)
         else:
             cell_ref = s.write_cell(payload)  # type: ignore[attr-defined]
@@ -4158,7 +4752,7 @@ class NativeMemoryStore:
             for old in old_current:
                 b.relate(question_ref, old, INVALIDATE_PREFIX + _MEMORY_CURRENT_ANSWER)
             b.assert_fact(question_ref, _MEMORY_CURRENT_ANSWER, ans_ref)
-            commit_result = b.commit()
+            commit_result = self._commit_and_apply(b)
             ans_ref = _resolve_batch_ref(commit_result, ans_ref)
         else:
             ans_ref = s.write_cell(payload)  # type: ignore[attr-defined]

@@ -1026,18 +1026,23 @@ def make_daemon(
             args=(mem_store, embedder, lock),
             daemon=True,
         ).start()
-    # Search-fold warm-up (§5.6 latency fix, measured 2026-09-25): building
-    # the first _SearchFold snapshot over a large durable log takes ~4s
-    # (materializing the whole event log) -- paid here, off the request
-    # path, instead of by whichever real caller's search() happens to hit
-    # an empty snapshot first. Race-safe: _fold_snapshot()'s own
-    # single-flight generation/lock bookkeeping (store.py) means a real
-    # search arriving concurrently either joins this build or (if it wins
-    # the race) builds its own -- never duplicated work, never blocks
-    # daemon startup (this thread is not joined; do_GET/do_POST below start
-    # serving as soon as ThreadingHTTPServer below is constructed and the
-    # caller calls serve_forever()).
-    threading.Thread(target=mem_store._fold_snapshot, daemon=True).start()
+    # Search-fold warm-up (§5.6 latency fix, measured 2026-09-25; T7.1-real
+    # eager-wing extension, D32): building the first persistent index over
+    # a large durable log takes several seconds (materializing the whole
+    # event log once) -- paid here, off the request path, instead of by
+    # whichever real caller's search() happens to hit an empty index
+    # first. `eager_build_all_wings` goes further: it also materializes
+    # EVERY wing's vector+BM25 partition right now (not lazily on each
+    # wing's first-touched query), so no request -- ever, not even the
+    # first one to reach a given wing -- pays a partition-build cost.
+    # Race-safe: `_fold_snapshot`/`_apply_write_through` (store.py) use
+    # `_index_lock`, so a real request arriving concurrently either reads
+    # the not-yet-fully-eager index (still correct, just not every wing
+    # pre-warmed yet) or a fully warm one -- never blocks (this thread is
+    # not joined; do_GET/do_POST below start serving as soon as
+    # ThreadingHTTPServer below is constructed and the caller calls
+    # serve_forever()).
+    threading.Thread(target=mem_store.eager_build_all_wings, daemon=True).start()
     resolved_version = version if version is not None else daemon_version()
     resolved_fingerprint = code_fp if code_fp is not None else code_fingerprint()
     httpd_holder: dict[str, ThreadingHTTPServer] = {}
