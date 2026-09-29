@@ -480,3 +480,53 @@ the category allowlist working as designed, not a defect.
    (redacted, ≤200 chars) is recorded for correlation. Consider a
    `query_mode: text|hash|off` option before this telemetry leaves the machine.
 **Status:** derived.
+
+### D29 — P6: meet D13 (levers, in order of expected impact)
+**Diagnosis from D26:** each drawer is a whole conversation session, so k=10
+hits hand the answerer ~29k tokens of mostly noise (tokens bar unmet, and the
+noise costs accuracy); temporal questions regressed under RRF because evidence
+reaches the answerer without dates; scoped latency grows with unrelated data.
+**Plan:**
+- T6.1 per-wing partitioned vector + BM25 indexes, maintained incrementally
+  in the daemon's fold cache — scoped cost O(wing), not O(store).
+- T6.2 passage index: long drawers are split into overlapping passages
+  (derived cells, `@memory:passage_of` → drawer; drawer stays verbatim L1
+  evidence); search ranks passages, returns the passage text + parent ref.
+- T6.3 date-stamped evidence: every rendered hit carries its filed/observed
+  date.
+- T6.4 optional local cross-encoder rerank of the fused top-N (same local
+  embedding runtime; no network), enabled only if it stays inside the p95 budget.
+- T6.5 embedder choice as config (current 384-d model vs a stronger 384-d
+  retrieval model) with a re-embed sweep.
+- T6.7 daemon identity from module source, not installed metadata (D28.1).
+- T6.6 measure each lever on a fixed stratified LongMemEval-S subset, then
+  full LongMemEval-S, LoCoMo and PrecisionMemBench on the winning config.
+**Status:** derived from D13 (ratified).
+
+### D30 — P6 as built (T6.1–T6.5, T6.7)
+- **T6.1 partitions:** per-wing incremental numpy matrices + per-wing BM25
+  indexes inside the fold cache; room applies as an intersection within the
+  wing. Scoped p95 with 0/20/60 unrelated wings: 0.46/0.44/0.45 ms (was
+  6/173/603). T1.4 (5k drawers): rrf 85–103 ms. Fixed on the way: a room-only
+  scope silently searched every wing that shared the room name.
+- **T6.2 passages:** drawers ≥1200 chars get ~900-char line-boundary passages
+  (150 overlap) as derived cells `@memory:passage_of` → drawer, embedded and
+  indexed like drawers; backfill sweep for existing drawers (500/run). Search
+  default granularity is passage under rrf (≤2 passages per drawer); drawer
+  mode rolls up by best passage. Passage writes are a second idempotent commit
+  after the drawer's batch (a crash in between self-heals via backfill).
+- **T6.3 dates:** briefing, interject and the benchmark adapter render
+  `[YYYY-MM-DD]` from observed_at → filed_at; facts render with proof count;
+  legacy briefing unchanged.
+- **T6.4 rerank:** local 80 MB MS-MARCO MiniLM-L6 cross-encoder via the same
+  runtime; lazy singleton; unavailable → neutral, never raises. Defaults
+  top-20 candidates × 800 chars (30 × 900 measured p95 160 ms, over budget).
+  Off by default until the benchmark shows it pays.
+- **T6.5 embedder:** `embedding_model` option (current MiniLM-L6 default,
+  bge-small-en-v1.5 available); embeddings record `embedded_with`; vectors from
+  another model leave the semantic arm and are re-queued — switching is safe.
+- **T6.7 daemon identity:** version from a source constant (`_version.py`) +
+  sha256 code fingerprint; equal version + different fingerprint → retire and
+  respawn; newer daemons never retired; pyproject == `__version__` test.
+**Verification:** 801 module/bench + 92 root tests, twice, green; name gate clean.
+**Status:** derived.
