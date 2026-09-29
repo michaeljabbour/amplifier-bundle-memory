@@ -190,6 +190,31 @@ def _is_passage_boundary_line(line: str) -> bool:
     return bool(_PASSAGE_BOUNDARY_RE.match(line))
 
 
+def _bounded_lines(text: str, max_chars: int) -> list[str]:
+    """``text.splitlines(keepends=True)``, except that a line longer than
+    *max_chars* is cut into consecutive segments of at most *max_chars*,
+    each ending just after the last whitespace in its window (a hard cut
+    only when the window has none). The segments concatenate back to the
+    original text exactly, so offsets stay valid; deterministic.
+
+    Without this, a drawer that is one long line (minified JSON, a
+    serialized transcript, a long log line) became ONE passage the size of
+    the whole drawer -- the passage index silently did nothing for it
+    (found by the T6.6 benchmark: every LongMemEval session is one line).
+    """
+    out: list[str] = []
+    for line in text.splitlines(keepends=True):
+        while len(line) > max_chars > 0:
+            window = line[:max_chars]
+            cut = max(window.rfind(" "), window.rfind("\t"))
+            cut = cut + 1 if cut > 0 else max_chars
+            out.append(line[:cut])
+            line = line[cut:]
+        if line:
+            out.append(line)
+    return out
+
+
 def _split_into_passages(
     text: str,
     *,
@@ -215,7 +240,9 @@ def _split_into_passages(
     """
     if not text:
         return []
-    lines = text.splitlines(keepends=True)
+    # Over-long lines are cut into segments no longer than the overlap, so
+    # passage size and overlap stay near their targets on unbroken text.
+    lines = _bounded_lines(text, max(1, min(passage_chars, overlap or passage_chars)))
     if not lines:
         return []
     offsets: list[int] = []
@@ -243,7 +270,10 @@ def _split_into_passages(
             k = j
             while k < lookahead_limit and not _is_passage_boundary_line(lines[k]):
                 k += 1
-            j = k
+            # No natural boundary in the window: cut where the target size
+            # was first reached (as documented), not at the window's end.
+            if _is_passage_boundary_line(lines[k]):
+                j = k
         end = _line_end(j)
         passages.append((start, end, text[start:end]))
         if end >= total:

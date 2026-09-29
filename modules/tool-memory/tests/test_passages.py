@@ -107,6 +107,20 @@ class TestSplitIntoPassages:
     def test_empty_text_yields_no_passages(self) -> None:
         assert _split_into_passages("", passage_chars=900, overlap=150) == []
 
+    def test_single_long_line_is_split_at_whitespace(self) -> None:
+        """A drawer that is one long line (serialized transcript, minified
+        JSON) must still yield bounded passages, not one drawer-sized one."""
+        text = " ".join(f"word{i}" for i in range(2000))  # ~15k chars, no newline
+        passages = _split_into_passages(text, passage_chars=900, overlap=150)
+        assert len(passages) >= 10
+        assert all(len(p) <= 900 + 150 for _s, _e, p in passages)
+        assert passages[0][0] == 0 and passages[-1][1] == len(text)
+        for start, end, ptext in passages:
+            assert text[start:end] == ptext
+            assert start == 0 or text[start - 1] == " "  # never mid-word
+        for (_s0, e0, _t0), (s1, _e1, _t1) in zip(passages, passages[1:]):
+            assert s1 < e0, "consecutive passages must overlap"
+
 
 class TestWriteTimePassageCreation:
     def test_short_drawer_gets_no_passages(self) -> None:
