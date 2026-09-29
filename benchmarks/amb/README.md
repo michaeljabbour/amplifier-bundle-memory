@@ -147,6 +147,32 @@ documents, isolates answer-generation quality from retrieval quality).
   hooks-memory-briefing/interject add) is included here — AMB's own
   gold_ids/answer-model comparisons should see plain dated text.
 
+- `AMPLIFIER_AMB_EMBEDDING_MODEL=<fastembed model name>` (T6.6; unset → the
+  embedder's own default, `all-MiniLM-L6-v2`) — e.g. `BAAI/bge-small-en-v1.5`.
+  The adapter mirrors the daemon's `remember`/`search` path: it records
+  `embedding_model_id` on each drawer, hands the embedder to `file()` so
+  passages of long drawers are embedded on write, and passes
+  `current_model_id` to `search()` (all signature-guarded).
+- `AMPLIFIER_AMB_PASSAGES=on` (default) or `off` — `off` builds the store with
+  passage splitting disabled, reproducing the pre-T6.2 whole-drawer index
+  (the v2.0.1 / D26 retrieval proxy). Passage cells are wing-scoped, so with
+  passages on they also enter the `legacy` and `drawer`-granularity candidate
+  pools (rolled up to their parent drawer).
+- `AMPLIFIER_AMB_FOLD_RETENTION_S=<seconds>` — overrides the store's
+  folded-view retention (`SNAPSHOT_REUSE_S`, product default 5 s). With the
+  default, a query that follows a unit's ingest (>5 s of writes, no reads)
+  re-folds the whole log, so retrieve latency grows with total store size.
+  Latency only; ranking is unchanged.
+- `AMPLIFIER_AMB_QUERY_IDS=/path/ids.txt` (read by `run.py`) — restricts the
+  dataset to exactly these query ids and their units' documents, for a fixed
+  subset run without editing AMB.
+
+Harness resilience (read by `run.py`, off unless set): `AMPLIFIER_AMB_RETRY_DISCONNECTS=on`
+retries dropped connections; `AMPLIFIER_AMB_REQUEST_TIMEOUT_S` fails a
+never-ending generation fast; `AMPLIFIER_AMB_FALLBACK_MODEL` retries a timed-out
+request once on another model and logs `[fallback-model]`;
+`AMPLIFIER_AMB_HYBRID_DEVICE` moves AMB's hybrid baseline encoder off `cpu`.
+
 `run.py` mixes AMB's real `MemoryProvider` ABC into the adapter at
 registration time (the adapter module itself never imports AMB, so the smoke
 test runs without it); without that the runner fails on `initialize()` /

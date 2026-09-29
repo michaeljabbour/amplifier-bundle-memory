@@ -519,3 +519,64 @@ def test_granularity_rerank_dates_env_vars(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("AMPLIFIER_AMB_RERANK", "bogus")
     with pytest.raises(ValueError):
         AmplifierMemoryProvider(embedder="none")
+
+
+class _ReadyEmbedder:
+    ready = True
+    model_id = "fake-model:3"
+
+    def embed(self, text: str) -> list[float]:
+        return [1.0, 0.0, 0.0]
+
+
+def test_embedding_model_and_passages_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AMPLIFIER_AMB_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    monkeypatch.setenv("AMPLIFIER_AMB_PASSAGES", "off")
+    p = AmplifierMemoryProvider(embedder="none")
+    assert p._embedding_model == "BAAI/bge-small-en-v1.5"
+    assert p._passages is False
+
+    monkeypatch.delenv("AMPLIFIER_AMB_EMBEDDING_MODEL")
+    monkeypatch.delenv("AMPLIFIER_AMB_PASSAGES")
+    p = AmplifierMemoryProvider(embedder="none")
+    assert p._embedding_model is None
+    assert p._passages is True
+
+
+def test_ingest_hands_embedder_and_model_id_to_store(tmp_path: Path) -> None:
+    """Mirrors the daemon's remember path: passages of long drawers are
+    embedded on write, and the drawer records which model embedded it."""
+    provider = AmplifierMemoryProvider(home=tmp_path / "s", embedder="auto")
+    provider._embedder = _ReadyEmbedder()
+    provider._embedder_load_attempted = True
+
+    class _Store(_FakeGranularityStore):
+        def file(self, *, embedding_model_id=None, embedder=None, **kwargs):
+            return super().file(
+                embedding_model_id=embedding_model_id, embedder=embedder, **kwargs
+            )
+
+    fake = _Store()
+    provider._store = fake
+
+    provider.ingest([Document(id="x", content="hello", user_id="alice")])
+
+    _, kwargs = fake.filed[0]
+    assert kwargs["embedder"] is provider._embedder
+    assert kwargs["embedding_model_id"] == "fake-model:3"
+
+
+def test_passages_off_creates_no_passage_cells(tmp_path: Path) -> None:
+    long_text = "\n".join(f"line {i} about the harbor schedule" for i in range(200))
+    on = AmplifierMemoryProvider(home=tmp_path / "on", embedder="none")
+    off = AmplifierMemoryProvider(
+        home=tmp_path / "off", embedder="none", passages=False
+    )
+    for p in (on, off):
+        p.ingest([Document(id="long", content=long_text, user_id="alice")])
+    hits_on = on._store.search(None, 5, wing="amb_alice", lexical_query="harbor")
+    hits_off = off._store.search(None, 5, wing="amb_alice", lexical_query="harbor")
+    assert any(h.get("layer") == "passage" for h in hits_on)
+    assert not any(h.get("layer") == "passage" for h in hits_off)
+    on.cleanup()
+    off.cleanup()

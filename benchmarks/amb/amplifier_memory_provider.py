@@ -98,6 +98,8 @@ class AmplifierMemoryProvider:
         granularity: str | None = None,
         rerank: bool | str | None = None,
         dates: bool | str | None = None,
+        embedding_model: str | None = None,
+        passages: bool | str | None = None,
     ) -> None:
         """``embedder``: ``"auto"`` (try FastEmbedEmbedder, degrade to lexical-only
         on any failure -- the default) or ``"none"`` (always lexical-only, never
@@ -146,6 +148,17 @@ class AmplifierMemoryProvider:
             rerank, "AMPLIFIER_AMB_RERANK", default="off"
         )
         self._dates = self._parse_bool_env(dates, "AMPLIFIER_AMB_DATES", default="on")
+        # T6.6: embedding model for the local embedder (empty/None -> the
+        # embedder's own default). Env fallback: AMPLIFIER_AMB_EMBEDDING_MODEL.
+        self._embedding_model = (
+            embedding_model or os.environ.get("AMPLIFIER_AMB_EMBEDDING_MODEL") or None
+        )
+        # T6.6: "passages" (default on) -- off builds the store with passage
+        # splitting disabled, reproducing the pre-T6.2 whole-drawer index
+        # (the v2.0.1 / D26 retrieval proxy). Env: AMPLIFIER_AMB_PASSAGES.
+        self._passages = self._parse_bool_env(
+            passages, "AMPLIFIER_AMB_PASSAGES", default="on"
+        )
         self.last_raw: dict[str, Any] | None = None
         self._store: Any = None
         self._embedder: Any = None
@@ -221,7 +234,23 @@ class AmplifierMemoryProvider:
             home.mkdir(parents=True, exist_ok=True)
             # The store path is a log FILE; ``home`` is a directory (AMB's
             # prepare() hands one over), so the log lives inside it.
-            self._store = NativeMemoryStore(path=str(home / "memory.log"))
+            store_kwargs: dict[str, Any] = {"path": str(home / "memory.log")}
+            if not self._passages and (
+                "passage_min_chars"
+                in inspect.signature(NativeMemoryStore.__init__).parameters
+            ):
+                # No drawer is ever long enough to split: no passage cells.
+                store_kwargs["passage_min_chars"] = 1 << 60
+            self._store = NativeMemoryStore(**store_kwargs)
+            # T6.6: AMPLIFIER_AMB_FOLD_RETENTION_S overrides how long the
+            # store keeps its folded view (and incremental-extension base)
+            # after the last build. The product default (5 s) is shorter
+            # than one AMB unit's ingest, so every query after an ingest
+            # re-folds the WHOLE log -- O(store) latency. Latency-only knob:
+            # ranking is unaffected. Unset -> product default.
+            retention = os.environ.get("AMPLIFIER_AMB_FOLD_RETENTION_S")
+            if retention and hasattr(self._store, "SNAPSHOT_REUSE_S"):
+                self._store.SNAPSHOT_REUSE_S = float(retention)
         return self._store
 
     def _get_embedder(self) -> Any | None:
@@ -231,7 +260,11 @@ class AmplifierMemoryProvider:
             self._embedder_load_attempted = True
             from amplifier_module_tool_memory.embedder import FastEmbedEmbedder
 
-            embedder = FastEmbedEmbedder()
+            embedder = (
+                FastEmbedEmbedder(self._embedding_model)
+                if self._embedding_model
+                else FastEmbedEmbedder()
+            )
             embedder.warm()  # never raises; sets .ready/.failed instead
             self._embedder = embedder if embedder.ready else None
         return self._embedder
@@ -264,6 +297,13 @@ class AmplifierMemoryProvider:
         store = self._ensure_store()
         file_params = inspect.signature(store.file).parameters
         supports_filed_at = "filed_at" in file_params
+        # Mirror the daemon's `remember` path (T6.2/T6.5): record which model
+        # produced the drawer vector, and hand the embedder over so passages
+        # created for long content are embedded on write, not left lexical-only.
+        supports_model_id = "embedding_model_id" in file_params
+        supports_embedder = "embedder" in file_params
+        embedder = self._get_embedder()
+        model_id = getattr(embedder, "model_id", None) if embedder else None
 
         for doc in documents:
             wing = self._wing_for(doc.user_id)
@@ -282,6 +322,10 @@ class AmplifierMemoryProvider:
             }
             if supports_filed_at and doc.timestamp:
                 kwargs["filed_at"] = doc.timestamp
+            if supports_model_id and embedding is not None and model_id:
+                kwargs["embedding_model_id"] = model_id
+            if supports_embedder and embedder is not None:
+                kwargs["embedder"] = embedder
             ref = store.file(**kwargs)
             # T6.3: remember which drawer this doc became, so a later
             # passage hit (whose own "ref" is the passage cell, not the
@@ -356,6 +400,9 @@ class AmplifierMemoryProvider:
             search_kwargs["granularity"] = self._granularity
         if "rerank" in search_params:
             search_kwargs["rerank"] = self._rerank
+        embedder = self._get_embedder()
+        if "current_model_id" in search_params and embedder is not None:
+            search_kwargs["current_model_id"] = getattr(embedder, "model_id", None)
 
         hits = store.search(query_vector, k, **search_kwargs)
 
@@ -424,6 +471,10 @@ class AmplifierMemoryProvider:
                             "fusion": self._fusion,
                             "granularity": self._granularity,
                             "rerank": self._rerank,
+                            "embedding_model": getattr(
+                                self._embedder, "model_id", None
+                            ),
+                            "passages": self._passages,
                             "ids": [d.id for d in documents],
                         }
                     )
