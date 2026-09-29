@@ -193,16 +193,74 @@ def _call_client(method: str, *, timeout_s: float | None = None, **kwargs: Any) 
     daemon. Returns ``None`` on ANY failure (daemon unavailable or a genuine
     call error) -- retrieval is a best-effort mid-session convenience that
     must never raise into the session; the caller (``_mcp_search``) already
-    treats ``None``/non-dict as "no candidates"."""
+    treats ``None``/non-dict as "no candidates".
+
+    T6.3 capability fallback: if ``granularity`` is among ``kwargs`` and the
+    call raises ``TypeError`` (an older store's ``search`` doesn't accept
+    it), retry once without it. Any other failure falls through to the
+    existing blanket ``None`` return below.
+    """
     try:
         client = ensure_daemon()
         if client is None:
             return None
         if timeout_s is not None:
             client.timeout = timeout_s
-        return getattr(client, method)(**kwargs)
+        try:
+            return getattr(client, method)(**kwargs)
+        except TypeError:
+            if "granularity" in kwargs:
+                fallback_kwargs = {
+                    k: v for k, v in kwargs.items() if k != "granularity"
+                }
+                return getattr(client, method)(**fallback_kwargs)
+            raise
     except Exception:
         return None
+
+
+def _date_stamp(hit: dict[str, Any]) -> str:
+    """``YYYY-MM-DD`` from ``observed_at`` (preferred) or ``filed_at``.
+
+    Both are ISO-8601 UTC strings (D8); the first 10 chars are the date
+    whenever the separators land where expected. Returns ``""`` when
+    neither field is present or doesn't look date-shaped.
+    """
+    for key in ("observed_at", "filed_at"):
+        val = hit.get(key)
+        if val:
+            s = str(val)
+            if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+                return s[:10]
+    return ""
+
+
+def _render_hit(mem: dict[str, Any], *, provenance_tag: bool = True) -> str:
+    """Render one retrieved memory as a date-stamped, passage-aware line.
+
+    - facts (``mem["layer"] == "fact"``):
+      ``[YYYY-MM-DD] (fact, proof N) <text>``
+    - passages (``mem["layer"] == "passage"``): content, optionally suffixed
+      with ``(from <drawer_ref[:8]>)`` when ``provenance_tag`` is True.
+    - everything else: ``[YYYY-MM-DD] <content>``
+
+    A missing date produces no stamp at all. A plain memory dict with no
+    ``layer``/date fields (the pre-T6.3 shape) degrades to exactly its own
+    ``text``, unchanged.
+    """
+    content = (mem.get("text") or mem.get("content") or "").strip()
+    stamp = _date_stamp(mem)
+    prefix = f"[{stamp}] " if stamp else ""
+    layer = mem.get("layer")
+    if layer == "fact":
+        proof = mem.get("proof_count", 0) or 0
+        return f"{prefix}(fact, proof {proof}) {content}"
+    suffix = ""
+    if layer == "passage" and provenance_tag:
+        drawer_ref = mem.get("drawer_ref")
+        if drawer_ref:
+            suffix = f" (from {str(drawer_ref)[:8]})"
+    return f"{prefix}{content}{suffix}"
 
 
 def _mcp_search(
@@ -210,6 +268,7 @@ def _mcp_search(
     n_results: int = 5,
     *,
     timeout_s: float = DEFAULT_RETRIEVAL_TIMEOUT_S,
+    granularity: str | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve candidate memories via the native memory daemon's ``search``
     tool (native cutover, B2, the native-cutover design history).
@@ -228,7 +287,14 @@ def _mcp_search(
     """
     if not query:
         return []
-    result = _call_client("search", timeout_s=timeout_s, query=query[:250], k=n_results)
+    kwargs: dict[str, Any] = {
+        "timeout_s": timeout_s,
+        "query": query[:250],
+        "k": n_results,
+    }
+    if granularity is not None:
+        kwargs["granularity"] = granularity
+    result = _call_client("search", **kwargs)
     if not isinstance(result, dict):
         return []
     hits = result.get("results")
@@ -253,8 +319,17 @@ def _mcp_search(
             },
         }
         # T4.1: carry layer/rrf/arms through when the daemon returns them, so
-        # memory:retrieved can report them without a second call.
-        for key in ("layer", "rrf", "arms"):
+        # memory:retrieved can report them without a second call. T6.3 adds
+        # drawer_ref/span/filed_at/observed_at (passage provenance + dates).
+        for key in (
+            "layer",
+            "rrf",
+            "arms",
+            "drawer_ref",
+            "span",
+            "filed_at",
+            "observed_at",
+        ):
             if hit.get(key) is not None:
                 memory[key] = hit[key]
         memories.append(memory)
@@ -284,7 +359,11 @@ def _format_injection(
     parts = [header]
     total = len(header)
     for mem in memories:
-        snippet = mem["text"].strip()
+        # T6.3: date-stamped, passage-aware rendering. A plain memory dict
+        # with no layer/date fields (the pre-T6.3 shape) renders identically
+        # to its own "text" -- max_inject_chars accounting below operates on
+        # the RENDERED snippet, so the stamp counts against the cap.
+        snippet = _render_hit(mem).strip()
         if total + overhead + len(snippet) > max_chars:
             # Room left for this snippet (minus the ellipsis). It can be <= 0
             # once an earlier snippet was already truncated to the cap --
@@ -418,6 +497,10 @@ class MemoryInterjectHook:
             query,
             5,
             timeout_s=self.retrieval_timeout_s,
+            # T6.3: prefer passage-granular hits when the daemon supports
+            # it -- _call_client retries without the kwarg on TypeError, so
+            # this degrades silently on an older pinned daemon.
+            granularity="passage",
         )
         t0 = time.monotonic()
         candidates = await asyncio.get_running_loop().run_in_executor(None, search)

@@ -152,7 +152,7 @@ class TestLayeredSectionsOrderAndContent:
         assert "Q: what is our package manager A: uv" in text
         assert "stale, needs refresh" in text
         assert "what is our test runner" in text
-        assert "the repo uses uv [proof 2]" in text
+        assert "(fact, proof 2) the repo uses uv" in text
         assert "some evidence text" in text
 
     def test_budget_limits_later_sections(

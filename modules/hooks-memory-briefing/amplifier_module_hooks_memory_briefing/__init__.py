@@ -222,13 +222,26 @@ def _call_client(method: str, **kwargs: Any) -> Any:
     treat that as "nothing to show for this section" and skip it) but IS
     observed via ``emit_event``, unlike a silently-swallowed subprocess
     failure.
+
+    T6.3 capability fallback: if ``granularity`` is among ``kwargs`` and the
+    call raises ``TypeError`` (an older store's ``search`` doesn't accept
+    it), retry once without it. Any other failure falls through to the
+    existing daemon-unavailable handling below.
     """
     global _CALL_FAILURES
     try:
         client = ensure_daemon()
         if client is None:
             raise RuntimeError("memory daemon unavailable")
-        return getattr(client, method)(**kwargs)
+        try:
+            return getattr(client, method)(**kwargs)
+        except TypeError:
+            if "granularity" in kwargs:
+                fallback_kwargs = {
+                    k: v for k, v in kwargs.items() if k != "granularity"
+                }
+                return getattr(client, method)(**fallback_kwargs)
+            raise
     except Exception as exc:
         with _CALL_FAILURES_LOCK:
             _CALL_FAILURES += 1
@@ -286,6 +299,59 @@ def _build_importance_lookup(
     added latency at 8 results is small -- acceptable for session:start.
     """
     return {r["id"]: _query_importance(r["id"]) for r in results if "id" in r}
+
+
+# -- Rendering (T6.3: date-stamped, passage-aware evidence) ------------------
+
+
+def _date_stamp(hit: dict[str, Any]) -> str:
+    """``YYYY-MM-DD`` from ``observed_at`` (preferred) or ``filed_at``.
+
+    Both are ISO-8601 UTC strings (D8); the first 10 chars are the date
+    whenever the separators land where expected. Returns ``""`` when
+    neither field is present or doesn't look date-shaped -- a missing
+    stamp renders as no prefix at all, never a fabricated date.
+    """
+    for key in ("observed_at", "filed_at"):
+        val = hit.get(key)
+        if val:
+            s = str(val)
+            if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+                return s[:10]
+    return ""
+
+
+def _render_hit(
+    hit: dict[str, Any], *, max_chars: int | None = None, provenance_tag: bool = True
+) -> str:
+    """Render one search/fact hit as a date-stamped, passage-aware line.
+
+    - facts (``hit["layer"] == "fact"``):
+      ``[YYYY-MM-DD] (fact, proof N) <text>``
+    - passages (``hit["layer"] == "passage"``): content, optionally suffixed
+      with ``(from <drawer_ref[:8]>)`` when ``provenance_tag`` is True.
+    - everything else: ``[YYYY-MM-DD] <content>``
+
+    A missing date produces no stamp at all (no leading ``"[] "``). All hit
+    fields this reads (``layer``, ``drawer_ref``, ``observed_at``,
+    ``filed_at``, ``proof_count``) are optional -- absence degrades to the
+    plain-content case, never an error.
+    """
+    content = (hit.get("content") or hit.get("text") or "").strip()
+    if max_chars is not None:
+        content = content[:max_chars]
+    stamp = _date_stamp(hit)
+    prefix = f"[{stamp}] " if stamp else ""
+    layer = hit.get("layer")
+    if layer == "fact":
+        proof = hit.get("proof_count", 0) or 0
+        return f"{prefix}(fact, proof {proof}) {content}"
+    suffix = ""
+    if layer == "passage" and provenance_tag:
+        drawer_ref = hit.get("drawer_ref")
+        if drawer_ref:
+            suffix = f" (from {str(drawer_ref)[:8]})"
+    return f"{prefix}{content}{suffix}"
 
 
 # -- Helpers -------------------------------------------------------------------
@@ -709,9 +775,7 @@ def _known_facts_section(
     for f in facts_rows[:8]:
         if not isinstance(f, dict):
             continue
-        text = (f.get("text") or "").strip()
-        proof = f.get("proof_count", 0) or 0
-        lines.append(f"- {text} [proof {proof}]")
+        lines.append(f"- {_render_hit({**f, 'layer': 'fact'})}")
     return "\n".join(lines), len(facts_rows)
 
 
@@ -722,7 +786,12 @@ def _evidence_section(
     k: int,
     retrieved_hits: list[dict[str, Any]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
-    """Relevant evidence -- L1 drawers as short cited snippets."""
+    """Relevant evidence -- L1 drawers (or T6.2 passages) as short cited
+    snippets, date-stamped (T6.3). ``granularity="passage"`` is requested
+    whenever the daemon supports it -- :func:`_call_client` retries without
+    it on ``TypeError`` (an older store's ``search`` rejects the kwarg), so
+    this degrades silently to whole-drawer hits on an older pinned daemon.
+    """
     search_result = (
         _call_client(
             "search",
@@ -730,6 +799,7 @@ def _evidence_section(
             k=k,
             wing=wing,
             layers=["drawer"],
+            granularity="passage",
         )
         or {}
     )
@@ -737,7 +807,7 @@ def _evidence_section(
         search_result.get("results", []) if isinstance(search_result, dict) else []
     )
     retrieved_hits.extend(
-        {**h, "ref": str(h.get("ref", "")), "layer": "drawer"}
+        {**h, "ref": str(h.get("ref", "")), "layer": h.get("layer", "drawer")}
         for h in raw_hits
         if isinstance(h, dict)
     )
@@ -749,9 +819,7 @@ def _evidence_section(
         if not isinstance(h, dict):
             continue
         ref = str(h.get("ref", ""))
-        room = h.get("room", "") or ""
-        text = (h.get("content", "") or "").strip()[:300]
-        lines.append(f"- [{room}] {text}")
+        lines.append(f"- {_render_hit(h, max_chars=300)}")
         evidence_hits.append({"id": ref})
     return "\n".join(lines), evidence_hits
 

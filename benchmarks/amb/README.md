@@ -125,9 +125,27 @@ documents, isolates answer-generation quality from retrieval quality).
   passed as `search(layers=...)`. The benchmark only ingests drawers; facts
   need the distiller, which AMB never runs.
 - `AMPLIFIER_AMB_TRACE=/path/trace.jsonl` — appends one JSON line per
-  `retrieve()` (`user_id`, `query`, `k`, `fusion`, `ids`). AMB saves results
-  with `raw_response=None`, so this trace is the only way to compute R@5/R@10
-  against each query's `gold_ids`.
+  `retrieve()` (`user_id`, `query`, `k`, `fusion`, `granularity`, `rerank`,
+  `ids`). AMB saves results with `raw_response=None`, so this trace is the
+  only way to compute R@5/R@10 against each query's `gold_ids`.
+- `AMPLIFIER_AMB_GRANULARITY=passage` (default) or `drawer` — passed as
+  `search(granularity=...)` **only when the store's own signature accepts
+  it** (an `inspect.signature` guard, T6.3): the pinned substrate may not
+  have T6.1/T6.2's passage-index support yet, and this degrades silently to
+  whatever the store returns by default rather than raising. When passage
+  hits come back, a passage's own `ref` addresses the passage cell, not the
+  parent drawer — `retrieve()` maps it back to AMB's own doc id via
+  `drawer_ref` (a mapping built during `ingest()`), and concatenates
+  multiple passages of the same parent, in span order, into ONE `Document`
+  (separated by `"\n…\n"`) so `gold_ids` recall still keys on AMB's doc id.
+- `AMPLIFIER_AMB_RERANK=off` (default) or `on` — passed as
+  `search(rerank=...)`, same signature guard as `granularity` above.
+- `AMPLIFIER_AMB_DATES=on` (default) or `off` — prefixes each returned
+  `Document`'s content with `[YYYY-MM-DD]`, taken from the hit's
+  `observed_at` (preferred) or `filed_at` field; a hit with neither gets no
+  prefix. No provenance tag (the `(from <drawer_ref>)` suffix
+  hooks-memory-briefing/interject add) is included here — AMB's own
+  gold_ids/answer-model comparisons should see plain dated text.
 
 `run.py` mixes AMB's real `MemoryProvider` ABC into the adapter at
 registration time (the adapter module itself never imports AMB, so the smoke

@@ -95,6 +95,9 @@ class AmplifierMemoryProvider:
         embedder: str | None = None,
         fusion: str | None = None,
         layers: str | Sequence[str] | None = None,
+        granularity: str | None = None,
+        rerank: bool | str | None = None,
+        dates: bool | str | None = None,
     ) -> None:
         """``embedder``: ``"auto"`` (try FastEmbedEmbedder, degrade to lexical-only
         on any failure -- the default) or ``"none"`` (always lexical-only, never
@@ -124,10 +127,50 @@ class AmplifierMemoryProvider:
         self._layers = tuple(x.strip() for x in raw_layers if x.strip())
         if not self._layers or not set(self._layers) <= {"drawer", "fact"}:
             raise ValueError(f"layers must be drawer and/or fact, got {raw_layers!r}")
+        # T6.3: "granularity" ("passage" default or "drawer") and "rerank"
+        # (bool, default off) are passed to store.search ONLY when the
+        # store's own signature accepts them (inspect.signature guard in
+        # retrieve() -- the pinned substrate at HEAD does not yet, so this
+        # stays a no-op until that lands). "dates" (default on) toggles the
+        # date-stamp prefix this adapter adds to returned Document content.
+        # Env fallbacks: AMPLIFIER_AMB_GRANULARITY / AMPLIFIER_AMB_RERANK /
+        # AMPLIFIER_AMB_DATES.
+        self._granularity = granularity or os.environ.get(
+            "AMPLIFIER_AMB_GRANULARITY", "passage"
+        )
+        if self._granularity not in ("passage", "drawer"):
+            raise ValueError(
+                f"granularity must be 'passage' or 'drawer', got {self._granularity!r}"
+            )
+        self._rerank = self._parse_bool_env(
+            rerank, "AMPLIFIER_AMB_RERANK", default="off"
+        )
+        self._dates = self._parse_bool_env(dates, "AMPLIFIER_AMB_DATES", default="on")
         self.last_raw: dict[str, Any] | None = None
         self._store: Any = None
         self._embedder: Any = None
         self._embedder_load_attempted = False
+        # T6.3: parent drawer ref -> AMB's own doc id, populated by ingest().
+        # Lets a passage hit (whose "ref" is the PASSAGE cell, not the
+        # drawer) map back to the original doc id via its "drawer_ref".
+        self._drawer_to_doc_id: dict[str, str] = {}
+
+    @staticmethod
+    def _parse_bool_env(
+        value: bool | str | None, env_name: str, *, default: str
+    ) -> bool:
+        """``value`` (constructor kwarg) wins; else read ``env_name``; else
+        ``default``. Accepts a real bool, or the strings on/off (also
+        true/false, 1/0 for convenience)."""
+        if isinstance(value, bool):
+            return value
+        raw = value if value is not None else os.environ.get(env_name, default)
+        raw = str(raw).strip().lower()
+        if raw in ("on", "true", "1", "yes"):
+            return True
+        if raw in ("off", "false", "0", "no"):
+            return False
+        raise ValueError(f"{env_name} must be 'on' or 'off', got {raw!r}")
 
     # ------------------------------------------------------------------
     # MemoryProvider optional lifecycle hooks
@@ -161,6 +204,7 @@ class AmplifierMemoryProvider:
             if callable(close):
                 close()
         self._store = None
+        self._drawer_to_doc_id = {}
 
     # ------------------------------------------------------------------
     # Store / embedder construction (lazy -- works with or without prepare())
@@ -238,7 +282,50 @@ class AmplifierMemoryProvider:
             }
             if supports_filed_at and doc.timestamp:
                 kwargs["filed_at"] = doc.timestamp
-            store.file(**kwargs)
+            ref = store.file(**kwargs)
+            # T6.3: remember which drawer this doc became, so a later
+            # passage hit (whose own "ref" is the passage cell, not the
+            # drawer) can map back to AMB's doc id via "drawer_ref".
+            if ref is not None:
+                self._drawer_to_doc_id[str(ref)] = doc.id
+
+    @staticmethod
+    def _date_stamp(hit: dict[str, Any]) -> str:
+        """Return YYYY-MM-DD from observed_at (preferred) or filed_at; else empty."""
+        for key in ("observed_at", "filed_at"):
+            val = hit.get(key)
+            if val:
+                s = str(val)
+                if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+                    return s[:10]
+        return ""
+
+    def _render_for_amb(self, hit: dict[str, Any]) -> str:
+        """Date-stamped hit content for a returned Document -- no provenance
+        tag (that's a briefing/interject-only affordance; the benchmark's
+        own gold_ids/answer-model comparisons should see plain dated text)."""
+        content = (hit.get("content") or "").strip()
+        if not self._dates:
+            return content
+        stamp = self._date_stamp(hit)
+        return f"[{stamp}] {content}" if stamp else content
+
+    def _doc_id_for_hit(self, hit: dict[str, Any]) -> str:
+        """AMB's own doc id for one search hit.
+
+        A passage hit's own ``ref`` addresses the PASSAGE cell, not the
+        parent drawer -- resolve through ``drawer_ref`` (populated at
+        ingest()) so gold_ids recall still keys on the original doc id.
+        Falls back to the pre-T6.2 behaviour (source, else ref) when the
+        hit isn't a passage or its parent wasn't seen by this provider.
+        """
+        if hit.get("layer") == "passage":
+            drawer_ref = hit.get("drawer_ref")
+            if drawer_ref is not None:
+                mapped = self._drawer_to_doc_id.get(str(drawer_ref))
+                if mapped is not None:
+                    return mapped
+        return hit.get("source") or str(hit.get("ref"))
 
     def retrieve(
         self,
@@ -254,41 +341,74 @@ class AmplifierMemoryProvider:
         wing = self._wing_for(user_id)
         query_vector = self._embed(query)
 
-        hits = store.search(
-            query_vector,
-            k,
-            wing=wing,
-            lexical_query=query,
-            fusion=self._fusion,
-            layers=self._layers,
-        )
+        search_kwargs: dict[str, Any] = {
+            "wing": wing,
+            "lexical_query": query,
+            "fusion": self._fusion,
+            "layers": self._layers,
+        }
+        # T6.3: only pass the new params when the store's own signature
+        # accepts them (inspect.signature guard) -- the pinned substrate may
+        # not have T6.1's granularity/rerank support yet; degrading silently
+        # keeps this adapter working against either version.
+        search_params = inspect.signature(store.search).parameters
+        if "granularity" in search_params:
+            search_kwargs["granularity"] = self._granularity
+        if "rerank" in search_params:
+            search_kwargs["rerank"] = self._rerank
+
+        hits = store.search(query_vector, k, **search_kwargs)
+
+        # T6.2/T6.3: group hits by the ORIGINAL AMB doc id; multiple passage
+        # hits of the same parent drawer are concatenated, in span order,
+        # into ONE Document -- gold_ids recall keys on AMB's own doc id, not
+        # on however many passages a long drawer was split into.
+        order: list[str] = []
+        grouped: dict[str, dict[str, Any]] = {}
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            doc_id = self._doc_id_for_hit(hit)
+            group = grouped.get(doc_id)
+            if group is None:
+                group = {"first_hit": hit, "passages": []}
+                grouped[doc_id] = group
+                order.append(doc_id)
+            span = hit.get("span")
+            start = span[0] if isinstance(span, (list, tuple)) and span else 0
+            group["passages"].append((start, hit))
 
         documents: list[Any] = []
         scores: dict[str, float] = {}
-        for hit in hits:
-            doc_id = hit.get("source") or str(hit["ref"])
+        arms: dict[str, Any] = {}
+        layer: dict[str, Any] = {}
+        for doc_id in order:
+            group = grouped[doc_id]
+            ordered_hits = [h for _, h in sorted(group["passages"], key=lambda p: p[0])]
+            content = "\n\u2026\n".join(self._render_for_amb(h) for h in ordered_hits)
+            first_hit = group["first_hit"]
             documents.append(
                 Document(
                     id=doc_id,
-                    content=hit["content"],
+                    content=content,
                     user_id=user_id,
-                    tags=[hit["room"]] if hit.get("room") else None,
+                    tags=[first_hit["room"]] if first_hit.get("room") else None,
                     source_ids=[doc_id],
                 )
             )
-            scores[doc_id] = hit["score"]
+            scores[doc_id] = first_hit.get("score", 0.0)
+            arms[doc_id] = first_hit.get("arms")
+            layer[doc_id] = first_hit.get("layer")
 
         raw: dict[str, Any] = {
             "degraded": query_vector is None,
             "fusion": self._fusion,
+            "granularity": self._granularity,
+            "rerank": self._rerank,
             "scores": scores,
-            # Per-hit RRF arm ranks (None under fusion="legacy") and layer.
-            "arms": {
-                hit.get("source") or str(hit["ref"]): hit.get("arms") for hit in hits
-            },
-            "layer": {
-                hit.get("source") or str(hit["ref"]): hit.get("layer") for hit in hits
-            },
+            # Per-doc RRF arm ranks (None under fusion="legacy") and layer.
+            "arms": arms,
+            "layer": layer,
         }
         trace = os.environ.get("AMPLIFIER_AMB_TRACE")
         if trace:
@@ -302,6 +422,8 @@ class AmplifierMemoryProvider:
                             "query": query,
                             "k": k,
                             "fusion": self._fusion,
+                            "granularity": self._granularity,
+                            "rerank": self._rerank,
                             "ids": [d.id for d in documents],
                         }
                     )
