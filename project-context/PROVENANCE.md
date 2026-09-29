@@ -530,3 +530,45 @@ reaches the answerer without dates; scoped latency grows with unrelated data.
   respawn; newer daemons never retired; pyproject == `__version__` test.
 **Verification:** 801 module/bench + 92 root tests, twice, green; name gate clean.
 **Status:** derived.
+
+### D31 — D13 campaign #2 (T6.6): 4 of 6 bar items met
+**Results (EXPERIMENT_JOURNAL 2026-09-29):** winner config C = rrf + passage
+granularity + dates (rerank off, MiniLM embedder).
+- LoCoMo QA 67.7 → **81.4** (+13.7, significant) — met; beats the harness's
+  own hybrid baseline run like-for-like (74.5) — met.
+- Context tokens 8% (LongMemEval-S) / 20% (LoCoMo) of the old path — met.
+- PrecisionMemBench R@10 0.970 ≥ 0.941 — met.
+- LongMemEval-S QA 55.8 → 59.2 (+3.4, not significant) — **unmet**; subset vs
+  hybrid 57 vs 61 (not significant) — unsettled.
+- Full-store p95 — **unmet**: warm searches 6–7 ms, but the store drops its
+  in-memory fold after 5 s idle and rebuilds from the whole log (384–460 s at
+  1 GB); first search per wing up to ~3 s.
+**Per-type:** dates lifted temporal questions (LME 36.8 → 56.4, LoCoMo 45 →
+76); passages cut multi-session (57.9 → 39.1) — ten hits capped at two per
+session cover fewer sessions.
+**Rejected levers (subset evidence):** cross-encoder rerank (−3 QA, lower R@5,
+extra latency); bge-small embedder (tie on QA, 37% slower ingest). Both stay
+available as options, off by default.
+**Found by the campaign:** the passage splitter only cut at line breaks, so
+single-line sessions became one drawer-sized passage (fixed: over-long lines
+split at whitespace; window-end cuts fixed); the adapter never embedded
+passages (fixed). Subset noise is ±3–7 QA points: choices are made on the
+subset, claims only on full runs.
+**Status:** derived.
+
+### D32 — P7: close the remaining bars
+- T7.1 **Indexes never expire and never rebuild from the log on the hot path.**
+  The daemon is the single writer, so it updates its derived indexes
+  (per-wing vectors, per-wing BM25, scope/filing/fact maps) write-through at
+  write time; the raw event snapshot is not retained; content is resolved by
+  ref. One full fold at daemon start only.
+- T7.2 **Batch passage writes** with their drawer (one append per drawer).
+- T7.3 **Multi-session recall:** pack evidence to a token budget with a
+  diversity-first pass (one passage per drawer before second passages), tuned
+  only on the fixed subset.
+- T7.4 **Legacy-fingerprint transition:** a same-version daemon reporting a
+  non-string (pre-fix timestamp) fingerprint is older code by construction →
+  retire it.
+- Then: full LongMemEval-S for the tuned config and the hybrid baseline;
+  full-store latency measured after idle.
+**Status:** derived from D13.
