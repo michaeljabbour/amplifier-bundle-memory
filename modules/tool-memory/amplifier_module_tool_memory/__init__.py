@@ -31,6 +31,7 @@ from typing import Any
 
 from amplifier_core import Tool, ToolResult  # type: ignore
 
+from ._version import __version__
 from .client import ensure_daemon
 from .coordinator_bridge import (
     NOOP_SYNC_BRIDGE,
@@ -463,6 +464,33 @@ class MemoryTool(Tool):
                     "operation, T2.2). Omit for the server default (both)."
                 ),
             },
+            "granularity": {
+                "type": "string",
+                "enum": ["passage", "drawer"],
+                "description": (
+                    "Search hit granularity (T6.2). 'passage' returns the "
+                    "best-matching passage(s) of a long drawer instead of "
+                    "its full text; 'drawer' rolls a passage match back up "
+                    "to the full parent drawer. Omit for the server "
+                    "default ('passage' when fusion is 'rrf', 'drawer' "
+                    "for legacy fusion)."
+                ),
+            },
+            "rerank": {
+                "type": "boolean",
+                "description": (
+                    "Rerank the fused top results with a local "
+                    "cross-encoder (T6.4). Omit for the server default."
+                ),
+            },
+            "max_passages_per_drawer": {
+                "type": "integer",
+                "description": (
+                    "Cap on passage hits from the same drawer in one "
+                    "passage-granularity search (T6.2). Omit for the "
+                    "server default."
+                ),
+            },
             # Fact parameters (fact_add / facts)
             "text": {
                 "type": "string",
@@ -767,6 +795,9 @@ class MemoryTool(Tool):
                         since=kwargs.get("since") or None,
                         until=kwargs.get("until") or None,
                         layers=kwargs.get("layers") or None,
+                        granularity=kwargs.get("granularity") or None,
+                        rerank=kwargs.get("rerank"),
+                        max_passages_per_drawer=kwargs.get("max_passages_per_drawer"),
                     )
                 except Exception as exc:
                     return _client_error_to_tool_result(exc)
@@ -1266,6 +1297,6 @@ async def mount(
     await coordinator.mount("tools", tool, name=tool.name)
     return {
         "name": "tool-memory",
-        "version": "2.2.0",
+        "version": __version__,
         "provides": ["memory"],
     }

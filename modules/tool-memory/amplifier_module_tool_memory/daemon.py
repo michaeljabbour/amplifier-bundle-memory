@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import hmac
 import json
 import logging
@@ -39,8 +40,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from amplifier_module_tool_memory._version import __version__ as _PACKAGE_VERSION
 from amplifier_module_tool_memory.embedder import DEFAULT_MODEL, FastEmbedEmbedder
-from amplifier_module_tool_memory.store import NativeMemoryStore
+from amplifier_module_tool_memory.store import (
+    DEFAULT_MAX_PASSAGES_PER_DRAWER,
+    DEFAULT_PASSAGE_CHARS,
+    DEFAULT_PASSAGE_MIN_CHARS,
+    DEFAULT_PASSAGE_OVERLAP,
+    DEFAULT_RERANK_MAX_CHARS,
+    DEFAULT_RERANK_TOP_N,
+    NativeMemoryStore,
+)
 
 _LOCALHOST = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 _DEFAULT_TOKEN_PATH = Path.home() / ".amplifier" / "amplifier-data-token"
@@ -303,13 +313,13 @@ def make_gateway(
                 return hmac.compare_digest(header[7:], token)
             return False
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             if self.path == "/health":
                 self._send(200, {"ok": True, "service": "amplifier-data-gateway"})
             else:
                 self._send(404, {"error": "not found"})
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             if self.path != "/mcp":
                 self._send(404, {"error": "not found"})
                 return
@@ -340,42 +350,76 @@ def make_gateway(
 
 
 def daemon_version() -> str:
-    """Resolve this package's installed version for the daemon's ``/health``
-    and the client's version-mismatch check (§5.2) -- both sides call this
-    SAME function so they can never disagree about what "current" means.
-    Falls back to a dev sentinel when metadata is unavailable (editable
-    installs without a build, or running straight from a source checkout
-    that was never ``pip install``-ed).
+    """Resolve this package's version for the daemon's ``/health`` and the
+    client's version-mismatch check (§5.2) -- both sides call this SAME
+    function so they can never disagree about what "current" means.
+
+    T6.7 (D28 follow-up 1): reads the SOURCE-level ``_version.__version__``
+    constant, not ``importlib.metadata``. Installed dist-info is only
+    refreshed by a package reinstall; a bundle cache refresh updates the
+    working tree's ``.py`` files in place without reinstalling the editable
+    module, so a daemon started before that refresh kept reporting the OLD
+    (pre-refresh) version forever via dist-info -- ``_should_retire`` (which
+    only fires on a version-string difference) never noticed the upgrade.
+    Reading the constant directly means this function's answer changes the
+    instant the source changes, matching ``code_fingerprint()`` below.
+    Falls back to a dev sentinel only if the constant is somehow
+    unimportable (defensive; the module co-ships this constant so this
+    should not happen in practice).
     """
     try:
-        from importlib.metadata import version as _pkg_version
-
-        return _pkg_version("amplifier-module-tool-memory")
+        return _PACKAGE_VERSION
     except Exception:
         return "0.0.0-dev"
 
 
-def code_fingerprint(pkg_dir: Path | None = None) -> float:
-    """Max source ``.py`` mtime (epoch seconds) across this installed
-    package, or ``0.0`` when it cannot be scanned.
+_CODE_FINGERPRINT_CACHE: dict[Path, str] = {}
+_CODE_FINGERPRINT_LOCK = threading.Lock()
 
-    ``daemon_version()`` alone cannot detect a reinstalled/upgraded package
-    that did not also bump its version string (e.g. an editable checkout
-    whose files changed, or a release that forgot the bump) -- a running
-    daemon then reports the SAME version as a client whose on-disk code is
-    actually newer, and ``_should_retire`` (version-string comparison only)
-    never fires. Both the daemon's ``/health`` payload and the client's
-    stale-code check (§5.2 step 1c-bis, ``client._should_retire_stale_code``)
-    call this SAME function against the SAME package layout so they can
-    never disagree about what "current" means, mirroring how
-    ``daemon_version()`` already keeps both sides in sync for version
-    strings.
+
+def code_fingerprint(pkg_dir: Path | None = None) -> str:
+    """Short sha256 hex digest over the sorted source bytes of this
+    package's ``.py`` files, or ``""`` when it cannot be scanned.
+
+    T6.7 (D28 follow-up 1): replaces the previous max-mtime fingerprint.
+    Both the daemon's ``/health`` payload and the client's stale-code check
+    (§5.2 step 1c-bis, ``client._should_retire_stale_code``) call this SAME
+    function against the SAME package layout so they can never disagree
+    about what "current" means -- mirroring how ``daemon_version()`` keeps
+    both sides in sync for version strings. Unlike mtime, a content hash is
+    unaffected by clock skew, ``git checkout`` touching file mtimes without
+    changing content, or copy operations that don't preserve timestamps; it
+    also gives ``daemon_version()`` a companion signal that detects a
+    same-version-string-but-different-code daemon (an editable checkout
+    whose files changed without a version bump).
+
+    Computed once per process for the package's own directory (the common,
+    default-argument case) and cached -- a running process's own source does
+    not change under it. An explicit *pkg_dir* (used by tests to simulate a
+    "before" and "after" package snapshot) is always recomputed, never
+    cached, since the whole point of passing one is to observe it change.
     """
     d = pkg_dir if pkg_dir is not None else Path(__file__).resolve().parent
+    if pkg_dir is None:
+        with _CODE_FINGERPRINT_LOCK:
+            cached = _CODE_FINGERPRINT_CACHE.get(d)
+        if cached is not None:
+            return cached
     try:
-        return max((p.stat().st_mtime for p in d.rglob("*.py")), default=0.0)
+        paths = sorted(d.rglob("*.py"))
+        if not paths:
+            fingerprint = ""
+        else:
+            digest = hashlib.sha256()
+            for p in paths:
+                digest.update(p.read_bytes())
+            fingerprint = digest.hexdigest()[:16]
     except OSError:
-        return 0.0
+        fingerprint = ""
+    if pkg_dir is None:
+        with _CODE_FINGERPRINT_LOCK:
+            _CODE_FINGERPRINT_CACHE[d] = fingerprint
+    return fingerprint
 
 
 def default_memory_home() -> Path:
@@ -529,6 +573,87 @@ def _watch_embedder_and_sweep(
         time.sleep(poll_interval)
 
 
+#: T6.2 (D29): cap on how many candidate drawers one backfill sweep pass
+#: inspects, so a huge pre-existing store cannot turn the sweep into an
+#: unbounded startup pause -- a bounded, best-effort convergence pass, not
+#: a guarantee every long drawer gets passages in one run.
+_PASSAGE_BACKFILL_LIMIT = 500
+
+
+def _sweep_passage_backfill(
+    mem_store: NativeMemoryStore,
+    embedder: FastEmbedEmbedder,
+    lock: threading.Lock,
+    *,
+    poll_interval: float = 0.05,
+) -> dict[str, int]:
+    """Background thread target (T6.2, D29): once the embedder is ready,
+    create passages for pre-existing long drawers filed before this
+    feature landed (:meth:`NativeMemoryStore.ensure_passages` is the
+    idempotency check -- a drawer that already has passages is skipped).
+
+    Mirrors :func:`_watch_embedder_and_sweep`'s wait-then-fire-once shape:
+    waits for the embedder's ready/failed transition, then runs ONE bounded
+    pass over up to :data:`_PASSAGE_BACKFILL_LIMIT` drawers. Per-item
+    failures are skipped and reported to stderr, same as
+    :func:`_sweep_needs_embedding` -- one bad drawer must never abort the
+    sweep or crash the daemon.
+    """
+    while True:
+        if embedder.ready:
+            break
+        if embedder.failed:
+            return {"created": 0, "failed": 0}
+        time.sleep(poll_interval)
+
+    created = 0
+    failed = 0
+    try:
+        drawers = mem_store.list_drawers(limit=_PASSAGE_BACKFILL_LIMIT)
+    except Exception as exc:  # loud-but-graceful (KG-N3 pattern)
+        sys.stderr.write(
+            f"memory-daemon: passage backfill sweep could not list drawers: "
+            f"{type(exc).__name__}: {exc}\n"
+        )
+        return {"created": 0, "failed": 0}
+    for drawer in drawers:
+        content = drawer.get("content", "")
+        if len(content) < mem_store.passage_min_chars:
+            continue
+        wing = drawer.get("wing")
+        room = drawer.get("room")
+        if wing is None or room is None:
+            continue
+        try:
+            with lock:
+                refs = mem_store.ensure_passages(
+                    drawer["ref"], content, wing=wing, room=room, embedder=embedder
+                )
+            if refs:
+                created += 1
+        except Exception as exc:  # loud-but-graceful (KG-N3 pattern)
+            failed += 1
+            sys.stderr.write(
+                f"memory-daemon: passage backfill failed for "
+                f"{drawer.get('ref')!r}: {type(exc).__name__}: {exc}\n"
+            )
+    return {"created": created, "failed": failed}
+
+
+def _sweep_stale_embeddings(
+    mem_store: NativeMemoryStore, embedder: FastEmbedEmbedder, lock: threading.Lock
+) -> int:
+    """T6.5 (D29): mark ``needs_embedding`` on every ref whose recorded
+    ``embedded_with`` differs from *embedder*'s current
+    :attr:`FastEmbedEmbedder.model_id` -- a maintenance sweep the daemon
+    calls explicitly (e.g. after an embedder-model config change), never
+    from the hot search path. See
+    :meth:`NativeMemoryStore.requeue_stale_embeddings`.
+    """
+    with lock:
+        return mem_store.requeue_stale_embeddings(getattr(embedder, "model_id", ""))
+
+
 def _dispatch_domain(
     mem_store: NativeMemoryStore,
     embedder: FastEmbedEmbedder | None,
@@ -566,9 +691,16 @@ def _dispatch_domain(
                 category=args.get("category"),
                 importance=args.get("importance"),
                 embedding=vector,
+                embedding_model_id=(
+                    getattr(embedder, "model_id", None) if vector is not None else None
+                ),
                 filed_at=args.get("filed_at"),
                 session_id=args.get("session_id"),
                 commit=args.get("commit"),
+                # T6.2 (D29): embed-on-write for any passage this long
+                # drawer generates -- same embedder object, so a passage's
+                # `embedded_with` matches the drawer's own model id.
+                embedder=embedder,
             )
             if vector is None:
                 mem_store.store.assert_fact(  # type: ignore[attr-defined]
@@ -604,6 +736,10 @@ def _dispatch_domain(
             since=args.get("since"),
             until=args.get("until"),
             layers=list(layers) if layers is not None else None,
+            granularity=args.get("granularity"),
+            rerank=args.get("rerank"),
+            max_passages_per_drawer=args.get("max_passages_per_drawer"),
+            current_model_id=getattr(embedder, "model_id", None),
         )
         return {"results": results, "degraded": degraded}
 
@@ -645,7 +781,7 @@ def _dispatch_domain(
         return mem_store.kg_stats()
 
     if tool == "traverse":
-        start_ref = mem_store._anchor(str(args.get("start", "")))  # noqa: SLF001
+        start_ref = mem_store._anchor(str(args.get("start", "")))
         result = mem_store.store.query_graph(  # type: ignore[attr-defined]
             start_ref, int(args.get("max_hops", 2)), rel_type=args.get("rel_type")
         )
@@ -832,9 +968,10 @@ def make_daemon(
     token: str,
     allow_localhost_bypass: bool = True,
     version: str | None = None,
-    code_fp: float | None = None,
+    code_fp: str | None = None,
     durable: bool = True,
     on_shutdown: Any = None,
+    config: dict[str, Any] | None = None,
 ) -> ThreadingHTTPServer:
     """Build (but do not start) the memory daemon over *store* (§5.4).
 
@@ -849,7 +986,27 @@ def make_daemon(
     """
     _serialize_kernel_access(store)
     lock = threading.Lock()
-    mem_store = NativeMemoryStore(store=store)
+    resolved_config = config or {}
+    mem_store = NativeMemoryStore(
+        store=store,
+        passage_min_chars=int(
+            resolved_config.get("passage_min_chars", DEFAULT_PASSAGE_MIN_CHARS)
+        ),
+        passage_chars=int(resolved_config.get("passage_chars", DEFAULT_PASSAGE_CHARS)),
+        passage_overlap=int(
+            resolved_config.get("passage_overlap", DEFAULT_PASSAGE_OVERLAP)
+        ),
+        max_passages_per_drawer=int(
+            resolved_config.get(
+                "max_passages_per_drawer", DEFAULT_MAX_PASSAGES_PER_DRAWER
+            )
+        ),
+        rerank=str(resolved_config.get("rerank", "off")),
+        rerank_top_n=int(resolved_config.get("rerank_top_n", DEFAULT_RERANK_TOP_N)),
+        rerank_max_chars=int(
+            resolved_config.get("rerank_max_chars", DEFAULT_RERANK_MAX_CHARS)
+        ),
+    )
     if embedder is not None:
         # Catch-up sweep watcher (§4.3, KG-N7): started at daemon build time
         # so it is exercised whenever tests call make_daemon() directly (the
@@ -857,6 +1014,15 @@ def make_daemon(
         # run_daemon's production path.
         threading.Thread(
             target=_watch_embedder_and_sweep,
+            args=(mem_store, embedder, lock),
+            daemon=True,
+        ).start()
+        # T6.2 (D29): bounded backfill sweep -- pre-existing long drawers
+        # (filed before this feature landed) get passages too, once the
+        # embedder is ready. Same "fire once in the background, never
+        # block startup" shape as the watcher above.
+        threading.Thread(
+            target=_sweep_passage_backfill,
             args=(mem_store, embedder, lock),
             daemon=True,
         ).start()
@@ -871,7 +1037,7 @@ def make_daemon(
     # daemon startup (this thread is not joined; do_GET/do_POST below start
     # serving as soon as ThreadingHTTPServer below is constructed and the
     # caller calls serve_forever()).
-    threading.Thread(target=mem_store._fold_snapshot, daemon=True).start()  # noqa: SLF001
+    threading.Thread(target=mem_store._fold_snapshot, daemon=True).start()
     resolved_version = version if version is not None else daemon_version()
     resolved_fingerprint = code_fp if code_fp is not None else code_fingerprint()
     httpd_holder: dict[str, ThreadingHTTPServer] = {}
@@ -919,7 +1085,7 @@ def make_daemon(
                 return hmac.compare_digest(header[7:], token)
             return False
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             if self.path == "/health":
                 self._send(
                     200,
@@ -939,7 +1105,7 @@ def make_daemon(
             else:
                 self._send(404, {"error": "not found"})
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             if self.path != "/mcp":
                 self._send(404, {"error": "not found"})
                 return
@@ -977,13 +1143,11 @@ class GatewayClient:
 
     def _call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps({"tool": tool, "arguments": arguments}).encode("utf-8")
-        req = urllib.request.Request(  # noqa: S310 - localhost gateway
-            f"{self.base_url}/mcp", data=body, method="POST"
-        )
+        req = urllib.request.Request(f"{self.base_url}/mcp", data=body, method="POST")
         req.add_header("Content-Type", "application/json")
         if self.token:
             req.add_header("Authorization", f"Bearer {self.token}")
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             return json.loads(resp.read())
 
     def write_cell(self, payload: bytes, interpreters: tuple[Any, ...] = ()) -> str:
@@ -994,13 +1158,13 @@ class GatewayClient:
     def scope(self, cell_ref: str, scope_ref: str) -> None:
         self._call("scope", {"cell_ref": cell_ref, "scope_ref": scope_ref})
 
-    def assert_fact(self, subject: str, predicate: str, object: str) -> None:  # noqa: A002
+    def assert_fact(self, subject: str, predicate: str, object: str) -> None:
         self._call(
             "assert_fact",
             {"subject": subject, "predicate": predicate, "object": object},
         )
 
-    def invalidate_fact(self, subject: str, predicate: str, object: str) -> None:  # noqa: A002
+    def invalidate_fact(self, subject: str, predicate: str, object: str) -> None:
         self._call(
             "invalidate_fact",
             {"subject": subject, "predicate": predicate, "object": object},
@@ -1092,7 +1256,7 @@ class GatewayWriteBatch:
 
     def assert_fact(
         self, subject: str, predicate: str, object: str
-    ) -> GatewayWriteBatch:  # noqa: A002
+    ) -> GatewayWriteBatch:
         self._ops.append(
             {
                 "op": "assert_fact",
@@ -1212,8 +1376,8 @@ def _discovered_daemon_reachable(home: Path) -> bool:
     """Whether this home already advertises a responsive daemon."""
     try:
         info = json.loads((home / "daemon.json").read_text(encoding="utf-8"))
-        request = urllib.request.Request(f"{info['url']}/health", method="GET")  # noqa: S310
-        with urllib.request.urlopen(request, timeout=0.5) as response:  # noqa: S310
+        request = urllib.request.Request(f"{info['url']}/health", method="GET")
+        with urllib.request.urlopen(request, timeout=0.5) as response:
             return bool(json.loads(response.read()).get("ok"))
     except Exception:  # noqa: BLE001 - best-effort startup race probe
         return False
@@ -1227,6 +1391,7 @@ def run_daemon(
     ephemeral: bool = False,
     embedder_model: str = DEFAULT_MODEL,
     token_path: str | Path | None = None,
+    config: dict[str, Any] | None = None,
 ) -> int:
     """Run the memory daemon: open the store, warm the embedder, serve (§5.2, §5.6).
 
@@ -1270,6 +1435,7 @@ def run_daemon(
             ephemeral=ephemeral,
             embedder_model=embedder_model,
             token_path=token_path,
+            config=config,
         )
     finally:
         _release_daemon_owner(owner)
@@ -1283,6 +1449,7 @@ def _run_owned_daemon(
     ephemeral: bool,
     embedder_model: str,
     token_path: str | Path | None,
+    config: dict[str, Any] | None = None,
 ) -> int:
     """Run a daemon after :func:`run_daemon` acquired lifetime ownership."""
     resolved_home = home
@@ -1333,6 +1500,7 @@ def _run_owned_daemon(
         code_fp=fingerprint,
         durable=durable,
         on_shutdown=_close_store,
+        config=config,
     )
     chosen_port = httpd.server_address[1]
 
@@ -1350,7 +1518,7 @@ def _run_owned_daemon(
     }
     _write_daemon_json(resolved_home, info)
 
-    def _handle_sigterm(signum: int, frame: Any) -> None:  # noqa: ARG001
+    def _handle_sigterm(signum: int, frame: Any) -> None:
         # Signal handlers run in the main thread, which is the SAME thread
         # blocked in serve_forever() below -- calling httpd.shutdown()
         # directly here would deadlock (it waits for the serve_forever loop
@@ -1459,10 +1627,66 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MODEL,
         help="--daemon mode only: fastembed model name, or 'none' for lexical-only by policy",
     )
+    # T6.1/T6.2/T6.4 (D29) config knobs -- --daemon mode only. Omitted flags
+    # fall back to the store's own defaults (DEFAULT_PASSAGE_MIN_CHARS etc.).
+    parser.add_argument(
+        "--passage-min-chars",
+        type=int,
+        default=DEFAULT_PASSAGE_MIN_CHARS,
+        help="--daemon mode only: drawers at/above this length get passages (T6.2)",
+    )
+    parser.add_argument(
+        "--passage-chars",
+        type=int,
+        default=DEFAULT_PASSAGE_CHARS,
+        help="--daemon mode only: target passage size in characters (T6.2)",
+    )
+    parser.add_argument(
+        "--passage-overlap",
+        type=int,
+        default=DEFAULT_PASSAGE_OVERLAP,
+        help="--daemon mode only: back-overlap between consecutive passages (T6.2)",
+    )
+    parser.add_argument(
+        "--max-passages-per-drawer",
+        type=int,
+        default=DEFAULT_MAX_PASSAGES_PER_DRAWER,
+        help="--daemon mode only: cap on passage hits per drawer in one search (T6.2)",
+    )
+    parser.add_argument(
+        "--rerank",
+        default="off",
+        choices=["off", "cross-encoder"],
+        help="--daemon mode only: local cross-encoder rerank of the fused top-N (T6.4)",
+    )
+    parser.add_argument(
+        "--rerank-top-n",
+        type=int,
+        default=DEFAULT_RERANK_TOP_N,
+        help="--daemon mode only: how many fused hits the reranker sees (T6.4, D29 P6)",
+    )
+    parser.add_argument(
+        "--rerank-max-chars",
+        type=int,
+        default=DEFAULT_RERANK_MAX_CHARS,
+        help=(
+            "--daemon mode only: truncate each reranked candidate to this "
+            "many characters before scoring (T6.4, D29 P6)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.daemon:
         home = Path(args.home).expanduser() if args.home else default_memory_home()
+        daemon_config = {
+            "passage_min_chars": args.passage_min_chars,
+            "passage_chars": args.passage_chars,
+            "passage_overlap": args.passage_overlap,
+            "max_passages_per_drawer": args.max_passages_per_drawer,
+            "rerank": args.rerank,
+            "rerank_top_n": args.rerank_top_n,
+            "rerank_max_chars": args.rerank_max_chars,
+        }
         return run_daemon(
             home=home,
             host=args.host,
@@ -1470,6 +1694,7 @@ def main(argv: list[str] | None = None) -> int:
             ephemeral=args.ephemeral,
             embedder_model=args.embedder_model,
             token_path=args.token_file,
+            config=daemon_config,
         )
 
     httpd, info = run_server(

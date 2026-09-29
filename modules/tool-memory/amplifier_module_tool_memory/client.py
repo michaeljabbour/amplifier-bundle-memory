@@ -29,7 +29,6 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +100,9 @@ class MemoryClient(GatewayClient):
         since: str | None = None,
         until: str | None = None,
         layers: Sequence[str] | None = None,
+        granularity: str | None = None,
+        rerank: bool | None = None,
+        max_passages_per_drawer: int | None = None,
     ) -> dict[str, Any]:
         """``{results: [...], degraded: null|"lexical_only"}`` (\u00a75.4).
 
@@ -121,6 +123,9 @@ class MemoryClient(GatewayClient):
                 "since": since,
                 "until": until,
                 "layers": list(layers) if layers is not None else None,
+                "granularity": granularity,
+                "rerank": rerank,
+                "max_passages_per_drawer": max_passages_per_drawer,
             },
         )
 
@@ -293,7 +298,7 @@ class MemoryClient(GatewayClient):
         out = self._call("kg_query", {"subject": subject, "predicate": predicate})
         return [(f[0], f[1], f[2]) for f in out["facts"]]
 
-    def kg_add(self, subject: str, predicate: str, object: str) -> None:  # noqa: A002
+    def kg_add(self, subject: str, predicate: str, object: str) -> None:
         """Anchor-resolved KG assert (B2 parity gap-fill: the \u00a75.4 dispatch-tool
         table only lists kg_query/kg_timeline/kg_stats, but MemoryTool's ``kg``
         operation supports add/invalidate and must keep working natively.
@@ -303,7 +308,7 @@ class MemoryClient(GatewayClient):
             "kg_add", {"subject": subject, "predicate": predicate, "object": object}
         )
 
-    def kg_invalidate(self, subject: str, predicate: str, object: str) -> None:  # noqa: A002
+    def kg_invalidate(self, subject: str, predicate: str, object: str) -> None:
         """Anchor-resolved KG invalidate -- see :meth:`kg_add`."""
         self._call(
             "kg_invalidate",
@@ -380,8 +385,8 @@ def _health(url: str, *, timeout: float) -> dict[str, Any] | None:
     if not url:
         return None
     try:
-        req = urllib.request.Request(f"{url}/health", method="GET")  # noqa: S310
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        req = urllib.request.Request(f"{url}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
         return None
@@ -420,40 +425,37 @@ def _should_retire(theirs: str, mine: str) -> bool:
 
 def _should_retire_stale_code(hc: dict[str, Any], info: dict[str, Any]) -> bool:
     """Retire a daemon reporting the SAME version as this client when its
-    loaded code is nonetheless demonstrably older (§5.2 step 1c-bis).
+    loaded code is nonetheless demonstrably different (§5.2 step 1c-bis).
 
     ``_should_retire`` only compares version *strings* -- it never fires for
     a reinstalled/editable package whose files changed without a version
     bump (the exact scenario that left a stale pre-optimization daemon
     running for a full day, measured 2026-09-25: both processes reported
-    ``2.0.2``). Two detection paths, in preference order:
+    ``2.0.2``). Callers of THIS function already established the version
+    strings are equal (``client._discover``'s ``code_stale`` branch), so
+    there is no "older"/"newer" ordering between two sha256 fingerprints --
+    a difference of ANY kind at the same version means the running daemon's
+    on-disk code no longer matches this client's, and D28's fix direction is
+    to trust the CLIENT's freshly-read source (this call is always made by
+    a client process about to spawn its own replacement) and retire the
+    daemon (same safe retirement path as §11's "retire stale-code daemons").
 
-    * The daemon's ``/health`` reports ``code_fingerprint`` (current
-      daemons, written by :func:`amplifier_module_tool_memory.daemon.
-      code_fingerprint`): retire when it is strictly older than ours.
-    * It doesn't (a daemon started before this field existed): fall back to
-      comparing daemon.json's ``started_at`` timestamp against our own
-      fingerprint -- if the newest local ``.py`` file was touched AFTER the
-      daemon started, the on-disk package changed underneath it.
-
-    Fails closed toward keeping the running daemon on any missing or
-    unparsable data, mirroring ``_should_retire``'s own bias (never kill a
-    daemon on a guess).
+    T6.7 (D28 follow-up 1): the daemon's ``/health`` payload now reports a
+    ``code_fingerprint`` computed by
+    :func:`amplifier_module_tool_memory.daemon.code_fingerprint` (sha256 over
+    sorted source bytes) rather than a max-mtime float. Backward compat with
+    a daemon that predates this field (or any daemon that reports a
+    non-string/empty value): there is nothing to compare against, so this
+    fails closed and leaves the running daemon alone -- identical to
+    ``_should_retire``'s own bias never to kill a daemon on a guess.
     """
-    mine_fp = code_fingerprint()
-    if mine_fp <= 0.0:
-        return False
     theirs_fp = hc.get("code_fingerprint")
-    if isinstance(theirs_fp, (int, float)):
-        return theirs_fp < mine_fp
-    started_at = info.get("started_at")
-    if not started_at:
+    if not isinstance(theirs_fp, str) or not theirs_fp:
         return False
-    try:
-        started_epoch = datetime.fromisoformat(str(started_at)).timestamp()
-    except ValueError:
+    mine_fp = code_fingerprint()
+    if not mine_fp:
         return False
-    return started_epoch < mine_fp
+    return theirs_fp != mine_fp
 
 
 def _retire_and_wait(client: MemoryClient, url: str) -> None:
@@ -509,9 +511,7 @@ def _discover(home: Path, *, allow_recover: bool = True) -> MemoryClient | None:
         # closes). Only checked when the version string didn't already
         # decide the matter, so a genuinely newer daemon is never touched.
         code_stale = (
-            not version_stale
-            and theirs == mine
-            and _should_retire_stale_code(hc, info)
+            not version_stale and theirs == mine and _should_retire_stale_code(hc, info)
         )
         if not (version_stale or code_stale):
             return _client_from_info(info)
@@ -563,7 +563,7 @@ def _spawn_daemon_process(home: Path) -> None:
     """
     log_path = home / "daemon.log"
     with open(log_path, "a", encoding="utf-8") as log_fh:
-        subprocess.Popen(  # noqa: S603
+        subprocess.Popen(
             [
                 sys.executable,
                 "-m",

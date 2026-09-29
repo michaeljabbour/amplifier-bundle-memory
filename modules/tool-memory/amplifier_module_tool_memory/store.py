@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import struct
 import threading
 import time
@@ -78,6 +79,16 @@ except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
         "NativeMemoryStore.search falls back to fusion='legacy'."
     )
 
+#: T6.4 (D29) capability check, not a hard dependency: the cross-encoder
+#: reranker lives in ``rerank.py`` (owned by a concurrent builder). When it
+#: is not present/importable, ``rerank`` search requests simply fall back to
+#: RRF order with a ``rerank_skipped`` reason on every hit -- never a hard
+#: failure.
+try:
+    from amplifier_module_tool_memory.rerank import get_reranker
+except ImportError:  # pragma: no cover - exercised via monkeypatch in tests
+    get_reranker = None  # type: ignore[assignment]
+
 #: Fact predicates carrying time/provenance on a drawer (D8: consumer-supplied
 #: facts, never kernel event fields -- amplifier-data deliberately excludes
 #: wall-clock time from events to keep byte-identical regeneration).
@@ -127,6 +138,123 @@ _MEMORY_FILED_AS = "@memory:filed_as"
 _MEMORY_CITES = "@memory:cites"
 _MEMORY_CURRENT_INDEX = "@memory:current_index"
 _MEMORY_CURRENT_ANSWER = "@memory:current_answer"
+
+#: T6.2 (D29): a passage cell -> its parent drawer. Scoped identically to
+#: the drawer (same wing/room edges); NOT a provenance edge (that's
+#: ``_MEMORY_DERIVED_FROM``) -- a passage is a derived VIEW of its drawer,
+#: not a fact built FROM it.
+_MEMORY_PASSAGE_OF = "@memory:passage_of"
+
+#: T6.5 (D29): records which embedder produced a ref's current vector(s),
+#: so a model swap can tell stale vectors from current ones (search excludes
+#: a mismatch from the semantic arm; a maintenance sweep requeues it for
+#: re-embedding). Plain (non-reserved-prefix) fact predicate -- mirrors
+#: ``has_source``/``has_category`` rather than the ``@memory:`` edges above,
+#: since it is regular queryable KG-shaped metadata, not internal wiring.
+_EMBEDDED_WITH_PREDICATE = "embedded_with"
+
+#: T6.2 (D29) passage-splitting defaults (design \u00a76 P6 plan). A drawer's
+#: content at or above ``passage_min_chars`` is split into overlapping
+#: passages targeting ``passage_chars`` with ``passage_overlap`` chars of
+#: back-overlap between consecutive passages -- see
+#: :func:`_split_into_passages`. ``max_passages_per_drawer`` bounds how many
+#: of one drawer's passages may appear in a single passage-granularity
+#: search result (collapse step in :meth:`NativeMemoryStore.search`).
+DEFAULT_PASSAGE_MIN_CHARS = 1200
+DEFAULT_PASSAGE_CHARS = 900
+DEFAULT_PASSAGE_OVERLAP = 150
+DEFAULT_MAX_PASSAGES_PER_DRAWER = 2
+
+#: T6.4/D29 P6 rerank defaults (measured 2026-09-28: 30 pairs x 900 chars
+#: p95 160ms blows the 150ms search budget; 15-20 pairs or <=800 chars each
+#: land around 100ms). Rerank mode itself stays "off" by default (unchanged)
+#: -- these are only the top-N/max-chars values applied WHEN a caller (or
+#: config) turns reranking on, so opting in gets a budget-safe shape without
+#: every caller having to know the measurement.
+DEFAULT_RERANK_TOP_N = 20
+DEFAULT_RERANK_MAX_CHARS = 800
+
+#: Natural passage-split boundary lines (T6.2, design \u00a74): blank lines,
+#: markdown headings, and conversational turn markers (``user:``,
+#: ``assistant:``, ``[role]``-style brackets). Matched against a single
+#: line (including its trailing newline, if any).
+_PASSAGE_BOUNDARY_RE = re.compile(
+    r"^[ \t]*($|#{1,6}[ \t]|(user|assistant|system|human|ai)\s*:|\[[^\]\n]+\][ \t]*$)",
+    re.IGNORECASE,
+)
+
+
+def _is_passage_boundary_line(line: str) -> bool:
+    """Whether *line* is a natural passage-split boundary (see
+    :data:`_PASSAGE_BOUNDARY_RE`)."""
+    return bool(_PASSAGE_BOUNDARY_RE.match(line))
+
+
+def _split_into_passages(
+    text: str,
+    *,
+    passage_chars: int = DEFAULT_PASSAGE_CHARS,
+    overlap: int = DEFAULT_PASSAGE_OVERLAP,
+) -> list[tuple[int, int, str]]:
+    """Deterministically split *text* into overlapping ``(start, end, text)``
+    passages (T6.2, design \u00a74), splitting ONLY at line boundaries (never
+    mid-line).
+
+    Grows each passage line-by-line until it reaches *passage_chars*, then
+    looks a short distance ahead (up to 5 more lines) for a natural
+    boundary line (:func:`_is_passage_boundary_line`) to actually cut
+    after; a long unbroken block with no boundary in that window is cut at
+    the line where the target size was first reached -- still a full-line
+    boundary, just not a "natural" one. Each following passage restarts
+    *overlap* chars before the previous cut, backed up to the nearest line
+    start, so no passage boundary can strand a fact mid-thought. Pure and
+    deterministic: identical *text* always yields identical output, which
+    is what makes the resulting passage cells idempotent under content
+    addressing (re-filing the same drawer content produces the SAME
+    passage refs).
+    """
+    if not text:
+        return []
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return []
+    offsets: list[int] = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line)
+    total = pos
+    n = len(lines)
+
+    def _line_end(idx: int) -> int:
+        return offsets[idx] + len(lines[idx])
+
+    passages: list[tuple[int, int, str]] = []
+    start_line = 0
+    while start_line < n:
+        start = offsets[start_line]
+        j = start_line
+        while j < n and _line_end(j) - start < passage_chars:
+            j += 1
+        if j >= n:
+            j = n - 1
+        else:
+            lookahead_limit = min(n - 1, j + 5)
+            k = j
+            while k < lookahead_limit and not _is_passage_boundary_line(lines[k]):
+                k += 1
+            j = k
+        end = _line_end(j)
+        passages.append((start, end, text[start:end]))
+        if end >= total:
+            break
+        back_to = end - overlap
+        k = j
+        while k > start_line and offsets[k] > back_to:
+            k -= 1
+        start_line = max(k, start_line + 1)
+    return passages
+
 
 #: Time/provenance facts on a fact cell (D8: consumer-supplied facts, mirrors
 #: the drawer predicates above).
@@ -336,6 +464,14 @@ class _SearchFold:
         )
         self._vector_matrix_computed = False
         self._vector_matrix: tuple[list[str], Any] | None = None
+        # T6.1 (D29): per-scope-ref (target_refs, float64 matrix, edge_count)
+        # partitions, keyed by scope_ref (wing OR room ref) -- see
+        # :meth:`scoped_vector_matrix`. Shallow-copied from *prior* (each
+        # entry is replaced wholesale, never mutated in place) so this
+        # fold's extensions never affect an earlier fold sharing the dict.
+        self._scope_matrix_states: dict[Any, tuple[list[str], Any, int]] = (
+            dict(extend_from._scope_matrix_states) if extend_from is not None else {}
+        )
 
         # T0.2 / scale-defect-1 fix (D26 -- cross-request incrementality):
         # filed_at earliest-wins, scope membership, currently-valid-facts
@@ -348,12 +484,21 @@ class _SearchFold:
 
         if extend_from is not None:
             base_scope = extend_from.scope_membership
+            base_scope_reverse = extend_from.scope_reverse
             base_history = extend_from._triple_history
             base_sp = extend_from._by_subject_predicate
             base_po = extend_from._by_predicate_object
             base_filed_as = extend_from._filed_as_edges
         else:
-            base_scope, base_history, base_sp, base_po, base_filed_as = (
+            (
+                base_scope,
+                base_scope_reverse,
+                base_history,
+                base_sp,
+                base_po,
+                base_filed_as,
+            ) = (
+                {},
                 {},
                 {},
                 {},
@@ -362,12 +507,19 @@ class _SearchFold:
             )
         (
             self.scope_membership,
+            self.scope_reverse,
             self._triple_history,
             self._by_subject_predicate,
             self._by_predicate_object,
             self._filed_as_edges,
         ) = self._merge_triples(
-            base_scope, base_history, base_sp, base_po, base_filed_as, new_tail_events
+            base_scope,
+            base_scope_reverse,
+            base_history,
+            base_sp,
+            base_po,
+            base_filed_as,
+            new_tail_events,
         )
 
         filings: dict[Any, list[tuple[Any, dict[str, Any]]]] = {}
@@ -454,12 +606,14 @@ class _SearchFold:
     @staticmethod
     def _merge_triples(
         base_scope: dict[Any, set[Any]],
+        base_scope_reverse: dict[Any, set[Any]],
         base_history: dict[tuple[Any, str, Any], list[tuple[Any, str]]],
         base_sp: dict[tuple[Any, str], list[Any]],
         base_po: dict[tuple[str, Any], list[Any]],
         base_filed_as: list[tuple[Any, Any]],
         new_tail_events: list[Any],
     ) -> tuple[
+        dict[Any, set[Any]],
         dict[Any, set[Any]],
         dict[tuple[Any, str, Any], list[tuple[Any, str]]],
         dict[tuple[Any, str], list[Any]],
@@ -491,6 +645,9 @@ class _SearchFold:
         scope_membership: dict[Any, set[Any]] = {
             k: set(v) for k, v in base_scope.items()
         }
+        scope_reverse: dict[Any, set[Any]] = {
+            k: set(v) for k, v in base_scope_reverse.items()
+        }
         triple_history: dict[tuple[Any, str, Any], list[tuple[Any, str]]] = {
             k: list(v) for k, v in base_history.items()
         }
@@ -507,6 +664,7 @@ class _SearchFold:
             etype = ev.type
             if etype == SCOPED_TO:
                 scope_membership.setdefault(ev.from_ref, set()).add(ev.to_ref)
+                scope_reverse.setdefault(ev.to_ref, set()).add(ev.from_ref)
                 continue
             if etype == EMBEDDING_OF:
                 continue
@@ -529,6 +687,7 @@ class _SearchFold:
                 po_subs.append(ev.from_ref)
         return (
             scope_membership,
+            scope_reverse,
             triple_history,
             by_subject_predicate,
             by_predicate_object,
@@ -655,6 +814,76 @@ class _SearchFold:
         self._vector_matrix = (refs, mat)
         return self._vector_matrix
 
+    def scoped_vector_matrix(self, scope_ref: Any) -> tuple[list[str], Any] | None:
+        """T6.1 (D29): incrementally-extendable ``(target_refs, matrix)``
+        restricted to embeddings whose target carries a DIRECT ``SCOPED_TO``
+        edge to *scope_ref* -- so a wing/room-scoped RRF query costs
+        O(size of the scope), not O(store): unlike :meth:`vector_matrix`
+        (which always builds/extends the GLOBAL matrix), this partition is
+        built per scope_ref and only ever grows by embedding edges whose
+        target is a member of *that* scope.
+
+        Extended from a PRIOR fold's own ``_scope_matrix_states`` entry for
+        this *scope_ref*, exactly like :meth:`vector_matrix` extends its
+        global counterpart: the FIRST query against a given scope pays one
+        full scan of :meth:`embedding_edges` (unavoidable -- nothing has
+        been partitioned for it yet); every later query against the SAME
+        scope, on a fold chain that stays intact (the store's
+        snapshot/prior-fold retention), only processes the newly appended
+        tail. Returns ``None`` on the same conditions as
+        :meth:`vector_matrix` (no numpy, or mixed embedding dimensions
+        within this scope) -- callers fall back to the pure-Python
+        ``VectorLens`` path in that case.
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            return None
+
+        edges = self.embedding_edges()
+        state = self._scope_matrix_states.get(scope_ref)
+        if state is not None and state[2] <= len(edges):
+            prior_refs, prior_mat, prior_count = state
+            new_edges = edges[prior_count:]
+        else:
+            prior_refs, prior_mat, prior_count = [], None, 0
+            new_edges = edges
+
+        new_refs: list[str] = []
+        new_rows: list[tuple[float, ...]] = []
+        dim = (
+            prior_mat.shape[1] if prior_mat is not None and prior_mat.shape[0] else None
+        )
+        for emb_ref, target_ref in new_edges:
+            if scope_ref not in self.scope_membership.get(target_ref, ()):
+                continue
+            raw = self.payloads.get(emb_ref)
+            if raw is None:
+                continue
+            n = len(raw) // 4
+            if dim is None:
+                dim = n
+            elif n != dim:
+                self._scope_matrix_states.pop(scope_ref, None)
+                return None
+            new_refs.append(target_ref)
+            new_rows.append(struct.unpack(f"<{n}f", raw))
+
+        if new_rows:
+            new_mat = np.asarray(new_rows, dtype=np.float64)
+            mat = (
+                new_mat
+                if prior_mat is None or prior_mat.shape[0] == 0
+                else np.vstack([prior_mat, new_mat])
+            )
+            refs = prior_refs + new_refs
+        else:
+            mat = prior_mat if prior_mat is not None else np.zeros((0, 0))
+            refs = prior_refs
+
+        self._scope_matrix_states[scope_ref] = (refs, mat, len(edges))
+        return (refs, mat)
+
     def scope_index(self) -> Any:
         """A :class:`ScopeIndex`-shaped view over the precomputed
         ``scope_membership`` -- callers that used to call
@@ -700,28 +929,25 @@ def _fast_vector_query(
     Same contract as ``VectorLens.query(...).output``: ``[(target_ref,
     score)]``, descending score, ties broken by ascending ``target_ref``,
     truncated to *k*, scope filtering applied BEFORE scoring/top-k.
+
+    T6.1 (D29): a scoped call (*scope_ref* given) reads
+    :meth:`_SearchFold.scoped_vector_matrix` -- a partition built and
+    incrementally extended FOR that scope alone -- instead of building/
+    filtering the GLOBAL matrix, so a wing/room-scoped query costs
+    O(size of the scope), not O(store).
     """
-    result = fold.vector_matrix()
+    result = (
+        fold.scoped_vector_matrix(scope_ref)
+        if scope_ref is not None
+        else fold.vector_matrix()
+    )
     if result is None:
         return None
-    refs, mat = result
-    if mat.shape[0] == 0:
+    sub_refs, sub_mat = result
+    if sub_mat.shape[0] == 0:
         return []
 
     import numpy as np
-
-    if scope_ref is not None:
-        keep_idx = [
-            i
-            for i, r in enumerate(refs)
-            if scope_ref in fold.scope_membership.get(r, ())
-        ]
-        if not keep_idx:
-            return []
-        sub_refs = [refs[i] for i in keep_idx]
-        sub_mat = mat[keep_idx]
-    else:
-        sub_refs, sub_mat = refs, mat
 
     q = np.asarray(query_vector, dtype=np.float64)
     if q.shape[0] != sub_mat.shape[1]:
@@ -737,6 +963,24 @@ def _fast_vector_query(
     order = sorted(range(len(sub_refs)), key=lambda i: (-scores[i], sub_refs[i]))
     top = order[: max(k, 0)]
     return [(sub_refs[i], float(scores[i])) for i in top]
+
+
+def _embedding_is_current(fold: _SearchFold, ref: Any, current_model_id: str) -> bool:
+    """T6.5 (D29): whether *ref*'s recorded ``embedded_with`` value(s)
+    include *current_model_id* -- a ref with NO recorded value at all
+    (pre-T6.5 content) is always treated as current, per D29's rule that
+    a missing model id must never exclude otherwise-valid content."""
+    values = fold.current_objects(ref, _EMBEDDED_WITH_PREDICATE)
+    if not values:
+        return True
+    for v in values:
+        raw = fold.payloads.get(v)
+        if (
+            raw is not None
+            and raw.decode("utf-8", errors="replace") == current_model_id
+        ):
+            return True
+    return False
 
 
 @runtime_checkable
@@ -887,6 +1131,14 @@ class NativeMemoryStore:
         base_url: str | None = None,
         token: str | None = None,
         record_access: bool = False,
+        passage_min_chars: int = DEFAULT_PASSAGE_MIN_CHARS,
+        passage_chars: int = DEFAULT_PASSAGE_CHARS,
+        passage_overlap: int = DEFAULT_PASSAGE_OVERLAP,
+        max_passages_per_drawer: int = DEFAULT_MAX_PASSAGES_PER_DRAWER,
+        rerank: str = "off",
+        rerank_top_n: int = DEFAULT_RERANK_TOP_N,
+        rerank_max_chars: int = DEFAULT_RERANK_MAX_CHARS,
+        rerank_config: dict[str, Any] | None = None,
     ) -> None:
         if store is None:
             if base_url is not None and token is not None:
@@ -950,6 +1202,28 @@ class NativeMemoryStore:
         # when amplifier-data predates the bm25 lens (see the module-level
         # capability check above).
         self._bm25_index: Any = BM25Index() if BM25Index is not None else None
+        # T6.1 (D29): per-scope-ref (wing OR room ref) partitioned BM25
+        # indexes -- built/extended lazily, one per scope actually queried
+        # (see `_search_rrf`). Unscoped queries keep using the global
+        # union index above.
+        self._scope_bm25_indexes: dict[Any, Any] = {}
+        # T6.2 (D29): passage-splitting config -- see `file()`/
+        # `_write_passages`/`ensure_passages`.
+        self.passage_min_chars = passage_min_chars
+        self.passage_chars = passage_chars
+        self.passage_overlap = passage_overlap
+        self.max_passages_per_drawer = max_passages_per_drawer
+        # T6.4 (D29): local cross-encoder rerank config -- see `search()`.
+        # `rerank_max_chars` is applied as the default `get_reranker()` sees
+        # (measured budget: DEFAULT_RERANK_MAX_CHARS/DEFAULT_RERANK_TOP_N);
+        # an explicit `rerank_config["rerank_max_chars"]` still wins.
+        self.rerank_mode = rerank
+        self.rerank_top_n = rerank_top_n
+        self._rerank_config: dict[str, Any] = {
+            "rerank_max_chars": rerank_max_chars,
+            **(rerank_config or {}),
+        }
+        self.last_search_stats: dict[str, Any] = {}
 
     def close(self) -> None:
         """Close the backing store if it supports it (RemoteStore does not)."""
@@ -967,11 +1241,28 @@ class NativeMemoryStore:
         category: str | None = None,
         importance: float | None = None,
         embedding: Sequence[float] | None = None,
+        embedding_model_id: str | None = None,
         filed_at: str | None = None,
         session_id: str | None = None,
         commit: str | None = None,
+        embedder: Any | None = None,
     ) -> Any:
         """Persist one drawer; returns the content-addressed cell ref.
+
+        ``embedding_model_id`` (T6.5, D29), when given alongside
+        *embedding*, records ``embedded_with`` on the drawer -- lets a
+        later model swap tell this vector's origin apart from one
+        produced by a different embedder (search excludes a mismatch from
+        the semantic arm; :meth:`requeue_stale_embeddings` marks it for
+        re-embedding).
+
+        ``embedder`` (T6.2, D29), when given, is an object exposing
+        ``ready: bool`` / ``embed(text) -> Sequence[float]`` /
+        ``model_id: str`` (the daemon's ``FastEmbedEmbedder`` shape) --
+        used ONLY to embed passages this call creates for long *content*
+        (see :meth:`_write_passages`); it never affects the drawer's own
+        *embedding*, which callers compute and pass in themselves exactly
+        as before.
 
         Pre-existing annotation bug fixed in the cold-start data-loss pass:
         this override always returns `ref` (every caller -- daemon.py's
@@ -1028,6 +1319,12 @@ class NativeMemoryStore:
                 vec = list(embedding)
                 emb_ref = b.write_cell(struct.pack(f"<{len(vec)}f", *vec))
                 b.relate(emb_ref, ref, EMBEDDING_OF)
+                if embedding_model_id is not None:
+                    b.assert_fact(
+                        ref,
+                        _EMBEDDED_WITH_PREDICATE,
+                        b.write_cell(embedding_model_id.encode()),
+                    )
             # Scale-defect-1 fix (D-scale-1, _MEMORY_FILED_AS): staged in the
             # SAME batch/commit as the drawer -- one append_batch per file()
             # call, same as before this fix. The filing payload's "drawer"
@@ -1083,6 +1380,12 @@ class NativeMemoryStore:
             if embedding is not None:
                 # Sequential path: the substrate's own add_embedding (dim-agnostic).
                 s.add_embedding(ref, list(embedding))  # type: ignore[attr-defined]
+                if embedding_model_id is not None:
+                    s.assert_fact(  # type: ignore[attr-defined]
+                        ref,
+                        _EMBEDDED_WITH_PREDICATE,
+                        s.write_cell(embedding_model_id.encode()),
+                    )
             # Scale-defect-1 fix: same FILING cell as the atomic branch above
             # (see its comment) -- the sequential path is already one call
             # per write, so this adds no extra commit round-trip either.
@@ -1099,6 +1402,8 @@ class NativeMemoryStore:
                 )
             )
             s.assert_fact(ref, _MEMORY_FILED_AS, filing_ref)  # type: ignore[attr-defined]
+        if len(content) >= self.passage_min_chars:
+            self._write_passages(ref, content, wing=wing, room=room, embedder=embedder)
         self.filed.append(
             {
                 "ref": ref,
@@ -1198,6 +1503,149 @@ class NativeMemoryStore:
             filing_ref = s.write_cell(payload)  # type: ignore[attr-defined]
             s.assert_fact(drawer_ref, _MEMORY_FILED_AS, filing_ref)  # type: ignore[attr-defined]
         return filing_ref
+
+    def _write_passages(
+        self,
+        drawer_ref: Any,
+        content: str,
+        *,
+        wing: str,
+        room: str,
+        embedder: Any | None,
+    ) -> list[Any]:
+        """T6.2 (D29): split *content* into overlapping passages
+        (:func:`_split_into_passages`) and file each as its own
+        content-addressed cell, scoped identically to *drawer_ref* and
+        linked back to it via ``@memory:passage_of``.
+
+        Idempotent under content addressing: re-filing the same drawer
+        content always produces the SAME passage refs/edges (a cheap
+        no-op on the underlying store, since every write here is itself
+        content-addressed or an idempotent ``scope``/``assert_fact``).
+
+        *embedder*, when given and ready, embeds each passage inline
+        (mirrors the daemon's embed-on-write path for drawers) and
+        records ``embedded_with`` (T6.5). When *embedder* is
+        ``None``/not ready/raises, a passage is marked ``needs_embedding``
+        instead -- the SAME catch-up sweep that already exists for
+        drawers (daemon.py's ``_sweep_needs_embedding``) embeds it once an
+        embedder warms, with no daemon change required: that sweep works
+        off the predicate alone, not the cell's kind.
+        """
+        s = self.store
+        wing_scope = s.write_cell(f"wing:{wing}".encode())  # type: ignore[attr-defined]
+        room_scope = s.write_cell(f"room:{room}".encode())  # type: ignore[attr-defined]
+        passage_refs: list[Any] = []
+        for start, end, text in _split_into_passages(
+            content, passage_chars=self.passage_chars, overlap=self.passage_overlap
+        ):
+            payload = json.dumps(
+                {
+                    "kind": "passage",
+                    "drawer": drawer_ref,
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            ref = s.write_cell(payload)  # type: ignore[attr-defined]
+            s.scope(ref, wing_scope)  # type: ignore[attr-defined]
+            s.scope(ref, room_scope)  # type: ignore[attr-defined]
+            s.assert_fact(ref, _MEMORY_PASSAGE_OF, drawer_ref)  # type: ignore[attr-defined]
+            vector: Sequence[float] | None = None
+            if embedder is not None and getattr(embedder, "ready", False):
+                try:
+                    vector = embedder.embed(text)
+                except Exception:  # loud-but-graceful (KG-N3 pattern)
+                    vector = None
+            if vector is not None:
+                s.add_embedding(ref, list(vector))  # type: ignore[attr-defined]
+                model_id = getattr(embedder, "model_id", None)
+                if model_id is not None:
+                    s.assert_fact(  # type: ignore[attr-defined]
+                        ref,
+                        _EMBEDDED_WITH_PREDICATE,
+                        s.write_cell(str(model_id).encode()),
+                    )
+            else:
+                s.assert_fact(  # type: ignore[attr-defined]
+                    ref, "needs_embedding", s.write_cell(_TRUE_CELL_BYTES)
+                )
+            passage_refs.append(ref)
+        return passage_refs
+
+    def has_passages(self, ref: Any, fold: _SearchFold | None = None) -> bool:
+        """Whether *ref* already has at least one ``@memory:passage_of``
+        child (T6.2) -- used both to skip a long drawer's own hit in
+        passage-granularity search (its passages represent it instead) and
+        as the backfill sweep's idempotency check (:meth:`ensure_passages`).
+        """
+        if fold is not None:
+            return bool(fold.objects_pointing_to(ref, _MEMORY_PASSAGE_OF))
+        res = self.store.query_facts(predicate=_MEMORY_PASSAGE_OF)  # type: ignore[attr-defined]
+        return any(f.object == ref for f in res.output)
+
+    def ensure_passages(
+        self,
+        ref: Any,
+        content: str,
+        *,
+        wing: str,
+        room: str,
+        embedder: Any | None = None,
+    ) -> list[Any]:
+        """T6.2 backfill: create passages for a pre-existing long drawer
+        that has none yet. A no-op (returns ``[]``) when *content* is
+        below :attr:`passage_min_chars` or *ref* already has passages --
+        the daemon's bounded backfill sweep can call this unconditionally
+        per candidate drawer without double-writing.
+        """
+        if len(content) < self.passage_min_chars:
+            return []
+        if self.has_passages(ref):
+            return []
+        return self._write_passages(
+            ref, content, wing=wing, room=room, embedder=embedder
+        )
+
+    def requeue_stale_embeddings(
+        self, current_model_id: str, *, limit: int = 500
+    ) -> int:
+        """T6.5 (D29): mark ``needs_embedding`` on every ref whose recorded
+        ``embedded_with`` value differs from *current_model_id* -- the
+        existing catch-up sweep (daemon.py's ``_sweep_needs_embedding``)
+        then re-embeds it with the active model on its next run.
+
+        A maintenance sweep the daemon schedules explicitly (e.g. after an
+        embedder-model config change), never called from :meth:`search`
+        itself (a read path must not write, D4). Bounded by *limit* per
+        call so a large corpus mid-migration is processed incrementally
+        across several calls instead of in one long pause. A ref with
+        MULTIPLE recorded ``embedded_with`` values (re-embedded more than
+        once) is requeued only if NONE of them match -- see
+        :meth:`search`'s own use of the same "any current value matches"
+        rule for the semantic-arm filter.
+        """
+        s = self.store
+        res = s.query_facts(predicate=_EMBEDDED_WITH_PREDICATE)  # type: ignore[attr-defined]
+        by_subject: dict[Any, set[str]] = {}
+        for f in res.output:
+            by_subject.setdefault(f.subject, set()).add(
+                self._payload_text(f.object, None)
+            )
+        requeued = 0
+        for subject, values in by_subject.items():
+            if current_model_id in values:
+                continue
+            s.assert_fact(  # type: ignore[attr-defined]
+                subject, "needs_embedding", s.write_cell(_TRUE_CELL_BYTES)
+            )
+            requeued += 1
+            if requeued >= limit:
+                break
+        return requeued
 
     def search_vectors(
         self, vector: Sequence[float], k: int, *, wing: str | None = None
@@ -1903,6 +2351,10 @@ class NativeMemoryStore:
         since: str | None = None,
         until: str | None = None,
         layers: Sequence[str] | None = None,
+        granularity: str | None = None,
+        rerank: bool | None = None,
+        max_passages_per_drawer: int | None = None,
+        current_model_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Hybrid rank (§6, T1.2/D9 RRF fusion) or lexical-only (§6.2).
 
@@ -1960,6 +2412,38 @@ class NativeMemoryStore:
         existing downstream thresholds (the interject cosine gate, briefing
         rerank) keep their meaning regardless of fusion mode.
 
+        ``granularity`` (T6.2, D29): ``"passage"`` | ``"drawer"`` | ``None``
+        (server default -- ``"passage"`` whenever RRF fusion is active,
+        ``"drawer"`` in legacy mode, unchanged). In passage mode, a long
+        drawer (one carrying its own passage cells) is represented by its
+        best-ranked PASSAGES instead of its own full text, collapsed to at
+        most ``max_passages_per_drawer`` (default
+        :attr:`max_passages_per_drawer`) per parent -- passage hits carry
+        ``layer="passage"``, ``drawer_ref``, ``span=[start, end]``, and
+        attribution resolved from the PARENT drawer's own scope-aware
+        filing. In drawer mode, the best-ranked passage of a long drawer
+        rolls up to that drawer's full verbatim content instead (a
+        best-segment rollup) -- backward-compatible shape, one hit per
+        drawer either way. Short drawers (below :attr:`passage_min_chars`,
+        no passages) are unaffected by *granularity* and returned as
+        ordinary ``layer="drawer"`` hits in both modes.
+
+        ``rerank`` (T6.4, D29): ``True``/``False``/``None`` (server default,
+        :attr:`rerank_mode`). When effectively on, the fused top
+        :attr:`rerank_top_n` hits are re-scored by a local cross-encoder
+        (``rerank.py``'s ``get_reranker``) and reordered (ties keep RRF
+        order); each reranked hit gains ``rerank_score``. If the reranker
+        is unavailable or raises, hits keep RRF order and gain
+        ``rerank_skipped`` instead -- never a hard failure.
+
+        ``current_model_id`` (T6.5, D29): when given, a candidate whose
+        recorded ``embedded_with`` value(s) never include this model id is
+        excluded from the semantic arm (its vector is stale) -- a ref with
+        no recorded ``embedded_with`` at all (pre-T6.5 content) is always
+        treated as current. Excluding is search-side only; a separate
+        maintenance sweep (:meth:`requeue_stale_embeddings`) marks stale
+        refs for re-embedding.
+
         Every read in this method goes through ONE log fold per call
         (:class:`_SearchFold` -- see its class docstring for the perf
         rationale this preserves: O(1) folds instead of O(reads) regenerate
@@ -1968,15 +2452,30 @@ class NativeMemoryStore:
         a real vector.
         """
         layer_set = set(layers) if layers is not None else {"fact", "drawer"}
-        # Only widen the internal pool when a layer is actually excluded
-        # (facts and drawers share one candidate pool, so a restricted
-        # request could otherwise under-fill after filtering). The default
-        # (both layers) requests EXACTLY k, same as pre-P2 -- T1.4's p95
-        # budget is measured against this default path and must not pay
-        # for a widening it never needed (the internal RRF/legacy engines
-        # already widen their OWN sub-pools proportionally to whatever k
-        # they're given, so requesting a larger k here compounds).
-        pool_k = k if layer_set == {"fact", "drawer"} else max(k * 3, 50)
+        resolved_fusion = (
+            fusion
+            if fusion is not None
+            else ("rrf" if BM25Index is not None else "legacy")
+        )
+        resolved_granularity = (
+            granularity
+            if granularity is not None
+            else ("passage" if resolved_fusion == "rrf" else "drawer")
+        )
+        # Only widen the internal pool when a layer is actually excluded, or
+        # passage-granularity collapsing might otherwise under-fill after
+        # filtering (facts/drawers/passages share one candidate pool). The
+        # default (both layers, drawer granularity) requests EXACTLY k, same
+        # as pre-P2 -- T1.4's p95 budget is measured against this default
+        # path and must not pay for a widening it never needed (the internal
+        # RRF/legacy engines already widen their OWN sub-pools proportionally
+        # to whatever k they're given, so requesting a larger k here
+        # compounds).
+        pool_k = (
+            k
+            if layer_set == {"fact", "drawer"} and resolved_granularity == "drawer"
+            else max(k * 3, 50)
+        )
 
         s = self.store
         scope_ref = None
@@ -1984,15 +2483,27 @@ class NativeMemoryStore:
             scope_ref = self._read_scope_ref("room", room)
         elif wing is not None:
             scope_ref = self._read_scope_ref("wing", wing)
+        # T6.1 (D29): the RRF path partitions by WING FIRST (falling back to
+        # room alone when no wing is given) and applies room as a secondary
+        # intersection filter -- unlike `scope_ref` above (room-priority,
+        # kept EXACTLY as-is for `_search_legacy`'s byte-identical
+        # contract). Two different wings that happen to reuse the same
+        # room NAME (a content-addressed "room:x" cell is shared across
+        # every wing using that name) would otherwise collapse into one
+        # giant room-only partition covering the whole store -- the actual
+        # scale defect D26/D27 measured. Room-only requests (no wing) are
+        # unaffected: `rrf_partition_ref` is just the room ref, same as
+        # `scope_ref`.
+        wing_ref = self._read_scope_ref("wing", wing) if wing is not None else None
+        room_ref = self._read_scope_ref("room", room) if room is not None else None
+        rrf_partition_ref = wing_ref if wing_ref is not None else room_ref
+        rrf_narrow_ref = (
+            room_ref if (wing_ref is not None and room_ref is not None) else None
+        )
         # Snapshot AFTER the scope-cell write above, so the fold sees at least
         # everything the per-call store-surface folds used to see.
         fold = self._fold_snapshot()
 
-        resolved_fusion = (
-            fusion
-            if fusion is not None
-            else ("rrf" if BM25Index is not None else "legacy")
-        )
         use_rrf = (
             resolved_fusion == "rrf" and BM25Index is not None and fold is not None
         )
@@ -2011,6 +2522,7 @@ class NativeMemoryStore:
             )
             eligible = self._temporal_eligible(universe, fold, since, until)
 
+        t_search_start = time.monotonic()
         if use_rrf:
             raw = self._search_rrf(
                 query_vector,
@@ -2018,9 +2530,11 @@ class NativeMemoryStore:
                 wing=wing,
                 room=room,
                 lexical_query=lexical_query,
-                scope_ref=scope_ref,
+                scope_ref=rrf_partition_ref,
+                narrow_ref=rrf_narrow_ref,
                 fold=fold,
                 eligible=eligible,
+                current_model_id=current_model_id,
             )
         else:
             raw = self._search_legacy(
@@ -2034,25 +2548,137 @@ class NativeMemoryStore:
                 eligible=eligible,
             )
 
+        effective_max_passages = (
+            max_passages_per_drawer
+            if max_passages_per_drawer is not None
+            else self.max_passages_per_drawer
+        )
         filtered: list[dict[str, Any]] = []
+        passages_per_drawer: dict[Any, int] = {}
+        emitted_drawers: set[Any] = set()
         for hit in raw:
-            kind = self._classify_ref(hit["ref"], fold)
-            layer = "fact" if kind == "fact" else "drawer"
-            if layer not in layer_set:
-                continue
-            if layer == "fact":
-                if not self._is_current(hit["ref"], fold):
+            ref = hit["ref"]
+            kind = self._classify_ref(ref, fold)
+            if kind == "fact":
+                if "fact" not in layer_set:
+                    continue
+                if not self._is_current(ref, fold):
                     continue
                 try:
                     body = json.loads(hit["content"])
                 except (ValueError, TypeError):
                     body = {}
                 hit = {**hit, "content": body.get("text", "")}
-                hit["derived_from"] = self._derived_from_refs(hit["ref"], fold)
-            hit["layer"] = layer
-            filtered.append(hit)
+                hit["derived_from"] = self._derived_from_refs(ref, fold)
+                hit["layer"] = "fact"
+                filtered.append(hit)
+            elif kind == "passage":
+                if "drawer" not in layer_set:
+                    continue
+                try:
+                    body = json.loads(hit["content"])
+                except (ValueError, TypeError):
+                    continue
+                drawer_ref = body.get("drawer")
+                if drawer_ref is None:
+                    continue
+                if resolved_granularity == "drawer":
+                    if drawer_ref in emitted_drawers:
+                        continue
+                    emitted_drawers.add(drawer_ref)
+                    meta = self._resolve_hit_meta(
+                        drawer_ref, fold, wing=wing, room=room
+                    )
+                    filtered.append(
+                        {
+                            **hit,
+                            "ref": drawer_ref,
+                            "content": self._payload_text(drawer_ref, fold),
+                            "layer": "drawer",
+                            "wing": meta["wing"],
+                            "room": meta["room"],
+                            "category": meta["category"],
+                            "source": meta["source"],
+                            "filed_at": meta["filed_at"],
+                            "importance": meta["importance"],
+                        }
+                    )
+                else:
+                    count = passages_per_drawer.get(drawer_ref, 0)
+                    if count >= max(0, effective_max_passages):
+                        continue
+                    passages_per_drawer[drawer_ref] = count + 1
+                    meta = self._resolve_hit_meta(
+                        drawer_ref, fold, wing=wing, room=room
+                    )
+                    filtered.append(
+                        {
+                            **hit,
+                            "layer": "passage",
+                            "drawer_ref": drawer_ref,
+                            "span": [body.get("start"), body.get("end")],
+                            "content": body.get("text", hit["content"]),
+                            "wing": meta["wing"],
+                            "room": meta["room"],
+                            "category": meta["category"],
+                            "source": meta["source"],
+                            "filed_at": meta["filed_at"],
+                            "importance": meta["importance"],
+                        }
+                    )
+            else:  # plain drawer
+                if "drawer" not in layer_set:
+                    continue
+                if resolved_granularity == "passage" and self.has_passages(ref, fold):
+                    continue  # represented via its own passages instead
+                if ref in emitted_drawers:
+                    continue
+                emitted_drawers.add(ref)
+                hit = {**hit, "layer": "drawer"}
+                filtered.append(hit)
             if len(filtered) >= max(0, k):
                 break
+
+        rerank_ms = 0.0
+        resolved_rerank = (
+            rerank if rerank is not None else (self.rerank_mode == "cross-encoder")
+        )
+        if resolved_rerank and filtered:
+            t_rerank_start = time.monotonic()
+            top_n = min(len(filtered), max(0, self.rerank_top_n))
+            try:
+                if get_reranker is None:
+                    raise RuntimeError("rerank.py not available")
+                # get_reranker reads its own "rerank" mode key off the
+                # config dict it's given; `resolved_rerank` may be True
+                # via the per-call override even when the store's own
+                # `rerank_mode` is "off", so force "cross-encoder" here
+                # rather than relying on `self._rerank_config` alone.
+                reranker = get_reranker(
+                    {**self._rerank_config, "rerank": "cross-encoder"}
+                )
+                if reranker is None:
+                    raise RuntimeError("no reranker configured")
+                texts = [h["content"] for h in filtered[:top_n]]
+                scores = reranker.score(lexical_query or "", texts)
+                pairs = sorted(enumerate(scores), key=lambda pair: -pair[1])
+                order = [i for i, _s in pairs]
+                reranked = [filtered[i] for i in order] + filtered[top_n:]
+                for pos, i in enumerate(order):
+                    reranked[pos]["rerank_score"] = scores[i]
+                filtered = reranked
+            except Exception as exc:  # loud-but-graceful: keep RRF order
+                for h in filtered:
+                    h["rerank_skipped"] = f"{type(exc).__name__}: {exc}"
+            rerank_ms = (time.monotonic() - t_rerank_start) * 1000.0
+
+        self.last_search_stats = {
+            "fusion": resolved_fusion,
+            "granularity": resolved_granularity,
+            "rerank": bool(resolved_rerank),
+            "rerank_ms": rerank_ms,
+            "total_ms": (time.monotonic() - t_search_start) * 1000.0,
+        }
         return filtered
 
     def _temporal_eligible(
@@ -2213,6 +2839,8 @@ class NativeMemoryStore:
         scope_ref: Any,
         fold: _SearchFold | None,
         eligible: set[Any] | None,
+        current_model_id: str | None = None,
+        narrow_ref: Any | None = None,
     ) -> list[dict[str, Any]]:
         """T1.2 (D9): RRF fusion of a semantic arm (cosine) and a lexical arm
         (BM25) over the scoped candidate set -- see :meth:`search` for the
@@ -2232,25 +2860,46 @@ class NativeMemoryStore:
         assert fold is not None
         assert BM25Index is not None
 
-        # D26 (scale fix): the fold's OWN precomputed scope_membership,
-        # never a `fold_scope(fold)` re-walk of the whole event list per
-        # call -- this is the cross-request-incremental piece of the D26
-        # fix (the fold itself is also incrementally extended, see
-        # `_SearchFold._merge_triples`).
-        scope_index = fold.scope_index()
-        all_drawer_refs = set(scope_index.membership.keys())
-        scoped_refs = (
-            set(scope_index.cells_in_scope(scope_ref))
-            if scope_ref is not None
-            else all_drawer_refs
-        )
+        # T6.1 (D29, scale fix): a SCOPED query reads the fold's own
+        # precomputed `scope_reverse` (scope_ref -> {member ref, ...}), an
+        # O(1) dict lookup sized to the SCOPE, never
+        # `ScopeIndex.cells_in_scope`, which scans every ref in the whole
+        # store regardless of the requested scope. An UNSCOPED query still
+        # needs the full membership set (there is no smaller universe to
+        # read) -- `scope_index()` is only ever called on that path.
+        if scope_ref is not None:
+            scoped_refs = set(fold.scope_reverse.get(scope_ref, ()))
+        else:
+            scope_index = fold.scope_index()
+            scoped_refs = set(scope_index.membership.keys())
+        if narrow_ref is not None:
+            # T6.1 (D29): room-within-wing intersection -- narrows the
+            # WING partition down to members ALSO scoped to the room, a
+            # cheap O(partition size) filter (never O(store)).
+            scoped_refs = {
+                ref
+                for ref in scoped_refs
+                if narrow_ref in fold.scope_membership.get(ref, ())
+            }
         candidate_refs = scoped_refs if eligible is None else (scoped_refs & eligible)
 
-        # Keep the persistent index current: idempotent per ref, so repeat
-        # calls across the store's lifetime only ever tokenize NEW drawers.
-        index = self._bm25_index
-        for ref in sorted(all_drawer_refs):
-            index.add(ref, self._payload_text(ref, fold))
+        # T6.1 (D29): a scoped query builds/extends a BM25Index PARTITIONED
+        # to this one scope_ref (per-wing or per-room IDF -- D29 calls this
+        # "fine, arguably better") from ONLY its own scoped_refs, so the
+        # index-maintenance loop below costs O(scope size), never O(store).
+        # An unscoped query keeps using the single persistent GLOBAL index
+        # (self._bm25_index) so its corpus-wide IDF/union semantics are
+        # unchanged. Either way `.add()` for an already-indexed ref is a
+        # cheap no-op (BM25Index docstring) -- repeat calls across the
+        # store's lifetime only ever tokenize NEW refs in that partition.
+        if scope_ref is not None:
+            index = self._scope_bm25_indexes.setdefault(scope_ref, BM25Index())
+            for ref in sorted(scoped_refs):
+                index.add(ref, self._payload_text(ref, fold))
+        else:
+            index = self._bm25_index
+            for ref in sorted(scoped_refs):
+                index.add(ref, self._payload_text(ref, fold))
 
         n_pool = max(3 * k, 50)
 
@@ -2260,8 +2909,19 @@ class NativeMemoryStore:
             # When a temporal filter narrowed the eligible set, request a
             # wider vector pool so an eligible-but-lower-cosine candidate
             # is not crowded out of the top-n_pool by ineligible ones.
+            # When narrowing a wing partition down to one room, the raw
+            # candidate pool must be drawn from the WHOLE wing (not the
+            # already-narrowed `scoped_refs`) so filtering afterward still
+            # has enough room-scoped hits to fill `n_pool`.
+            wing_partition_size = (
+                len(fold.scope_reverse.get(scope_ref, ()))
+                if narrow_ref is not None and scope_ref is not None
+                else len(scoped_refs)
+            )
             vector_pool_k = (
-                max(n_pool, len(scoped_refs)) if eligible is not None else n_pool
+                max(n_pool, wing_partition_size)
+                if (eligible is not None or narrow_ref is not None)
+                else n_pool
             )
             # perf/incremental-fold: numpy-accelerated candidate generation
             # over the fold's own vector matrix, falling back to the
@@ -2285,6 +2945,20 @@ class NativeMemoryStore:
             rank = 0
             for ref, cosine in raw_candidates:
                 if eligible is not None and ref not in eligible:
+                    continue
+                if (
+                    narrow_ref is not None
+                    and narrow_ref not in fold.scope_membership.get(ref, ())
+                ):
+                    continue
+                # T6.5 (D29): a vector produced by a DIFFERENT embedder than
+                # the currently active one is stale -- exclude it from the
+                # semantic arm rather than let it rank as if current. A ref
+                # with NO recorded `embedded_with` at all (pre-T6.5 content)
+                # is always treated as current.
+                if current_model_id is not None and not _embedding_is_current(
+                    fold, ref, current_model_id
+                ):
                     continue
                 rank += 1
                 if rank > n_pool:
@@ -2476,6 +3150,8 @@ class NativeMemoryStore:
             "index",
             "standing_question",
             "standing_answer",
+            "passage",
+            "filing",
         ):
             return str(obj["kind"])
         return "drawer"
