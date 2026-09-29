@@ -425,7 +425,8 @@ def _should_retire(theirs: str, mine: str) -> bool:
 
 def _should_retire_stale_code(hc: dict[str, Any], info: dict[str, Any]) -> bool:
     """Retire a daemon reporting the SAME version as this client when its
-    loaded code is nonetheless demonstrably different (§5.2 step 1c-bis).
+    loaded code is nonetheless demonstrably different or provably legacy
+    (§5.2 step 1c-bis).
 
     ``_should_retire`` only compares version *strings* -- it never fires for
     a reinstalled/editable package whose files changed without a version
@@ -440,21 +441,47 @@ def _should_retire_stale_code(hc: dict[str, Any], info: dict[str, Any]) -> bool:
     a client process about to spawn its own replacement) and retire the
     daemon (same safe retirement path as §11's "retire stale-code daemons").
 
-    T6.7 (D28 follow-up 1): the daemon's ``/health`` payload now reports a
+    T6.7 (D28 follow-up 1): the daemon's ``/health`` payload reports a
     ``code_fingerprint`` computed by
-    :func:`amplifier_module_tool_memory.daemon.code_fingerprint` (sha256 over
-    sorted source bytes) rather than a max-mtime float. Backward compat with
-    a daemon that predates this field (or any daemon that reports a
-    non-string/empty value): there is nothing to compare against, so this
-    fails closed and leaves the running daemon alone -- identical to
-    ``_should_retire``'s own bias never to kill a daemon on a guess.
+    :func:`amplifier_module_tool_memory.daemon.code_fingerprint` (sha256 hex
+    digest over sorted source bytes) rather than a max-mtime float.
+
+    T7.4 (legacy-fingerprint transition): a pre-fix daemon reports
+    ``fingerprint`` as a FLOAT (or int) mtime timestamp while advertising the
+    SAME version string as this client (measured: both ``2.2.0``) -- the old
+    ``isinstance(theirs_fp, str)`` guard failed CLOSED on that shape (a
+    number is not a string), so it was never retired across an in-place
+    upgrade and kept serving stale code indefinitely. A JSON number
+    (``float``/``int``) is unambiguously the legacy mtime shape -- every
+    daemon built from current code reports a ``str`` sha256 hex digest
+    instead -- so it is retired unconditionally. A daemon reporting NO
+    ``code_fingerprint`` field at all, at the SAME version, is likewise
+    legacy by construction (every current-code daemon reports one) and is
+    retired. A non-empty ``str`` value is compared for equality as before
+    (T6.7) -- this stays permissive about the exact string shape so a
+    fingerprint scheme change doesn't itself trip false "legacy" positives;
+    only the JSON-number/missing shapes are unambiguous legacy signals.
+    This function only ever runs when the version strings already compared
+    equal (the ``theirs == mine`` guard lives in ``_discover``), so a daemon
+    whose version is genuinely NEWER is never reached by this path
+    regardless of its fingerprint shape -- matching ``_should_retire``'s
+    bias never to kill a daemon on a guess.
+
+    The one remaining fail-closed case: this client's OWN fingerprint could
+    not be computed (``code_fingerprint()`` returned ``""``, e.g. a scan
+    failure) -- there is nothing trustworthy to compare against, so a live
+    daemon is never killed on that basis.
     """
-    theirs_fp = hc.get("code_fingerprint")
-    if not isinstance(theirs_fp, str) or not theirs_fp:
-        return False
     mine_fp = code_fingerprint()
     if not mine_fp:
         return False
+    theirs_fp = hc.get("code_fingerprint")
+    if isinstance(theirs_fp, bool):
+        return False  # defensive; bool is a subtype of int but nonsensical here
+    if isinstance(theirs_fp, (int, float)):
+        return True  # legacy mtime-shaped fingerprint (T7.4) -> retire
+    if not isinstance(theirs_fp, str) or not theirs_fp:
+        return True  # missing/empty entirely, same version (T7.4) -> retire
     return theirs_fp != mine_fp
 
 

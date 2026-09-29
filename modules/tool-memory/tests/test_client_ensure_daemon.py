@@ -606,13 +606,21 @@ class TestRetireOnlyOlderDaemons:
 
 
 class TestStaleCodeSameVersionRespawn:
-    """§5.2 step 1c-bis (T6.7, D28 follow-up 1): a daemon reporting the SAME
-    version string as the client, but whose loaded code is demonstrably
-    DIFFERENT (a reinstalled/refreshed package with no version bump -- the
-    exact incident measured 2026-09-25, both processes reporting ``2.0.2``),
-    still gets retired and replaced. Identity is now a sha256 fingerprint
-    over sorted source bytes (no ordering, just difference) rather than a
-    max-mtime float.
+    """§5.2 step 1c-bis (T6.7, D28 follow-up 1; T7.4 legacy-fingerprint
+    transition): a daemon reporting the SAME version string as the client,
+    but whose loaded code is demonstrably DIFFERENT (a reinstalled/refreshed
+    package with no version bump -- the exact incident measured 2026-09-25,
+    both processes reporting ``2.0.2``), still gets retired and replaced.
+    Identity is a sha256 hex fingerprint over sorted source bytes (no
+    ordering, just difference) rather than a max-mtime float.
+
+    T7.4: a pre-fix daemon reported ``code_fingerprint`` as a FLOAT (or int)
+    mtime while advertising the SAME version string (measured: both
+    ``2.2.0``) -- the old code failed CLOSED on that shape (``isinstance(...,
+    str)``), so it was never retired across an in-place upgrade. A JSON
+    number (float/int) or a missing/empty field at equal versions is
+    unambiguously the legacy shape (every daemon built from current code
+    reports a non-empty hex string) and is now retired.
     """
 
     @pytest.mark.parametrize(
@@ -625,17 +633,25 @@ class TestStaleCodeSameVersionRespawn:
             ({"code_fingerprint": "aaaa1111aaaa1111"}, "bbbb2222bbbb2222", True),
             # Daemon reports the SAME fingerprint as ours -> reuse.
             ({"code_fingerprint": "bbbb2222bbbb2222"}, "bbbb2222bbbb2222", False),
-            # No code_fingerprint field at all (a daemon started before this
-            # field existed): backward compat -- cannot prove staleness,
-            # leave it running.
-            ({}, "bbbb2222bbbb2222", False),
+            # T7.4: pre-fix daemon reports fingerprint as a FLOAT mtime ->
+            # legacy code by construction -> retire.
+            ({"code_fingerprint": 1700000000.123456}, "bbbb2222bbbb2222", True),
+            # T7.4: pre-fix daemon reports fingerprint as an INT mtime ->
+            # same treatment -> retire.
+            ({"code_fingerprint": 1700000000}, "bbbb2222bbbb2222", True),
+            # T7.4: no code_fingerprint field at all, SAME version -> every
+            # daemon built from current code reports one, so this is legacy
+            # by construction -> retire.
+            ({}, "bbbb2222bbbb2222", True),
             # code_fingerprint present but not a (non-empty) string -> same
-            # fail-closed backward-compat treatment.
-            ({"code_fingerprint": None}, "bbbb2222bbbb2222", False),
-            ({"code_fingerprint": ""}, "bbbb2222bbbb2222", False),
+            # legacy-by-construction treatment.
+            ({"code_fingerprint": None}, "bbbb2222bbbb2222", True),
+            ({"code_fingerprint": ""}, "bbbb2222bbbb2222", True),
             # This client's own fingerprint could not be computed (scan
-            # failure) -> never use that as grounds to kill a live daemon.
+            # failure) -> never use that as grounds to kill a live daemon,
+            # regardless of what the daemon reports.
             ({"code_fingerprint": "aaaa1111aaaa1111"}, "", False),
+            ({}, "", False),
         ],
     )
     def test_should_retire_stale_code(
@@ -769,17 +785,19 @@ class TestStaleCodeSameVersionRespawn:
             httpd.shutdown()
             httpd.server_close()
 
-    def test_missing_fingerprint_daemon_is_never_retired(
+    def test_missing_fingerprint_daemon_is_retired(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Backward-compat: a daemon whose /health predates the
-        code_fingerprint field (or omits it) is left running at the SAME
-        version, even when this client's own fingerprint differs -- there is
-        nothing to compare against, so this must fail closed. Uses a
-        monkeypatched ``_health`` (rather than a real subprocess) because
-        the real ``make_daemon`` always computes and reports SOME
-        fingerprint -- this test simulates the legacy pre-T6.7 payload shape
-        that genuinely omits the field.
+        """T7.4: a daemon whose /health omits ``code_fingerprint`` entirely,
+        at the SAME version as this client, is legacy code by construction
+        (every daemon built from current code reports a hex fingerprint) and
+        is retired + respawned -- this used to fail closed (reuse); D28/T6.7
+        follow-up 1 flips that default. Uses a monkeypatched ``_health``
+        (rather than a real subprocess) for the FIRST call only, so it can
+        simulate the legacy pre-T6.7 payload shape that genuinely omits the
+        field, then falls through to the real health-check implementation so
+        the retirement wait and the newly spawned real daemon are observed
+        correctly.
         """
         home = _home(tmp_path)
         home.mkdir(exist_ok=True)
@@ -799,14 +817,73 @@ class TestStaleCodeSameVersionRespawn:
         )
         monkeypatch.setattr(client_mod, "daemon_version", lambda: "2.0.2")
         monkeypatch.setattr(client_mod, "code_fingerprint", lambda: "clientsidefinger")
+
+        real_health = client_mod._health
+        seen: dict[str, bool] = {}
+
+        def fake_health(url: str, *, timeout: float):  # noqa: ANN001
+            if url == "http://127.0.0.1:1":
+                if not seen:
+                    seen["done"] = True
+                    return {"ok": True, "version": "2.0.2"}  # no code_fingerprint
+                return None  # simulate the stale daemon shutting down promptly
+            return real_health(url, timeout=timeout)
+
+        monkeypatch.setattr(client_mod, "_health", fake_health)
+        monkeypatch.setattr(
+            client_mod, "_spawn_daemon_process", lambda h: _spawn_daemon_ephemeral(h)
+        )
+
+        client = ensure_daemon(home)
+        try:
+            assert client is not None
+            new_info = json.loads((home / "daemon.json").read_text(encoding="utf-8"))
+            assert new_info["port"] != 1  # a genuinely new daemon, old one retired
+        finally:
+            if client is not None:
+                client.shutdown()
+            _wait_for_daemon_json_gone(home)
+
+    def test_newer_daemon_version_with_legacy_fingerprint_is_never_retired(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T7.4: the legacy-fingerprint rule only applies once the version
+        strings already compare EQUAL (``_discover``'s ``code_stale`` branch
+        is gated on ``theirs == mine``). A daemon whose version is genuinely
+        NEWER than this client's is never retired, regardless of what shape
+        its fingerprint takes -- matching ``_should_retire``'s own bias never
+        to kill a daemon on a guess.
+        """
+        home = _home(tmp_path)
+        home.mkdir(exist_ok=True)
+        (home / "token").write_text("tok", encoding="utf-8")
+        (home / "daemon.json").write_text(
+            json.dumps(
+                {
+                    "url": "http://127.0.0.1:1",
+                    "port": 1,
+                    "pid": os.getpid(),
+                    "version": "9.9.9",
+                    "token_file": str(home / "token"),
+                    "started_at": "2020-01-01T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(client_mod, "daemon_version", lambda: "2.0.2")
+        monkeypatch.setattr(client_mod, "code_fingerprint", lambda: "clientsidefinger")
         monkeypatch.setattr(
             client_mod,
             "_health",
-            lambda url, *, timeout: {"ok": True, "version": "2.0.2"},
+            lambda url, *, timeout: {
+                "ok": True,
+                "version": "9.9.9",
+                "code_fingerprint": 1700000000.123456,  # legacy float shape
+            },
         )
         spawned: list[Path] = []
         monkeypatch.setattr(client_mod, "_spawn_daemon_process", spawned.append)
 
         client = ensure_daemon(home)
         assert client is not None and client.base_url == "http://127.0.0.1:1"
-        assert spawned == []  # never retired -- backward compat, fail closed
+        assert spawned == []  # never retired -- version is newer, fingerprint moot
