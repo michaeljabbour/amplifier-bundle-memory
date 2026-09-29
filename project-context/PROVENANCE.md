@@ -572,3 +572,28 @@ subset, claims only on full runs.
 - Then: full LongMemEval-S for the tuned config and the hybrid baseline;
   full-store latency measured after idle.
 **Status:** derived from D13.
+
+### D33 — P7 as built: bar (f) met on the real 1 GB store
+- **T7.1 write-through indexes:** once warm, search reads no log; one
+  `os.stat` detects cross-process appends (background catch-up on a fresh
+  kernel handle, never blocking); every write path funnels through one
+  commit-and-apply choke point that updates the derived indexes from the
+  events it just appended, under a dedicated index lock (search runs without
+  the daemon write lock). Idle never discards the index. Hit content resolves
+  through a bounded LRU; vectors are float32; zero-norm / non-finite vectors
+  never enter a matrix (the NaN matmul warning is gone).
+- **Eager build:** the daemon warm-up primes every wing's partition in the
+  background after it starts serving.
+- **Measured independently (1.05 GB store, 337 wings, 40 real queries):**
+  warm p50/p95 5.9/48.9 ms, post-idle p95 6 ms (was 194 ms/3.3 s and 3.3 s;
+  originally 384–460 s after idle); first search after build 5 ms. One-time
+  eager build 613 s; peak RSS 6.3 GB (was ~8 GB).
+- **T7.2:** drawer + passages commit in one batch (ingest ~2× faster).
+- **T7.3:** benchmark adapter can pack to a token budget, one passage per
+  session before any second passage; the briefing's evidence section uses the
+  same diversity-first rule. Tuning pending (subset only).
+- **T7.4:** a same-version daemon reporting a legacy (numeric) or missing
+  fingerprint is retired; newer daemons never.
+**Open:** restart cost at extreme scale (persisted index checkpoint) and RSS
+(the in-RAM event list remains the largest contributor).
+**Status:** derived; D13 (f) met.
