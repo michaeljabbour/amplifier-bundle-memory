@@ -740,8 +740,20 @@ def _dispatch_domain(
             rerank=args.get("rerank"),
             max_passages_per_drawer=args.get("max_passages_per_drawer"),
             current_model_id=getattr(embedder, "model_id", None),
+            expand=args.get("expand"),
+            expand_neighbors=int(args.get("expand_neighbors", 1)),
+            expand_char_budget=int(args.get("expand_char_budget", 40000)),
         )
         return {"results": results, "degraded": degraded}
+
+    if tool == "passages_around":
+        passages = mem_store.passages_around(
+            mem_store._anchor(str(args.get("drawer_ref", ""))),
+            span=args.get("span"),
+            before=int(args.get("before", 1)),
+            after=int(args.get("after", 1)),
+        )
+        return {"passages": passages}
 
     if tool == "status":
         st = mem_store.status()

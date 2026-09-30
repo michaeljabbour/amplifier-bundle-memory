@@ -406,6 +406,7 @@ class MemoryTool(Tool):
                     "standing_add",
                     "standing_answer",
                     "standing",
+                    "passages_around",
                 ],
                 "description": "The memory operation to perform.",
             },
@@ -490,6 +491,66 @@ class MemoryTool(Tool):
                     "passage-granularity search (T6.2). Omit for the "
                     "server default."
                 ),
+            },
+            "expand": {
+                "type": "string",
+                "enum": ["none", "neighbors", "drawer"],
+                "description": (
+                    "P8/D34 'rank on passages, read on neighborhoods': "
+                    "expand each search hit's context. 'neighbors' merges "
+                    "expand_neighbors passages either side of a hit; "
+                    "'drawer' expands to the whole parent drawer. Adds a "
+                    "'context' field per hit; ranking/order/scores are "
+                    "unchanged. Default 'none' (unchanged shape)."
+                ),
+                "default": "none",
+            },
+            "expand_neighbors": {
+                "type": "integer",
+                "description": (
+                    "Passages either side of a hit to merge into its "
+                    "'context' under expand='neighbors'. Default 1."
+                ),
+                "default": 1,
+            },
+            "expand_char_budget": {
+                "type": "integer",
+                "description": (
+                    "Total chars spent expanding hit context, in rank "
+                    "order, before later hits keep only their own "
+                    "passage. Default 40000 (~10k tokens)."
+                ),
+                "default": 40000,
+            },
+            "drawer_ref": {
+                "type": "string",
+                "description": (
+                    "Drawer ref to read passages around (passages_around operation)."
+                ),
+            },
+            "span": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": (
+                    "[start, end] char span to center on (passages_around "
+                    "operation). Omit to return every passage."
+                ),
+            },
+            "before": {
+                "type": "integer",
+                "description": (
+                    "Passages before the centered one to include "
+                    "(passages_around operation). Default 1."
+                ),
+                "default": 1,
+            },
+            "after": {
+                "type": "integer",
+                "description": (
+                    "Passages after the centered one to include "
+                    "(passages_around operation). Default 1."
+                ),
+                "default": 1,
             },
             # Fact parameters (fact_add / facts)
             "text": {
@@ -798,6 +859,9 @@ class MemoryTool(Tool):
                         granularity=kwargs.get("granularity") or None,
                         rerank=kwargs.get("rerank"),
                         max_passages_per_drawer=kwargs.get("max_passages_per_drawer"),
+                        expand=kwargs.get("expand") or None,
+                        expand_neighbors=int(kwargs.get("expand_neighbors", 1)),
+                        expand_char_budget=int(kwargs.get("expand_char_budget", 40000)),
                     )
                 except Exception as exc:
                     return _client_error_to_tool_result(exc)
@@ -811,6 +875,19 @@ class MemoryTool(Tool):
                     session_id=kwargs.get("session_id"),
                 )
                 return _client_result_to_tool_result(result)
+
+            elif operation == "passages_around":
+                try:
+                    passages = _call_client(
+                        "passages_around",
+                        drawer_ref=kwargs.get("drawer_ref", ""),
+                        span=kwargs.get("span") or None,
+                        before=int(kwargs.get("before", 1)),
+                        after=int(kwargs.get("after", 1)),
+                    )
+                except Exception as exc:
+                    return _client_error_to_tool_result(exc)
+                return _client_result_to_tool_result(passages, wrap_key="passages")
 
             elif operation == "remember":
                 try:

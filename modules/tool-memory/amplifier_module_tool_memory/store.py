@@ -176,6 +176,14 @@ DEFAULT_MAX_PASSAGES_PER_DRAWER = 2
 DEFAULT_RERANK_TOP_N = 20
 DEFAULT_RERANK_MAX_CHARS = 800
 
+#: P8/D34 ("rank on passages, read on neighborhoods") expansion defaults:
+#: how many passages either side of a hit :meth:`NativeMemoryStore.search`'s
+#: ``expand="neighbors"`` pulls in, and the total char budget (~10k tokens
+#: at a 4-chars/token estimate) spent expanding hits, in rank order, before
+#: later hits keep only their own passage.
+DEFAULT_EXPAND_NEIGHBORS = 1
+DEFAULT_EXPAND_CHAR_BUDGET = 40000
+
 #: Natural passage-split boundary lines (T6.2, design \u00a74): blank lines,
 #: markdown headings, and conversational turn markers (``user:``,
 #: ``assistant:``, ``[role]``-style brackets). Matched against a single
@@ -667,9 +675,7 @@ class _SearchFold:
             )
             if ev.to_ref not in sp_objs:
                 sp_objs.append(ev.to_ref)
-            po_subs = self._by_predicate_object.setdefault(
-                (predicate, ev.to_ref), []
-            )
+            po_subs = self._by_predicate_object.setdefault((predicate, ev.to_ref), [])
             if ev.from_ref not in po_subs:
                 po_subs.append(ev.from_ref)
             if predicate == _FILED_AT_PREDICATE:
@@ -958,7 +964,11 @@ class _SearchFold:
             )
             refs = prior_refs + new_refs
         else:
-            mat = prior_mat if prior_mat is not None else np.zeros((0, 0), dtype=np.float32)
+            mat = (
+                prior_mat
+                if prior_mat is not None
+                else np.zeros((0, 0), dtype=np.float32)
+            )
             refs = prior_refs
 
         self._matrix_state = (refs, mat, len(edges))
@@ -1035,7 +1045,11 @@ class _SearchFold:
             )
             refs = prior_refs + new_refs
         else:
-            mat = prior_mat if prior_mat is not None else np.zeros((0, 0), dtype=np.float32)
+            mat = (
+                prior_mat
+                if prior_mat is not None
+                else np.zeros((0, 0), dtype=np.float32)
+            )
             refs = prior_refs
 
         self._scope_matrix_states[scope_ref] = (refs, mat, len(edges))
@@ -1073,6 +1087,34 @@ class _SearchFold:
             if max(events, key=lambda e: e[0])[1] == "assert":
                 out.append(subj)
         return sorted(out)
+
+    def ordered_passages_of(self, drawer_ref: Any) -> list[Any]:
+        """P8 (D34): *drawer_ref*'s passage refs in SPAN order (ascending
+        ``start``) -- the reverse of :meth:`objects_pointing_to` for
+        ``@memory:passage_of``, but WITHOUT that method's alphabetic
+        ``sorted()`` (rank-on-passages/read-on-neighborhoods needs the
+        reading order, not ref order).
+
+        ``_by_predicate_object[(predicate, obj)]`` already preserves EVENT
+        order (each subject is appended once, on first sight -- see
+        :meth:`_merge_triples`/:meth:`apply_tail_in_place`), and
+        :meth:`NativeMemoryStore._write_passages` files a drawer's passages
+        sequentially in ascending ``start`` order (:func:`_split_into_passages`
+        yields them that way) -- so event order and span order coincide with
+        no extra bookkeeping. Write-through maintained for free: this reads
+        the SAME ``_by_predicate_object``/``_triple_history`` structures
+        :meth:`apply_tail_in_place` already extends in place at write time,
+        so no log read (T7.1/D33's invariant, unchanged) and no additional
+        index to keep in sync.
+        """
+        out: list[Any] = []
+        for subj in self._by_predicate_object.get((_MEMORY_PASSAGE_OF, drawer_ref), []):
+            events = self._triple_history.get(
+                (subj, _MEMORY_PASSAGE_OF, drawer_ref), []
+            )
+            if events and max(events, key=lambda e: e[0])[1] == "assert":
+                out.append(subj)
+        return out
 
 
 def _is_finite_nonzero_row(row: tuple[float, ...]) -> bool:
@@ -1851,7 +1893,9 @@ class NativeMemoryStore:
                             b.write_cell(str(model_id).encode()),
                         )
                 else:
-                    b.assert_fact(ref, "needs_embedding", b.write_cell(_TRUE_CELL_BYTES))
+                    b.assert_fact(
+                        ref, "needs_embedding", b.write_cell(_TRUE_CELL_BYTES)
+                    )
                 passage_refs.append(ref)
             if own_batch:
                 commit_result = self._commit_and_apply(b, wing_ref=wing_scope)
@@ -1911,6 +1955,222 @@ class NativeMemoryStore:
             return bool(fold.objects_pointing_to(ref, _MEMORY_PASSAGE_OF))
         res = self.store.query_facts(predicate=_MEMORY_PASSAGE_OF)  # type: ignore[attr-defined]
         return any(f.object == ref for f in res.output)
+
+    def ordered_passages_of(
+        self, drawer_ref: Any, fold: _SearchFold | None = None
+    ) -> list[Any]:
+        """P8 (D34): *drawer_ref*'s passage refs in span order -- see
+        :meth:`_SearchFold.ordered_passages_of`. Falls back to a direct
+        (log-reading) ``query_facts`` scan, sorted by each passage's own
+        ``start`` (the same data the ordered fold path uses, just resolved
+        the slow way), only when no fold is available at all (a remote
+        backend with no foldable kernel) -- the hot path (a fold snapshot
+        is always available for the in-process/daemon backend this module
+        is actually used with) never takes it.
+        """
+        if fold is not None:
+            return fold.ordered_passages_of(drawer_ref)
+        res = self.store.query_facts(predicate=_MEMORY_PASSAGE_OF)  # type: ignore[attr-defined]
+        candidates = [f.subject for f in res.output if f.object == drawer_ref]
+        bodies = [(ref, self._passage_body(ref, None)) for ref in candidates]
+        bodies = [(ref, b) for ref, b in bodies if b is not None]
+        bodies.sort(key=lambda item: int(item[1].get("start", 0)))
+        return [ref for ref, _body in bodies]
+
+    def _passage_body(
+        self, ref: Any, fold: _SearchFold | None
+    ) -> dict[str, Any] | None:
+        """Decoded ``{"kind": "passage", "drawer", "start", "end", "text"}``
+        payload for *ref*, or ``None`` if it isn't a passage cell (malformed
+        JSON, or a ref that just doesn't carry that shape)."""
+        try:
+            body = json.loads(self._payload_text(ref, fold))
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(body, dict) or body.get("kind") != "passage":
+            return None
+        return body
+
+    def passages_around(
+        self,
+        drawer_ref: Any,
+        *,
+        span: Sequence[int] | None = None,
+        before: int = 1,
+        after: int = 1,
+    ) -> list[dict[str, Any]]:
+        """P8 (D34): *drawer_ref*'s passages, in span order, around the
+        passage covering *span* (or every passage, when *span* is
+        ``None``) -- ``before``/``after`` passages either side of that
+        center. Each item is ``{"ref", "span": [start, end], "content"}``.
+
+        A drawer with no passages (short content, T6.2's
+        ``passage_min_chars`` floor) returns ITSELF as the one item,
+        spanning its whole content -- callers never need a separate
+        short-drawer branch.
+
+        Uses only the write-through indexes (:meth:`ordered_passages_of`,
+        which reads :meth:`_SearchFold.ordered_passages_of`) plus content
+        already resolved through the bounded LRU / fold payload join
+        (:meth:`_payload_text`) -- no log read, matching T7.1/D33's
+        contract for the rest of the search path.
+        """
+        fold = self._fold_snapshot()
+        ordered = self.ordered_passages_of(drawer_ref, fold)
+        if not ordered:
+            content = self._payload_text(drawer_ref, fold)
+            return [
+                {"ref": str(drawer_ref), "span": [0, len(content)], "content": content}
+            ]
+        bodies: list[tuple[Any, dict[str, Any]]] = []
+        for ref in ordered:
+            body = self._passage_body(ref, fold)
+            if body is not None:
+                bodies.append((ref, body))
+        if not bodies:
+            content = self._payload_text(drawer_ref, fold)
+            return [
+                {"ref": str(drawer_ref), "span": [0, len(content)], "content": content}
+            ]
+        if span is None:
+            selected = bodies
+        else:
+            target_start = int(span[0])
+            center_idx = None
+            for i, (_ref, body) in enumerate(bodies):
+                start = int(body.get("start", 0))
+                end = int(body.get("end", start))
+                if start <= target_start < end:
+                    # Keep the LATEST (highest-start) covering passage: T6.2's
+                    # overlap means an earlier passage can also cover this
+                    # position, but a caller passing a hit's own [start, end]
+                    # span expects THAT passage, not an earlier overlapping
+                    # one -- the highest start is always the most specific
+                    # match.
+                    center_idx = i
+            if center_idx is None:
+                center_idx = min(
+                    range(len(bodies)),
+                    key=lambda i: abs(int(bodies[i][1].get("start", 0)) - target_start),
+                )
+            lo = max(0, center_idx - max(0, before))
+            hi = min(len(bodies), center_idx + max(0, after) + 1)
+            selected = bodies[lo:hi]
+        return [
+            {
+                "ref": str(ref),
+                "span": [body.get("start"), body.get("end")],
+                "content": body.get("text", ""),
+            }
+            for ref, body in selected
+        ]
+
+    def _passage_context(
+        self,
+        passage_ref: Any,
+        drawer_ref: Any,
+        fold: _SearchFold | None,
+        *,
+        expand: str,
+        expand_neighbors: int,
+    ) -> tuple[str, int, int]:
+        """The expanded text (and its ``[start, end]`` span in the parent
+        drawer's own content) for one passage hit (P8/D34): the whole
+        parent drawer (``expand="drawer"``), or *passage_ref*'s own passage
+        plus ``expand_neighbors`` either side, merged by taking the
+        drawer's original content sliced from the earliest included
+        passage's ``start`` to the latest's ``end`` -- overlap between
+        consecutive passages (T6.2's ``passage_overlap``) is naturally
+        deduped this way, since it re-derives the exact original substring
+        rather than concatenating each passage's own (overlapping) text.
+        The returned span lets a caller (e.g. the AMB adapter) merge
+        several hits' windows of the SAME drawer without re-parsing text.
+        """
+        drawer_text = self._payload_text(drawer_ref, fold)
+        if expand == "drawer":
+            return drawer_text, 0, len(drawer_text)
+        ordered = self.ordered_passages_of(drawer_ref, fold)
+        if not ordered:
+            return drawer_text, 0, len(drawer_text)
+        try:
+            idx = ordered.index(passage_ref)
+        except ValueError:
+            return drawer_text, 0, len(drawer_text)
+        lo = max(0, idx - max(0, expand_neighbors))
+        hi = min(len(ordered), idx + max(0, expand_neighbors) + 1)
+        starts: list[int] = []
+        ends: list[int] = []
+        for ref in ordered[lo:hi]:
+            body = self._passage_body(ref, fold)
+            if body is None:
+                continue
+            starts.append(int(body.get("start", 0)))
+            ends.append(int(body.get("end", len(drawer_text))))
+        if not starts:
+            return drawer_text, 0, len(drawer_text)
+        start, end = min(starts), max(ends)
+        return drawer_text[start:end], start, end
+
+    def _expand_context(
+        self,
+        hits: list[dict[str, Any]],
+        fold: _SearchFold | None,
+        *,
+        expand: str,
+        expand_neighbors: int,
+        expand_char_budget: int,
+    ) -> int:
+        """P8 (D34) "rank on passages, read on neighborhoods": mutate *hits*
+        IN PLACE, adding a ``"context"`` field to each passage/drawer hit,
+        IN RANK ORDER, until *expand_char_budget* chars have been spent --
+        a hit beyond the budget keeps only its own passage (no ``"context"``
+        key at all). Ranking, scores and hit order are never touched here;
+        this only adds a field. Returns the total chars spent.
+
+        A fact hit (no drawer/passage shape) is left alone. The first hit
+        expanded is never rejected for being oversized (mirrors the AMB
+        adapter's own budget-packing rule, T7.3) -- there must always be at
+        least one expanded hit when expansion was requested and there is
+        at least one eligible hit; every later hit is skipped once it would
+        push the running total over budget.
+        """
+        if fold is None:
+            return 0
+        budget_used = 0
+        for hit in hits:
+            layer = hit.get("layer")
+            span: tuple[int, int] | None = None
+            if layer == "passage":
+                drawer_ref = hit.get("drawer_ref")
+                if drawer_ref is None:
+                    continue
+                context, start, end = self._passage_context(
+                    hit.get("ref"),
+                    drawer_ref,
+                    fold,
+                    expand=expand,
+                    expand_neighbors=expand_neighbors,
+                )
+                span = (start, end)
+            elif layer == "drawer":
+                context = hit.get("content", "")
+                content_span = hit.get("span")
+                span = (
+                    (int(content_span[0]), int(content_span[1]))
+                    if isinstance(content_span, (list, tuple))
+                    and len(content_span) == 2
+                    else (0, len(context))
+                )
+            else:
+                continue
+            cost = len(context)
+            if budget_used and budget_used + cost > expand_char_budget:
+                continue
+            hit["context"] = context
+            if span is not None:
+                hit["context_span"] = [span[0], span[1]]
+            budget_used += cost
+        return budget_used
 
     def ensure_passages(
         self,
@@ -2490,9 +2750,7 @@ class NativeMemoryStore:
                 with self._catchup_lock:
                     self._catchup_running = False
 
-        threading.Thread(
-            target=_run, daemon=True, name="memory-index-catchup"
-        ).start()
+        threading.Thread(target=_run, daemon=True, name="memory-index-catchup").start()
 
     def _apply_write_through(
         self, batch: Any, commit_result: Any, *, wing_ref: Any = None
@@ -2576,9 +2834,7 @@ class NativeMemoryStore:
             if scoped_here:
                 self._prime_bm25_for_refs(wing_ref, scoped_here, payload_of)
             for _pos, ev in events:
-                if not (
-                    isinstance(ev, RelationshipEvent) and ev.type == EMBEDDING_OF
-                ):
+                if not (isinstance(ev, RelationshipEvent) and ev.type == EMBEDDING_OF):
                     continue
                 target_ref = ev.to_ref
                 if target_ref in scoped_here:
@@ -2969,6 +3225,9 @@ class NativeMemoryStore:
         rerank: bool | None = None,
         max_passages_per_drawer: int | None = None,
         current_model_id: str | None = None,
+        expand: str | None = None,
+        expand_neighbors: int = DEFAULT_EXPAND_NEIGHBORS,
+        expand_char_budget: int = DEFAULT_EXPAND_CHAR_BUDGET,
     ) -> list[dict[str, Any]]:
         """Hybrid rank (§6, T1.2/D9 RRF fusion) or lexical-only (§6.2).
 
@@ -3057,6 +3316,16 @@ class NativeMemoryStore:
         treated as current. Excluding is search-side only; a separate
         maintenance sweep (:meth:`requeue_stale_embeddings`) marks stale
         refs for re-embedding.
+
+        ``expand`` (P8, D34) -- "rank on passages, read on neighborhoods":
+        ``"none"`` (default, unchanged shape), ``"neighbors"`` or
+        ``"drawer"``. When not ``"none"``, every passage/drawer hit, IN
+        RANK ORDER, gains a ``"context"`` field: ``expand_neighbors``
+        passages either side of the hit merged with it (``"neighbors"``),
+        or the whole parent drawer (``"drawer"``) -- until
+        ``expand_char_budget`` chars have been spent, after which later
+        hits keep only their own passage. Ranking/scores/order are
+        untouched; this only adds a field (:meth:`_expand_context`).
 
         Every read in this method goes through ONE log fold per call
         (:class:`_SearchFold` -- see its class docstring for the perf
@@ -3286,12 +3555,25 @@ class NativeMemoryStore:
                     h["rerank_skipped"] = f"{type(exc).__name__}: {exc}"
             rerank_ms = (time.monotonic() - t_rerank_start) * 1000.0
 
+        resolved_expand = expand if expand is not None else "none"
+        expand_chars_used = 0
+        if resolved_expand != "none" and filtered:
+            expand_chars_used = self._expand_context(
+                filtered,
+                fold,
+                expand=resolved_expand,
+                expand_neighbors=expand_neighbors,
+                expand_char_budget=expand_char_budget,
+            )
+
         self.last_search_stats = {
             "fusion": resolved_fusion,
             "granularity": resolved_granularity,
             "rerank": bool(resolved_rerank),
             "rerank_ms": rerank_ms,
             "total_ms": (time.monotonic() - t_search_start) * 1000.0,
+            "expand": resolved_expand,
+            "expand_chars_used": expand_chars_used,
         }
         return filtered
 

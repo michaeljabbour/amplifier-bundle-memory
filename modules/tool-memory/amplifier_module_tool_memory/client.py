@@ -103,6 +103,9 @@ class MemoryClient(GatewayClient):
         granularity: str | None = None,
         rerank: bool | None = None,
         max_passages_per_drawer: int | None = None,
+        expand: str | None = None,
+        expand_neighbors: int = 1,
+        expand_char_budget: int = 40000,
     ) -> dict[str, Any]:
         """``{results: [...], degraded: null|"lexical_only"}`` (\u00a75.4).
 
@@ -110,7 +113,9 @@ class MemoryClient(GatewayClient):
         default). ``since``/``until`` (T1.3): ISO-8601 bounds on each
         drawer's earliest ``filed_at``. ``layers`` (T2.2): which of
         ``"fact"``/``"drawer"`` are eligible hits; ``None`` -> server
-        default (both).
+        default (both). ``expand``/``expand_neighbors``/``expand_char_budget``
+        (P8, D34): ``"none"``/``"neighbors"``/``"drawer"`` context expansion --
+        see :meth:`~amplifier_module_tool_memory.store.NativeMemoryStore.search`.
         """
         return self._call(
             "search",
@@ -126,8 +131,35 @@ class MemoryClient(GatewayClient):
                 "granularity": granularity,
                 "rerank": rerank,
                 "max_passages_per_drawer": max_passages_per_drawer,
+                "expand": expand,
+                "expand_neighbors": expand_neighbors,
+                "expand_char_budget": expand_char_budget,
             },
         )
+
+    def passages_around(
+        self,
+        drawer_ref: str,
+        *,
+        span: Sequence[int] | None = None,
+        before: int = 1,
+        after: int = 1,
+    ) -> list[dict[str, Any]]:
+        """P8 (D34): the drawer's passages, in span order, around the
+        passage covering ``span`` (or every passage, when ``span`` is
+        ``None``). See
+        :meth:`~amplifier_module_tool_memory.store.NativeMemoryStore.passages_around`.
+        """
+        out = self._call(
+            "passages_around",
+            {
+                "drawer_ref": drawer_ref,
+                "span": list(span) if span is not None else None,
+                "before": before,
+                "after": after,
+            },
+        )
+        return list(out["passages"])
 
     def fact_add(
         self,
