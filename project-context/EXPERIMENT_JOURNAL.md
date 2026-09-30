@@ -1,5 +1,154 @@
 # Experiment Journal
 
+## 2026-09-29 — T7 follow-up: D13 campaign #3 (token-budget packing, full LME-S for C and the hybrid baseline)
+
+**Hypothesis:** C's multi-session deficit on LongMemEval-S (LME-S) comes from
+session coverage. Ten passage hits, capped at two per session, reach too few
+sessions. Diversity-first packing to a token budget (T7.3), which adds one
+passage per session before any second passage, should recover multi-session
+QA without losing temporal QA. That would lift LME-S QA to at least A + 5
+(60.8%).
+
+**Method:**
+
+- Code: `86b8700` (branch `feat/memory-layers`), with no changes. AMB is
+  `03c1d0f` and the venv is `/tmp/amb-venv`. Answer and judge were both
+  `gemini-2.5-flash-lite`. Every run in this entry used the robustness
+  settings: `RETRY_DISCONNECTS=on`, `REQUEST_TIMEOUT_S=90`,
+  `FALLBACK_MODEL=gemini-2.5-flash`. "Strict" scores count two kinds of row
+  as wrong: rows answered by the fallback model, and unparseable rows that
+  were re-answered with 2.5-flash. Scripts and raw outputs are in
+  `/tmp/amb-runs/t67/`: `cfg.sh`, `drive.sh`, `chain1.sh`, `chain2.sh`,
+  `analyze.py`, `fb.py`, plus new files `rall.py` (recall over every returned
+  doc, by type) and `mcn.py` (paired McNemar: exact binomial and χ²). Jobs ran
+  one at a time under nohup. The host load average was 6–27 from unrelated
+  work.
+- Configs: all use rrf, passage granularity, dates on, rerank off and MiniLM,
+  with product fold behaviour (no retention override).
+  - **C** `AMPLIFIER_AMB_PACK=k` (the campaign #2 winner)
+  - **P6** `PACK=budget TOKEN_BUDGET=6000 CANDIDATES=40`
+  - **P10** `PACK=budget TOKEN_BUDGET=10000 CANDIDATES=60`
+  - **H** AMB's hybrid baseline (`--memory qdrant`), with its dense encoder on
+    `mps` and encoder calls serialized, as in campaign #2.
+- The subset is the fixed 100 LME-S ids in `lme100.ids` (seed 20260928, see
+  the previous entry). C was ingested fresh. P6 and P10 ran with
+  `--skip-ingestion` on an APFS clone of C's store, so they differ from C
+  only in retrieval.
+- Adapter tests: `benchmarks/amb/tests` gave 32 passed, run under
+  `/tmp/amb-venv` with pytest and pytest-asyncio. Nothing in
+  `benchmarks/amb/` changed.
+
+**Results — subset (100 LME-S questions; choice made here only):**
+
+| Config | QA (strict) | multi-sess /27 | temporal /27 | KU /15 | SSU /14 | SSA /11 | pref /6 | R@5 / R@10 | docs returned | ctx tok/q | retrieve p50 / p95 ms |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **C** | **57 (57)** | 11 | **11** | 12 | 12 | 8 | 3 | 0.944 / 0.952 | 6.1 | 2,364 | 6.7 / 10.2 |
+| P6 | 55 (54) | 11 | 9 | 14 | 13 | 8 | 0 | 0.930 / 0.963 | 18–20 | 5,995 | 167 / 179 † |
+| P10 | 56 (55) | 12 | 10 | 13 | 12 | 8 | 1 | 0.940 / 0.974 | 26–28 | 9,924 | 168 / 185 † |
+
+† P6 and P10 ran on a reopened store, so these p95s include the post-open
+build. They are not comparable to C's in-process ingest-then-query p95.
+P6 had 1 unparseable row and P10 had 2; each was re-answered with 2.5-flash.
+The fallback model answered 1 row in each of P6 and P10 and none in C.
+
+**Choice:** neither budget config beat C. P10 gained one multi-session
+question and lost one temporal question, and P6 lost two temporal questions.
+Both were below C overall, within the ±3–7 pt subset noise, at 2.5–4.2× the
+tokens. Step 2 therefore ran C. Step 4 (LoCoMo) was skipped because the
+chosen config is unchanged (81.4% stands from D31).
+
+**Session-coverage check (falsifies the hypothesis):** recall over every
+returned parent doc showed that C already covers the gold sessions. Under C,
+**85% of multi-session questions on full LME-S have every gold session in
+context**, with only about 6 distinct sessions returned. Of C's 79 wrong
+multi-session answers, 60 had all gold sessions present, and H answered 33 of
+those 60 correctly. Budget packing lifts multi-session full coverage to 100%
+on the subset, but QA does not move. The deficit is **within-session
+content**: one to three ~300-token passages from a session miss the details
+that a count or aggregate needs. H feeds whole 512-token chunks, top-50
+(~23k tokens).
+
+**Results — full LME-S (500):**
+
+| Metric | A (legacy, 2026-09-28) | **C (today)** | H hybrid (today) |
+|---|---|---|---|
+| QA | 55.8% | **59.4%** (strict 59.0) | **62.2%** (strict 61.4) |
+| knowledge-update /78 | 47 | 55 | 58 |
+| multi-session /133 | 66 | **51** | **77** |
+| single-session-assistant /56 | 52 | 50 | 56 |
+| single-session-preference /30 | 8 | 10 | 6 |
+| single-session-user /70 | 55 | 53 | 63 |
+| temporal-reasoning /133 | 51 | **78** | 51 |
+| R@5 / R@10 (479 with gold, by parent doc) | 0.912 / 0.958 ‡ | 0.955 / 0.967 | not recoverable |
+| context tok/q | 28,869 | 2,368 (8.2% of A) | 23,360 |
+| retrieve p50 / p95 ms | — | 7.7 / 12.9 | 791 / 1,537 |
+| ingest | — | 3,986 s (campaign #2: 12,889 s) | 4,475 s (mps) |
+| fallback / unparseable rows | — | 2 / 0 | 5 / 0 |
+
+‡ From campaign #2's fresh-store measurement.
+
+Paired tests (McNemar, exact two-sided):
+
+- **C vs A:** 297 vs 279, with 97 questions only C got right and 79 only A
+  got right; χ²=1.64, **p=0.20**. The difference is +3.6 pt, and +5.0 is
+  needed. Per type: temporal +27 (p=0.0005); multi-session −15 (p=0.063).
+- **C vs H:** 297 vs 311, with 73 only-C and 87 only-H; χ²=1.06, **p=0.30**.
+  C is 2.8 pt below H, and the difference is not significant. H is
+  significantly better on multi-session (+26, p=0.0005), single-session-user
+  (+10, p=0.02) and single-session-assistant (+6, p=0.03). C is
+  significantly better on temporal (+27, p=0.0003).
+- **H vs A:** 311 vs 279, 67 vs 35; p=0.002.
+- **C today vs C in campaign #2:** 297 vs 296, with only 15 discordant
+  questions. Full-run noise is under 1 pt. The T7.1 and T7.2 changes did not
+  move answers.
+- H's subset score reproduced within noise: 65 today vs 61 in campaign #2,
+  with 8 discordant questions.
+- AMB also ships a published hybrid LME-S result of 74.0% (in
+  `/tmp/amb-runs/hybrid-lme.json.gz`). Its answer model is
+  gemini-3.1-pro-preview, so it is not like-for-like and is not used here.
+
+**D13 bar (A = legacy proxy for v2.0.1; C = shipped config):**
+
+- (a) LME-S QA ≥ A + 5 (≥ 60.8%): **unmet**. C scored 59.4 (strict 59.0),
+  +3.6, p=0.20.
+- (b) LoCoMo QA ≥ A + 5: **met** (D31). 81.4 vs 67.7, χ²=99. Not re-run
+  because the config is unchanged.
+- (c) QA ≥ the hybrid baseline, like-for-like: **met on LoCoMo** (D31: 81.4
+  vs 74.5, χ²=29). **Unmet on LME-S**: 59.4 vs 62.2 (strict 59.0 vs 61.4),
+  −2.8, p=0.30. C is not significantly worse, but it does not reach H.
+- (d) PMB R@10 ≥ 0.941: **met** (D31, 0.970).
+- (e) Context tokens ≤ 50% of A: **met**. 8.2% on LME-S (re-measured today)
+  and 19.9% on LoCoMo (D31).
+- (f) Retrieve p95 ≤ 300 ms at full store, zero LLM calls: **met** (D33:
+  1.05 GB store, warm p95 48.9 ms, post-idle p95 6 ms). Today's
+  in-harness full LME-S run agrees: p95 12.9 ms, compared with 35.5 s in
+  campaign #2.
+
+**Caveats:** A is still the 2026-09-28 run and was not re-run the same day.
+Full-run reproducibility for C (15 discordant questions) suggests this is
+minor. The subset tuning was the only place a choice was made. The
+significance tests are per-question paired and uncorrected for the per-type
+breakdown. Only L1 retrieval is exercised; L2 facts and the L3 briefing are
+not.
+
+**Conclusion:** token-budget packing does not recover multi-session QA,
+because session coverage was never the bottleneck. C's passages cover the
+right sessions but drop the details inside them, while whole-session context
+(A, or H's 512-token chunks at 23k tokens) keeps them. Temporal gains from
+passages and dates (+27) are almost fully cancelled by multi-session and
+single-session-user losses. That leaves (a) and (c) on LME-S unmet. Next,
+tuned on the subset only:
+
+1. **Parent-session expansion.** Keep passage ranking, but render the top N
+   sessions (N≈3–4, capped near 14k tokens) as whole drawers, or as
+   neighbour-passage windows around each hit. Rank on passages, read on
+   sessions.
+2. Apply expansion only when the query asks for an aggregate across sessions
+   ("how many", "total", "in total", "across"). Otherwise keep C's 2.4k-token
+   context.
+3. If either moves the subset, run full LME-S once, then LoCoMo to check for
+   regression, since LoCoMo's lead came from C's compact context.
+
 ## 2026-09-29 — T6.6: D13 campaign on the P6 levers (ablation, full runs, bar verdict)
 
 **Hypotheses (one per lever, from D29):**

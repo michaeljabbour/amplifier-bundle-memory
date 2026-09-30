@@ -597,3 +597,18 @@ subset, claims only on full runs.
 **Open:** restart cost at extreme scale (persisted index checkpoint) and RSS
 (the in-RAM event list remains the largest contributor).
 **Status:** derived; D13 (f) met.
+
+### D34 — Campaign #3: packing didn't help; the gap is thin context, not coverage
+**Results (EXPERIMENT_JOURNAL 2026-09-29, campaign #3):** budget packing
+(6k/10k tokens) did not beat C on the subset; full LongMemEval-S C = 59.4%
+(strict 59.0; reproduces #2 within 1 pt) vs A 55.8 (p=0.20) and the harness's
+hybrid baseline 62.2 (p=0.30). Multi-session: C 51/133 vs hybrid 77 (p=0.0005);
+temporal: C 78 vs hybrid 51 (p=0.0003). 60 of C's 79 multi-session misses had
+every gold session in context — the answerer lacked the detail inside them.
+**Decision (P8):** "rank on passages, read on neighborhoods": the store
+returns, for the top hits, adjacent passages of the same drawer (or the whole
+drawer when small), packed to a token cap ≤ 50% of A. Unconditional variants
+are preferred; a question-shape-conditional variant is tried only as an
+ablation and flagged as benchmark-tuned if chosen. Choices on the subset only;
+one full LongMemEval-S confirmation; LoCoMo regression check.
+**Status:** derived.
