@@ -399,3 +399,187 @@ class TestEvidenceSectionPassageGranularity:
         hook = MemoryBriefingHook({"briefing_mode": "layered", "emit_events": False})
         result = _run(hook("session:start", {"session_id": "s1", "prompt": ""}))
         assert "plain drawer evidence" in result.context_injection
+
+
+# ---------------------------------------------------------------------------
+# P8 (D34): _render_hit prefers "context" over "content"; _call_client's
+# capability fallback strips expand/expand_neighbors/expand_char_budget too.
+# ---------------------------------------------------------------------------
+
+
+class TestRenderHitPrefersContext:
+    def test_context_field_wins_over_content_when_present(self) -> None:
+        hit = {
+            "layer": "passage",
+            "content": "bare passage",
+            "context": "bare passage plus its neighbors",
+            "drawer_ref": "drawer12345678",
+        }
+        assert _render_hit(hit) == "bare passage plus its neighbors (from drawer12)"
+
+    def test_falls_back_to_content_when_no_context(self) -> None:
+        hit = {"layer": "passage", "content": "bare passage"}
+        assert _render_hit(hit) == "bare passage"
+
+    def test_context_respects_max_chars_truncation(self) -> None:
+        hit = {"content": "x" * 10, "context": "y" * 10}
+        assert _render_hit(hit, max_chars=3) == "yyy"
+
+
+class _ClientNoExpand:
+    """Shaped like a pre-P8 store: ``search`` has no expand params."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def search(
+        self, *, query: str, k: int, wing: str | None = None, granularity=None, **_: Any
+    ) -> Any:
+        self.calls.append({"query": query, "k": k, "wing": wing})
+        return {"results": [{"ref": "d1", "content": "fallback result"}]}
+
+
+class _ClientWithExpand:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def search(
+        self,
+        *,
+        query: str,
+        k: int,
+        wing: str | None = None,
+        granularity: str | None = None,
+        expand: str | None = None,
+        expand_neighbors: int = 1,
+        expand_char_budget: int = 40000,
+    ) -> Any:
+        self.calls.append(
+            {
+                "query": query,
+                "k": k,
+                "wing": wing,
+                "granularity": granularity,
+                "expand": expand,
+                "expand_neighbors": expand_neighbors,
+            }
+        )
+        return {
+            "results": [
+                {
+                    "ref": "d1",
+                    "content": "passage result",
+                    "context": "passage result plus neighbor",
+                    "layer": "passage",
+                }
+            ]
+        }
+
+
+class TestCallClientExpandCapabilityFallback:
+    def test_retries_without_expand_kwargs_on_type_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _ClientNoExpand()
+        monkeypatch.setattr(briefing_mod, "ensure_daemon", lambda: client)
+
+        result = briefing_mod._call_client(
+            "search",
+            query="q",
+            k=5,
+            wing="w",
+            granularity="passage",
+            expand="neighbors",
+            expand_neighbors=1,
+            expand_char_budget=40000,
+        )
+
+        assert result == {"results": [{"ref": "d1", "content": "fallback result"}]}
+        assert len(client.calls) == 1  # the single retry call
+
+    def test_passes_expand_when_supported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _ClientWithExpand()
+        monkeypatch.setattr(briefing_mod, "ensure_daemon", lambda: client)
+
+        result = briefing_mod._call_client(
+            "search",
+            query="q",
+            k=5,
+            wing="w",
+            granularity="passage",
+            expand="neighbors",
+            expand_neighbors=1,
+        )
+
+        assert result is not None
+        assert client.calls[0]["expand"] == "neighbors"
+        assert client.calls[0]["expand_neighbors"] == 1
+
+    def test_evidence_section_requests_expand_neighbors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(briefing_mod, "_detect_project_name", lambda: "proj")
+        monkeypatch.setattr(briefing_mod, "_find_project_context_dir", lambda: None)
+
+        class _Client:
+            def index(self, **kw: Any) -> Any:
+                return None
+
+        seen: dict[str, Any] = {}
+
+        def fake_call_client(method: str, **kwargs: Any) -> Any:
+            if method == "search":
+                seen.update(kwargs)
+                return {
+                    "results": [
+                        {
+                            "ref": "passage1",
+                            "layer": "passage",
+                            "drawer_ref": "drawer12345678",
+                            "content": "bare",
+                            "context": "bare plus neighbor",
+                        }
+                    ]
+                }
+            return {"index": [], "standing": [], "facts": []}.get(method, [])
+
+        monkeypatch.setattr(briefing_mod, "ensure_daemon", lambda: _Client())
+        monkeypatch.setattr(briefing_mod, "_call_client", fake_call_client)
+
+        hook = MemoryBriefingHook({"briefing_mode": "layered", "emit_events": False})
+        result = _run(hook("session:start", {"session_id": "s1", "prompt": ""}))
+
+        assert seen.get("expand") == "neighbors"
+        assert seen.get("expand_neighbors") == 1
+        assert "bare plus neighbor" in result.context_injection
+
+    def test_evidence_falls_back_when_daemon_rejects_expand(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end: a real (fake) client whose ``search`` has no expand
+        params must still deliver evidence via _call_client's retry."""
+        monkeypatch.setattr(briefing_mod, "_detect_project_name", lambda: "proj")
+        monkeypatch.setattr(briefing_mod, "_find_project_context_dir", lambda: None)
+
+        class _OldStyleClient:
+            def index(self, **kw: Any) -> Any:
+                return []
+
+            def standing(self, **kw: Any) -> Any:
+                return []
+
+            def facts(self, **kw: Any) -> Any:
+                return []
+
+            def search(
+                self, *, query: str, k: int, wing: str | None = None, layers=None
+            ):
+                return {"results": [{"ref": "d1", "content": "plain drawer evidence"}]}
+
+        monkeypatch.setattr(briefing_mod, "ensure_daemon", lambda: _OldStyleClient())
+
+        hook = MemoryBriefingHook({"briefing_mode": "layered", "emit_events": False})
+        result = _run(hook("session:start", {"session_id": "s1", "prompt": ""}))
+        assert "plain drawer evidence" in result.context_injection

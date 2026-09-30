@@ -167,6 +167,45 @@ documents, isolates answer-generation quality from retrieval quality).
   dataset to exactly these query ids and their units' documents, for a fixed
   subset run without editing AMB.
 
+- `AMPLIFIER_AMB_PACK=k` (default) or `budget` — T7.3 diversity-first
+  packing: `budget` requests a wider passage pool and greedily packs one
+  passage per distinct parent drawer (rank order) before any drawer's
+  second passage, up to `AMPLIFIER_AMB_TOKEN_BUDGET` (default `6000`,
+  cl100k tiktoken estimate when installed, else chars/4).
+  `AMPLIFIER_AMB_CANDIDATES` (default `40`) sets how many candidate
+  passages are requested from the store before packing.
+
+- **P8 (D34) "rank on passages, read on neighborhoods" — context expansion:**
+  - `AMPLIFIER_AMB_EXPAND=none` (default), `neighbors`, or `drawer` —
+    passed as `search(expand=...)`, same `inspect.signature` guard as
+    `granularity`/`rerank` (degrades silently to `none` against an older
+    pinned store). `neighbors` merges `AMPLIFIER_AMB_EXPAND_NEIGHBORS`
+    (default `1`) passages either side of each ranked hit into ONE
+    contiguous window per drawer (re-sliced from the original content, so
+    T6.2's passage overlap is never duplicated); `drawer` expands to the
+    whole parent drawer. A document's rendered content is built from the
+    UNION of every one of its hits' expansion windows, date-stamped once —
+    falls back to the pre-P8 per-passage rendering (`"\n…\n"`-joined) for
+    any document none of whose hits got an expansion window (the store's
+    own rank-ordered budget ran out for all of them, or expansion was
+    gated off, see below).
+  - `AMPLIFIER_AMB_EXPAND_TOKENS` (default `10000`) — converted to a char
+    budget (×4) and passed as `search(expand_char_budget=...)`: the
+    STORE's own greedy, rank-ordered cap on how much expansion is spent
+    per query, after which later hits keep only their own passage.
+  - `AMPLIFIER_AMB_EXPAND_ONLY_AGGREGATE=off` (default) or `on` — when
+    `on`, expansion only applies when the query text matches the
+    documented aggregate-cue list (`how many`, `how much`, `total`, `in
+    total`, `altogether`, `across`, `all the`, `each time`, `combined`,
+    `sum`); otherwise the query is treated as `AMPLIFIER_AMB_EXPAND=none`
+    for that call (plain `pack=k`/`budget` rendering, unchanged). This is
+    a benchmark-tuned ablation lens, not a general query classifier —
+    flag any config chosen with it on as benchmark-tuned.
+  - The per-query trace (`AMPLIFIER_AMB_TRACE`) and `provider.last_raw`
+    both record `expand` (the mode actually applied after aggregate-cue
+    gating), `expand_tokens`, and `expand_windows` (how many documents
+    this query actually got an expanded/merged context for).
+
 Harness resilience (read by `run.py`, off unless set): `AMPLIFIER_AMB_RETRY_DISCONNECTS=on`
 retries dropped connections; `AMPLIFIER_AMB_REQUEST_TIMEOUT_S` fails a
 never-ending generation fast; `AMPLIFIER_AMB_FALLBACK_MODEL` retries a timed-out

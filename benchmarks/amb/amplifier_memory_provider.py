@@ -51,6 +51,28 @@ __all__ = ["AmplifierMemoryProvider"]
 #: room name the same way :meth:`_room_for` derives it from tags.
 _SAFE_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789_"
 
+#: P8 (D34): the documented aggregate-cue list ``AMPLIFIER_AMB_EXPAND_ONLY_AGGREGATE``
+#: gates on -- a substring match (case-insensitive) against the query text.
+#: Kept short and literal on purpose: this is a benchmark-tuned ablation lens,
+#: not a general query classifier.
+_AGGREGATE_CUES = (
+    "how many",
+    "how much",
+    "total",
+    "in total",
+    "altogether",
+    "across",
+    "all the",
+    "each time",
+    "combined",
+    "sum",
+)
+
+
+def _is_aggregate_query(query: str) -> bool:
+    q = (query or "").lower()
+    return any(cue in q for cue in _AGGREGATE_CUES)
+
 
 def _sanitize(label: str) -> str:
     """Lowercase, ``_``-joined room/wing label -- never empty."""
@@ -103,6 +125,10 @@ class AmplifierMemoryProvider:
         pack: str | None = None,
         token_budget: int | str | None = None,
         candidates: int | str | None = None,
+        expand: str | None = None,
+        expand_neighbors: int | str | None = None,
+        expand_tokens: int | str | None = None,
+        expand_only_aggregate: bool | str | None = None,
     ) -> None:
         """``embedder``: ``"auto"`` (try FastEmbedEmbedder, degrade to lexical-only
         on any failure -- the default) or ``"none"`` (always lexical-only, never
@@ -182,6 +208,39 @@ class AmplifierMemoryProvider:
             candidates
             if candidates is not None
             else os.environ.get("AMPLIFIER_AMB_CANDIDATES", "40")
+        )
+        # P8 (D34): "rank on passages, read on neighborhoods". "expand"
+        # ("none" default, "neighbors", or "drawer") is passed to
+        # store.search ONLY when its signature accepts it (inspect.signature
+        # guard in retrieve(), same pattern as granularity/rerank above).
+        # Env fallback: AMPLIFIER_AMB_EXPAND.
+        self._expand = expand or os.environ.get("AMPLIFIER_AMB_EXPAND", "none")
+        if self._expand not in ("none", "neighbors", "drawer"):
+            raise ValueError(
+                f"expand must be 'none', 'neighbors' or 'drawer', got {self._expand!r}"
+            )
+        self._expand_neighbors = int(
+            expand_neighbors
+            if expand_neighbors is not None
+            else os.environ.get("AMPLIFIER_AMB_EXPAND_NEIGHBORS", "1")
+        )
+        # Token cap for expansion, converted to a char budget (x4, same
+        # rough estimate _estimate_tokens falls back to without tiktoken) --
+        # passed to store.search as expand_char_budget so the STORE's own
+        # rank-ordered greedy expansion respects the cap; nothing here
+        # re-truncates a hit's own "context" after the fact.
+        self._expand_tokens = int(
+            expand_tokens
+            if expand_tokens is not None
+            else os.environ.get("AMPLIFIER_AMB_EXPAND_TOKENS", "10000")
+        )
+        # Gate expansion to queries matching the aggregate-cue list
+        # (_AGGREGATE_CUES) -- off by default (expansion, when requested,
+        # always applies). Env fallback: AMPLIFIER_AMB_EXPAND_ONLY_AGGREGATE.
+        self._expand_only_aggregate = self._parse_bool_env(
+            expand_only_aggregate,
+            "AMPLIFIER_AMB_EXPAND_ONLY_AGGREGATE",
+            default="off",
         )
         self._token_encoder: Any = None
         self._token_encoder_load_attempted = False
@@ -463,6 +522,44 @@ class AmplifierMemoryProvider:
         stamp = self._date_stamp(hit)
         return f"[{stamp}] {content}" if stamp else content
 
+    def _render_expanded_group(self, hits: list[dict[str, Any]]) -> str:
+        """P8 (D34): one date-stamped block for a doc's hits, built from
+        the merged context windows the store attached
+        (``hit["context_span"]``/``hit["context"]``) -- takes the union of
+        every hit's own window (``[min(start), max(end)]``) and re-slices
+        the parent drawer ONCE, so an overlap between two hits' windows
+        (a drawer's several ranked passages often expand into overlapping
+        neighbourhoods) is naturally deduped rather than concatenated.
+
+        Falls back to the plain per-passage rendering (:meth:`_render_for_amb`)
+        when no hit in *hits* carries an expansion window -- either
+        ``expand="none"``, or the store's own char budget ran out for
+        every hit in this group (P8's "hits beyond the budget keep only
+        their passage").
+        """
+        spans: list[tuple[int, int]] = []
+        drawer_ref: Any = None
+        for h in hits:
+            span = h.get("context_span")
+            if isinstance(span, (list, tuple)) and len(span) == 2:
+                spans.append((int(span[0]), int(span[1])))
+                ref = h.get("drawer_ref")
+                if ref is None and h.get("layer") == "drawer":
+                    ref = h.get("ref")
+                if ref is not None:
+                    drawer_ref = ref
+        if not spans or drawer_ref is None:
+            return "\n\u2026\n".join(self._render_for_amb(h) for h in hits)
+        start = min(s for s, _e in spans)
+        end = max(e for _s, e in spans)
+        store = self._ensure_store()
+        drawer_text = store._payload_text(drawer_ref, None)  # type: ignore[attr-defined]
+        body = drawer_text[start:end].strip()
+        if not self._dates:
+            return body
+        stamp = self._date_stamp(hits[0])
+        return f"[{stamp}] {body}" if stamp else body
+
     def _doc_id_for_hit(self, hit: dict[str, Any]) -> str:
         """AMB's own doc id for one search hit.
 
@@ -513,6 +610,22 @@ class AmplifierMemoryProvider:
         if "current_model_id" in search_params and embedder is not None:
             search_kwargs["current_model_id"] = getattr(embedder, "model_id", None)
 
+        # P8 (D34): gate expansion to aggregate-shaped queries when
+        # AMPLIFIER_AMB_EXPAND_ONLY_AGGREGATE=on; otherwise the configured
+        # mode always applies. Falls back to "none" (unchanged pack=k/budget
+        # rendering) whenever the store doesn't support "expand" yet.
+        effective_expand = self._expand
+        if effective_expand != "none" and self._expand_only_aggregate:
+            effective_expand = (
+                effective_expand if _is_aggregate_query(query) else "none"
+            )
+        if effective_expand != "none" and "expand" in search_params:
+            search_kwargs["expand"] = effective_expand
+            search_kwargs["expand_neighbors"] = self._expand_neighbors
+            search_kwargs["expand_char_budget"] = self._expand_tokens * 4
+        else:
+            effective_expand = "none"
+
         # T7.3: "budget" packing requests a wider candidate pool (up to
         # max_passages_per_drawer per drawer, when the store supports it)
         # and then packs diversity-first to a token budget, INSTEAD of
@@ -549,10 +662,19 @@ class AmplifierMemoryProvider:
         scores: dict[str, float] = {}
         arms: dict[str, Any] = {}
         layer: dict[str, Any] = {}
+        expand_windows = 0
         for doc_id in order:
             group = grouped[doc_id]
             ordered_hits = [h for _, h in sorted(group["passages"], key=lambda p: p[0])]
-            content = "\n\u2026\n".join(self._render_for_amb(h) for h in ordered_hits)
+            if effective_expand != "none" and any(
+                "context_span" in h for h in ordered_hits
+            ):
+                content = self._render_expanded_group(ordered_hits)
+                expand_windows += 1
+            else:
+                content = "\n\u2026\n".join(
+                    self._render_for_amb(h) for h in ordered_hits
+                )
             first_hit = group["first_hit"]
             documents.append(
                 Document(
@@ -581,6 +703,12 @@ class AmplifierMemoryProvider:
             "pack": self._pack,
             "packed_passage_count": len(hits),
             "packed_tokens": packed_tokens,
+            # P8 (D34): expansion mode actually applied to THIS query (after
+            # aggregate-cue gating), the token cap, and how many documents
+            # actually got an expanded (merged-window) context.
+            "expand": effective_expand,
+            "expand_tokens": self._expand_tokens,
+            "expand_windows": expand_windows,
         }
         trace = os.environ.get("AMPLIFIER_AMB_TRACE")
         if trace:
@@ -605,6 +733,9 @@ class AmplifierMemoryProvider:
                             "packed_doc_ids": [d.id for d in documents],
                             "packed_passage_count": len(hits),
                             "packed_tokens": packed_tokens,
+                            "expand": effective_expand,
+                            "expand_tokens": self._expand_tokens,
+                            "expand_windows": expand_windows,
                         }
                     )
                     + "\n"

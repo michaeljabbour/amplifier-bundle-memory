@@ -223,12 +223,19 @@ def _call_client(method: str, **kwargs: Any) -> Any:
     observed via ``emit_event``, unlike a silently-swallowed subprocess
     failure.
 
-    T6.3 capability fallback: if ``granularity`` is among ``kwargs`` and the
+    T6.3/P8 capability fallback: if ``granularity`` and/or ``expand``/
+    ``expand_neighbors``/``expand_char_budget`` are among ``kwargs`` and the
     call raises ``TypeError`` (an older store's ``search`` doesn't accept
-    it), retry once without it. Any other failure falls through to the
-    existing daemon-unavailable handling below.
+    one of them), retry once with every such key stripped. Any other
+    failure falls through to the existing daemon-unavailable handling below.
     """
     global _CALL_FAILURES
+    _CAPABILITY_KEYS = (
+        "granularity",
+        "expand",
+        "expand_neighbors",
+        "expand_char_budget",
+    )
     try:
         client = ensure_daemon()
         if client is None:
@@ -236,9 +243,9 @@ def _call_client(method: str, **kwargs: Any) -> Any:
         try:
             return getattr(client, method)(**kwargs)
         except TypeError:
-            if "granularity" in kwargs:
+            if any(k in kwargs for k in _CAPABILITY_KEYS):
                 fallback_kwargs = {
-                    k: v for k, v in kwargs.items() if k != "granularity"
+                    k: v for k, v in kwargs.items() if k not in _CAPABILITY_KEYS
                 }
                 return getattr(client, method)(**fallback_kwargs)
             raise
@@ -337,7 +344,9 @@ def _render_hit(
     ``filed_at``, ``proof_count``) are optional -- absence degrades to the
     plain-content case, never an error.
     """
-    content = (hit.get("content") or hit.get("text") or "").strip()
+    content = (
+        hit.get("context") or hit.get("content") or hit.get("text") or ""
+    ).strip()
     if max_chars is not None:
         content = content[:max_chars]
     stamp = _date_stamp(hit)
@@ -827,6 +836,14 @@ def _evidence_section(
     it on ``TypeError`` (an older store's ``search`` rejects the kwarg), so
     this degrades silently to whole-drawer hits on an older pinned daemon.
 
+    P8 (D34): also requests ``expand="neighbors"``/``expand_neighbors=1``
+    -- one passage either side of each hit is merged into its own
+    ``context``, still within this section's EXISTING ``max_chars=300``
+    per-hit budget (:func:`_render_hit` prefers ``context`` over ``content``
+    when present). Same capability-probe fallback as ``granularity``: an
+    older store's ``search`` that rejects the kwarg degrades silently to
+    unexpanded hits.
+
     T7.3: hits are reordered diversity-first (:func:`_diversify_hits`) before
     rendering -- the best-ranked passage of every distinct parent drawer
     appears before any drawer's SECOND passage, so a multi-session recall
@@ -842,6 +859,8 @@ def _evidence_section(
             wing=wing,
             layers=["drawer"],
             granularity="passage",
+            expand="neighbors",
+            expand_neighbors=1,
         )
         or {}
     )
