@@ -1,5 +1,172 @@
 # Experiment Journal
 
+## 2026-09-30 — P8 follow-up: D13 campaign #4 (context expansion: rank on passages, read on neighbourhoods)
+
+**Hypothesis (D34):** C misses multi-session answers because a few ~300-token
+passages leave out details inside sessions it already retrieves. If ranking
+stays on passages but the top hits are read with more of their session
+(neighbour passages or the whole drawer), capped at 10–14k tokens, LME-S QA
+should reach A + 5 (60.8%) and the hybrid baseline (62.2%) without losing
+temporal QA or LoCoMo.
+
+**Method:**
+
+- Code: `da67607` (branch `feat/memory-layers`), plus one uncommitted
+  harness-only change (see "Harness defect found"). AMB `03c1d0f`, venv
+  `/tmp/amb-venv` (pytest and pytest-asyncio had to be reinstalled; the adapter
+  suite gives 40 passed). Answer and judge were both `gemini-2.5-flash-lite`,
+  with the same robustness settings as campaign #3 (`RETRY_DISCONNECTS=on`,
+  `REQUEST_TIMEOUT_S=90`, `FALLBACK_MODEL=gemini-2.5-flash`; "strict" counts
+  fallback-answered rows as wrong). Scripts and outputs are in
+  `/tmp/amb-runs/t68/`: `cfg.sh`, `drive.sh`, `clone.sh`, `chain1-3.sh`,
+  `analyze.py`, `fb.py`, `rall.py`, `mcn.py`, plus `warmrep.py`, a no-LLM
+  replay that opens a store, runs the store's own eager build (as the daemon
+  does, D33), then times `retrieve()` through the adapter. Jobs ran one at a
+  time under nohup. Host load average was 4–13 from unrelated work.
+- Configs: all use rrf, passage granularity, dates on, rerank off, MiniLM and
+  `PACK=k`.
+  - **C**: `EXPAND=none` (same-day reference)
+  - **N1**: `EXPAND=neighbors NEIGHBORS=1 EXPAND_TOKENS=10000`
+  - **N2**: `EXPAND=neighbors NEIGHBORS=2 EXPAND_TOKENS=14000`
+  - **D4**: `EXPAND=drawer EXPAND_TOKENS=14000`
+  - **G**: D4 + `EXPAND_ONLY_AGGREGATE=on` (47 of the 100 subset queries
+    matched a cue)
+- Reuse of ingested stores: expansion does not change ingestion. Every
+  subset config ran with `--skip-ingestion` on an APFS clone of campaign #3's
+  `sub-C` store. Full LME-S D4 ran on a clone of campaign #3's full `lme-C`
+  store (1.5 GB, 500 wings). LoCoMo D4 was ingested fresh (16 s). So C and D4
+  differ only in retrieval and rendering. Same-day C on the subset reproduced
+  campaign #3's C (56 vs 57, one discordant question).
+- Latency is reported two ways. **As-run** is the harness's retrieve time on
+  a reopened store: the first query pays the cold build and each wing's first
+  query builds its partition. **Warm** comes from `warmrep.py` after the eager
+  build.
+
+**Harness defect found (fixed, uncommitted, output-identical):** in the
+first N1 and N2 runs, retrieve took 13–18 s per query. By contrast, C took
+155 ms and the store's own `search(expand=...)` took about 4 ms. The profile
+showed that `_render_expanded_group` in the adapter called
+`store._payload_text(drawer_ref, None)`. With no fold available, every
+drawer went through a kernel `get_cell`, which regenerates the whole log:
+2.0–2.7 s per drawer on the 0.3 GB store, dominated by 5M event re-hashes. The
+fix passes the store's fold snapshot, which is what the store's own expansion
+already does. Refs are content-addressed and six sampled drawers were
+byte-identical on both paths, so the rendered context and the subset QA
+results do not change. Only latency does. N1, N2 and D4 ran before the fix,
+and G and all full runs ran after it. Product note: a `_payload_text` miss
+without a fold costs O(log) per call, not "cheap on repeat" as its docstring
+says. The product's briefing reads `hit["context"]` and does not take this
+path.
+
+**Results — subset (100 LME-S questions; choice made here only):**
+
+| Config | QA (strict) | multi-sess /27 | temporal /27 | KU /15 | SSU /14 | SSA /11 | pref /6 | R@5 / R@10 | ctx tok/q | as-run p50 / p95 ms | warm p50 / p95 ms |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| C | 56 (56) | 11 | 10 | 12 | 12 | 8 | 3 | 0.944 / 0.949 | 2,362 | 155 / 169 | 5.0 / 6.7 |
+| N1 | 58 (58) | 13 | 7 | 14 | 13 | 11 | 0 | same | 5,715 | 14,420 / 18,409 † | 5.2 / 7.0 |
+| N2 | 64 (64) | 14 | 9 | 13 | 14 | 11 | 3 | same | 7,294 | 13,996 / 18,199 † | 5.0 / 6.7 |
+| **D4** | **66 (66)** | 12 | **14** | 14 | 14 | 11 | 1 | same | 9,026 | 6,282 / 11,793 † | 4.9 / 6.5 |
+| G (D4, aggregate-gated) | 61 (61) | 11 | 13 | 14 | 12 | 8 | 3 | same | 5,443 | 159 / 174 | 4.8 / 6.6 |
+
+† Before the harness fix. Warm numbers are after the fix, from one warm
+process over the same store (eager build 32 s, 100 wings). No subset run had
+a fallback or unparseable row. Ranking is identical across configs:
+per-type recall and coverage from `rall.py` match C exactly. D4 expanded
+2.8 of about 6 documents per query on average before the 14k cap. N1 and N2
+expanded all of them.
+
+Paired against C: N1 10 vs 8 discordant (p=0.81), N2 16 vs 8 (p=0.15),
+D4 20 vs 10 (p=0.099). G vs D4: 6 vs 11 (p=0.33).
+
+**Choice:** D4. It had the highest QA and was the only expanded config with
+temporal QA at or above C's (14 vs 10). Both neighbour windows lost temporal
+questions. G, the benchmark-shaped gated variant, scored 5 below D4 and was
+not chosen. The unconditional config is preferred anyway.
+
+**Results — full LME-S (500), D4 vs campaign #3's references:**
+
+| Metric | A (legacy, 2026-09-28) | C (campaign #3) | H hybrid (campaign #3) | **D4** |
+|---|---|---|---|---|
+| QA | 55.8% | 59.4% (strict 59.0) | 62.2% (strict 61.4) | **71.8% (strict 70.8)** |
+| knowledge-update /78 | 47 | 55 | 58 | 65 |
+| multi-session /133 | 66 | 51 | 77 | 74 |
+| single-session-assistant /56 | 52 | 50 | 56 | 55 |
+| single-session-preference /30 | 8 | 10 | 6 | 9 |
+| single-session-user /70 | 55 | 53 | 63 | 62 |
+| temporal-reasoning /133 | 51 | 78 | 51 | **94** |
+| R@5 / R@10 (479 with gold) | 0.912 / 0.958 | 0.955 / 0.967 | — | 0.953 / 0.965 ‡ |
+| context tok/q | 28,869 | 2,368 | 23,360 | 9,097 (31.5% of A) |
+| retrieve p50 / p95 ms, as-run | — | 7.7 / 12.9 (in-process ingest) | 791 / 1,537 | 197 / 230 (first query 656 s cold build) |
+| retrieve p50 / p95 ms, warm | — | 5.2 / 6.7 (same replay) | — | **5.5 / 7.0** |
+| fallback / unparseable rows | — | 2 / 0 | 5 / 0 | 6 / 0 |
+
+‡ Measured on the reopened store. The ranking config is the same as C's, so
+the −0.002 gap is a reopen-versus-in-process difference and was not
+investigated. Warm replay on the full store: open 16 s, eager build 776 s
+(500 wings), then 500 queries per config.
+
+Paired tests (McNemar, exact two-sided):
+
+- **D4 vs A:** 359 vs 279, with 108 questions only D4 got right and 28 only A
+  got right; χ²=45.9, **p<1e-6**. Strict: 354 vs 279, 104 vs 29, p<1e-6.
+  Per type: temporal +43 (p<1e-6), knowledge-update +18 (p=0.0005),
+  multi-session +8 (p=0.26).
+- **D4 vs H:** 359 vs 311, with 89 only-D4 and 41 only-H; χ²=17.0,
+  **p<0.001**. Strict: 354 vs 307, 86 vs 39, p=3e-5. Multi-session 74 vs 77
+  (p=0.76), so D4 closes the gap and the difference is no longer
+  significant. Temporal 94 vs 51 (p<1e-6).
+- **D4 vs C:** 359 vs 297, 99 vs 37, χ²=27.4, p<1e-6. Multi-session +23
+  (p=0.0004), temporal +16 (p=0.017), single-session-user +9 (p=0.035).
+
+**Results — full LoCoMo (1,540), fresh ingest:**
+
+| Metric | A | C (D31) | H | **D4** |
+|---|---|---|---|---|
+| QA | 67.7% | 81.4% (strict 81.3) | 74.5% (strict 73.9) | **83.5% (strict 82.7)** |
+| temporal /321 | — | 245 | — | 253 |
+| multi-hop /96 | — | 60 | — | 68 |
+| single-hop /282 | — | 190 | — | 198 |
+| open-domain /841 | — | 758 | — | 767 |
+| R@5 / R@10 (session) | 0.511 / 0.695 | 0.820 / 0.877 | — | 0.820 / 0.877 |
+| context tok/q | 14,678 | 2,918 (19.9%) | 22,253 | **11,072 (75.4% of A)** |
+| retrieve p50 / p95 ms | 17 / 29 | 10 / 60 | 47 / 72 | 10 / 17 |
+| fallback rows | 34 | 3 | 13 | 15 |
+
+D4 vs C: 117 vs 84 discordant, p=0.024 (strict 116 vs 94, p=0.15). D4 vs
+H: 256 vs 117, p<1e-6. D4 vs A: 344 vs 100, χ²=133. No LoCoMo category went
+down.
+
+**D13 bar (A = legacy proxy for v2.0.1; candidate = D4):**
+
+| Item | Bar | D4 | Verdict |
+|---|---|---|---|
+| (a) LME-S QA ≥ A + 5 | ≥ 60.8% | 71.8% (strict 70.8), +16.0, p<1e-6 | **met** |
+| (b) LoCoMo QA ≥ A + 5 | ≥ 72.7% | 83.5% (strict 82.7), +15.8, χ²=133 | **met** |
+| (c) QA ≥ hybrid baseline, like-for-like | LME-S 62.2 / LoCoMo 74.5 | 71.8 (p<0.001) / 83.5 (p<1e-6) | **met on both** |
+| (d) PMB R@10 ≥ 0.941 | 0.941 | 0.970 (D31); not re-run | **met** (expansion changes rendering, not ranking; subset and LoCoMo R@k are identical to C's) |
+| (e) context tokens ≤ 50% of A | ≤ 50% | LME-S 31.5%; **LoCoMo 75.4%** | **met on LME-S, unmet on LoCoMo** |
+| (f) retrieve p95 ≤ 300 ms at full store, zero LLM calls | 300 ms | warm 7.0 ms on the 1.5 GB store; as-run 230 ms on a reopened store | **met** after the one-time eager build (776 s) |
+
+**Caveats:** the candidate was chosen on the fixed subset only, and the full
+runs were confirmations. A is still the 2026-09-28 run. H and C (full) come
+from campaign #3 on the same store and harness. The per-type tests are
+uncorrected. The (e) failure on LoCoMo comes from the fixed 14k cap: LoCoMo
+sessions are short, so whole drawers fit and the cap is rarely reached. The
+subset as-run latencies for N1, N2 and D4 include the harness defect above.
+Only L1 is exercised.
+
+**Conclusion:** reading the parent drawer of the top-ranked passages is the
+lever. On LME-S, QA rose from 59.4 to 71.8. Multi-session recovered to H's
+level (74 vs 77), and temporal gained further (94). (a) and (c) are now met
+on both suites and LoCoMo did not regress (83.5 vs 81.4). The remaining
+unmet item is (e) on LoCoMo, at 75% of A's tokens. Next lever: make the
+expansion budget relative rather than absolute. Two options, both tuned on
+subsets only: cap expansion at a multiple of the unexpanded context, or at
+half of what whole-session context would cost for that query. Then re-check
+LoCoMo QA at ≤ 7.3k tokens per question. Also commit the adapter fold fix,
+and consider making `_payload_text` fall back to a fold snapshot rather than
+a full-log kernel resolve.
+
 ## 2026-09-29 — T7 follow-up: D13 campaign #3 (token-budget packing, full LME-S for C and the hybrid baseline)
 
 **Hypothesis:** C's multi-session deficit on LongMemEval-S (LME-S) comes from

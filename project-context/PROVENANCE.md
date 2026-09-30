@@ -612,3 +612,22 @@ are preferred; a question-shape-conditional variant is tried only as an
 ablation and flagged as benchmark-tuned if chosen. Choices on the subset only;
 one full LongMemEval-S confirmation; LoCoMo regression check.
 **Status:** derived.
+
+### D35 — Campaign #4: expansion closes LongMemEval-S; 5 of 6 D13 items met
+**Decision:** default evidence reading for answering = D4 — rank on passages,
+read the whole parent drawer of the top hits, capped at 14k tokens.
+**Results (EXPERIMENT_JOURNAL 2026-09-30):** LongMemEval-S 71.8% (strict
+70.8) vs A 55.8 (p<1e-6) and the harness's hybrid baseline 62.2 (p<0.001);
+multi-session now level with hybrid (74 vs 77), temporal 94 vs 51. LoCoMo
+83.5% vs C 81.4 / hybrid 74.5 / A 67.7. Tokens: 31.5% of A on LongMemEval-S,
+**75.4% on LoCoMo (bar (e) unmet there)**. Warm p95 7.0 ms on the 1.5 GB
+store (one-time eager build 776 s). Unconditional variant chosen; the
+question-shape-gated variant scored lower and was not used.
+**Also:** the benchmark adapter's expansion path forced a whole-log read per
+drawer (13–18 s per retrieve) — fixed to use the warm index; answers
+unchanged. The store's `_payload_text` slow path without a warm index is a
+product-side trap to close.
+**Next:** make the expansion budget relative (e.g. ≤ half of the full-session
+cost for the query) to bring LoCoMo tokens under 50% of A without losing QA;
+tune on subsets only.
+**Status:** derived.
