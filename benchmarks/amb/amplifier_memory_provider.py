@@ -553,7 +553,13 @@ class AmplifierMemoryProvider:
         start = min(s for s, _e in spans)
         end = max(e for _s, e in spans)
         store = self._ensure_store()
-        drawer_text = store._payload_text(drawer_ref, None)  # type: ignore[attr-defined]
+        # Resolve through the store's warm index (fold payload join / LRU),
+        # the same way the store's own expansion does. Passing ``None``
+        # forces a kernel get_cell, which on a reopened store regenerates
+        # the whole log per drawer (~2.3 s at 0.3 GB, measured campaign #4).
+        fold_snapshot = getattr(store, "_fold_snapshot", None)
+        fold = fold_snapshot() if callable(fold_snapshot) else None
+        drawer_text = store._payload_text(drawer_ref, fold)  # type: ignore[attr-defined]
         body = drawer_text[start:end].strip()
         if not self._dates:
             return body
